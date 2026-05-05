@@ -4,6 +4,18 @@
 //! The session manager depends on the **traits** rather than concrete
 //! types so that subsystems can be mocked in tests or swapped out
 //! without touching the session layer.
+//!
+//! ## Design Rationale
+//!
+//! Using trait objects (`Arc<dyn Trait>`) allows:
+//! - Easy mocking for unit tests
+//! - Swapping implementations without changing session code
+//! - Clean dependency inversion (session doesn't know about GStreamer, DRM, etc.)
+//!
+//! ## Thread Safety
+//!
+//! All traits require `Send + Sync` so they can be wrapped in `Arc`
+//! and shared across tokio tasks.
 
 use async_trait::async_trait;
 
@@ -27,8 +39,13 @@ pub trait ResolverTrait: Send + Sync {
 /// Controls the GStreamer-based media playback pipeline.
 #[async_trait]
 pub trait PlaybackTrait: Send + Sync {
-    /// Begin playback of `url`.
-    async fn play(&self, url: &str) -> Result<(), Box<dyn std::error::Error + Send + Sync>>;
+    /// Begin playback of `url` through the given SOCKS5 proxy.
+    async fn play(
+        &self,
+        url: &str,
+        socks_addr: &str,
+        isolation_username: &str,
+    ) -> Result<(), Box<dyn std::error::Error + Send + Sync>>;
 
     /// Pause the running pipeline.
     async fn pause(&self) -> Result<(), Box<dyn std::error::Error + Send + Sync>>;
@@ -47,6 +64,9 @@ pub trait PlaybackTrait: Send + Sync {
 
     /// Return the current playback position in milliseconds.
     async fn position_ms(&self) -> Result<u64, Box<dyn std::error::Error + Send + Sync>>;
+
+    /// Return the duration in milliseconds.
+    async fn duration_ms(&self) -> Result<Option<u64>, Box<dyn std::error::Error + Send + Sync>>;
 }
 
 // ── Display ──────────────────────────────────────────────────────────
@@ -73,8 +93,11 @@ pub trait TorTrait: Send + Sync {
     async fn ensure_running(&self) -> Result<(), Box<dyn std::error::Error + Send + Sync>>;
 
     /// Return the SOCKS5 proxy address (e.g. `127.0.0.1:9050`).
-    fn socks_addr(&self) -> &str;
+    fn socks_addr(&self) -> String;
 
     /// Check whether the proxy is currently responsive.
     async fn health_check(&self) -> Result<bool, Box<dyn std::error::Error + Send + Sync>>;
+
+    /// Compute the per-hostname SOCKS5 isolation username.
+    fn isolation_username(&self, hostname: &str) -> String;
 }

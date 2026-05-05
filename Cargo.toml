@@ -13,7 +13,7 @@ resolver = "2"
 [workspace.package]
 version = "0.1.0"
 edition = "2021"
-rust-version = "1.70"
+rust-version = "1.75"
 license = "MIT"
 
 [workspace.dependencies]
@@ -27,3 +27,7 @@ tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 url = "2"
 uuid = { version = "1", features = ["v4"] }
 chrono = { version = "0.4", features = ["serde"] }
+async-trait = "0.1"
+sha2 = "0.10"
+hex = "0.4"
+bytes = "1"

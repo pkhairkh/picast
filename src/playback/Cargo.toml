@@ -2,17 +2,26 @@
 name = "picast-playback"
 version.workspace = true
 edition.workspace = true
+description = "GStreamer playback engine with V4L2 H.264 hardware decode for PiCast"
 
 [dependencies]
 picast-display = { path = "../display" }
-gstreamer = "0.22"
-gstreamer-video = "0.22"
-tokio.workspace = true
-serde.workspace = true
-thiserror.workspace = true
-tracing.workspace = true
-anyhow.workspace = true
+gstreamer = "0.23"
+gstreamer-app = "0.23"
+gstreamer-video = "0.23"
+gstreamer-audio = "0.23"
+tokio = { workspace = true, features = ["sync", "time"] }
+serde = { workspace = true }
+serde_json = { workspace = true }
+thiserror = { workspace = true }
+tracing = { workspace = true }
+anyhow = { workspace = true }
 
 [dev-dependencies]
-tokio = { workspace = true }
+tokio = { workspace = true, features = ["rt-multi-thread", "macros", "time", "sync"] }
 serde_json = { workspace = true }
+
+[features]
+default = []
+# Disable GStreamer init for testing without a display server
+test-harness = []

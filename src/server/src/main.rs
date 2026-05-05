@@ -3,44 +3,181 @@
 //! Initializes the tracing subscriber, loads configuration, wires up all
 //! subsystems (session manager, resolver, playback, display, Tor), and
 //! runs the main event loop with graceful shutdown on SIGINT / SIGTERM.
+//!
+//! ## Startup Order
+//!
+//! ```text
+//! Tor → Display → Playback → Resolver → Session → HTTP → WebSocket → DLNA
+//! ```
+//!
+//! Each subsystem depends on the ones before it. If any fails to
+//! initialise, the server exits with an error.
 
-use anyhow::Result;
+use anyhow::{Result, anyhow};
 use std::sync::Arc;
 use tokio::signal;
 use tokio::sync::broadcast;
-use tracing::{error, info};
+use tracing::{error, info, warn};
+
+// ── Trait adapters ───────────────────────────────────────────────────
+//
+// These wrappers implement the session trait interfaces by delegating
+// to the concrete subsystem types. They bridge the gap between the
+// concrete crates and the session manager's trait-object requirements.
+
+/// Adapter: `picast_tor::TorManager` → `TorTrait`
+struct TorAdapter(Arc<picast_tor::TorManager>);
+
+#[async_trait::async_trait]
+impl picast_session::interfaces::TorTrait for TorAdapter {
+    async fn ensure_running(&self) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+        self.0.ensure_running(30000).await?;
+        Ok(())
+    }
+
+    fn socks_addr(&self) -> String {
+        self.0.socks_addr()
+    }
+
+    async fn health_check(&self) -> Result<bool, Box<dyn std::error::Error + Send + Sync>> {
+        let health = self.0.health_check().await?;
+        Ok(health.is_healthy)
+    }
+
+    fn isolation_username(&self, hostname: &str) -> String {
+        picast_tor::TorManager::isolation_username(hostname)
+    }
+}
+
+/// Adapter: `picast_display::DisplayManager` → `DisplayTrait`
+struct DisplayAdapter(Arc<tokio::sync::Mutex<picast_display::DisplayManager>>);
+
+#[async_trait::async_trait]
+impl picast_session::interfaces::DisplayTrait for DisplayAdapter {
+    async fn acquire(&self) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+        let mut dm = self.0.lock().await;
+        dm.acquire()?;
+        Ok(())
+    }
+
+    async fn release(&self) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+        let mut dm = self.0.lock().await;
+        dm.release()?;
+        Ok(())
+    }
+
+    async fn resolution(&self) -> Result<(u32, u32), Box<dyn std::error::Error + Send + Sync>> {
+        let dm = self.0.lock().await;
+        Ok(dm.resolution()?)
+    }
+}
+
+/// Adapter: `picast_playback::PlaybackEngine` → `PlaybackTrait`
+struct PlaybackAdapter(Arc<picast_playback::PlaybackEngine>);
+
+#[async_trait::async_trait]
+impl picast_session::interfaces::PlaybackTrait for PlaybackAdapter {
+    async fn play(
+        &self,
+        url: &str,
+        socks_addr: &str,
+        isolation_username: &str,
+    ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+        self.0.play(url, socks_addr, isolation_username).await?;
+        Ok(())
+    }
+
+    async fn pause(&self) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+        self.0.pause().await?;
+        Ok(())
+    }
+
+    async fn resume(&self) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+        self.0.resume().await?;
+        Ok(())
+    }
+
+    async fn stop(&self) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+        self.0.stop().await?;
+        Ok(())
+    }
+
+    async fn seek(&self, position_ms: u64) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+        self.0.seek(position_ms).await?;
+        Ok(())
+    }
+
+    async fn set_volume(&self, volume: f64) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+        self.0.set_volume(volume).await?;
+        Ok(())
+    }
+
+    async fn position_ms(&self) -> Result<u64, Box<dyn std::error::Error + Send + Sync>> {
+        Ok(self.0.position_ms().await?)
+    }
+
+    async fn duration_ms(&self) -> Result<Option<u64>, Box<dyn std::error::Error + Send + Sync>> {
+        Ok(self.0.duration_ms().await?)
+    }
+}
+
+/// Adapter: `picast_resolver::Resolver` → `ResolverTrait`
+struct ResolverAdapter(Arc<picast_resolver::Resolver>);
+
+#[async_trait::async_trait]
+impl picast_session::interfaces::ResolverTrait for ResolverAdapter {
+    async fn resolve(&self, url: &str) -> Result<String, Box<dyn std::error::Error + Send + Sync>> {
+        let result = self.0.resolve(url).await?;
+        Ok(result.direct_url)
+    }
+}
+
+// ── Application Configuration ────────────────────────────────────────
 
 /// Application configuration loaded from environment / config file.
 struct AppConfig {
-    /// HTTP API listen address (e.g. "0.0.0.0:8080").
+    /// HTTP API listen address.
     http_addr: String,
-    /// WebSocket listen address (e.g. "0.0.0.0:8081").
+    /// WebSocket listen address.
     ws_addr: String,
     /// DLNA friendly name advertised on the network.
     dlna_name: String,
-    /// Path to the Tor SOCKS proxy (e.g. "127.0.0.1:9050").
+    /// Tor SOCKS5 proxy address.
     tor_socks: String,
+    /// DRM device path.
+    drm_device: String,
+    /// Session database path.
+    db_path: String,
 }
 
 impl AppConfig {
     /// Load configuration from environment variables with sensible defaults.
     fn from_env() -> Self {
         Self {
-            http_addr: std::env::var("PICAST_HTTP_ADDR").unwrap_or_else(|_| "0.0.0.0:8080".into()),
-            ws_addr: std::env::var("PICAST_WS_ADDR").unwrap_or_else(|_| "0.0.0.0:8081".into()),
-            dlna_name: std::env::var("PICAST_DLNA_NAME").unwrap_or_else(|_| "PiCast".into()),
+            http_addr: std::env::var("PICAST_HTTP_ADDR")
+                .unwrap_or_else(|_| "0.0.0.0:8585".into()),
+            ws_addr: std::env::var("PICAST_WS_ADDR")
+                .unwrap_or_else(|_| "0.0.0.0:8586".into()),
+            dlna_name: std::env::var("PICAST_DLNA_NAME")
+                .unwrap_or_else(|_| "PiCast".into()),
             tor_socks: std::env::var("PICAST_TOR_SOCKS")
                 .unwrap_or_else(|_| "127.0.0.1:9050".into()),
+            drm_device: std::env::var("PICAST_DRM_DEVICE")
+                .unwrap_or_else(|_| "".into()), // auto-detect
+            db_path: std::env::var("PICAST_DB_PATH")
+                .unwrap_or_else(|_| "/var/lib/picast/sessions.db".into()),
         }
     }
 }
 
-/// Initialize the `tracing-subscriber` with an `env-filter` so the user can
-/// control log verbosity via the `RUST_LOG` environment variable.
+/// Initialize the `tracing-subscriber` with an `env-filter`.
 fn init_tracing() {
     use tracing_subscriber::EnvFilter;
     tracing_subscriber::fmt()
-        .with_env_filter(EnvFilter::from_default_env().add_directive("info".parse().unwrap()))
+        .with_env_filter(
+            EnvFilter::from_default_env()
+                .add_directive("info".parse().unwrap()),
+        )
         .with_thread_ids(true)
         .with_file(true)
         .with_line_number(true)
@@ -55,7 +192,13 @@ async fn main() -> Result<()> {
 
     // ── 2. Configuration ──────────────────────────────────────────────
     let config = AppConfig::from_env();
-    info!(http_addr = %config.http_addr, ws_addr = %config.ws_addr, "configuration loaded");
+    info!(
+        http_addr = %config.http_addr,
+        ws_addr = %config.ws_addr,
+        dlna_name = %config.dlna_name,
+        tor_socks = %config.tor_socks,
+        "configuration loaded"
+    );
 
     // ── 3. Shutdown signal ────────────────────────────────────────────
     let (shutdown_tx, _) = broadcast::channel::<()>(1);
@@ -66,30 +209,120 @@ async fn main() -> Result<()> {
         }
     };
 
-    // ── 4. Component creation ─────────────────────────────────────────
-    // TODO: replace stubs with real component initialisation once each
-    //       crate exposes a `new(…)` / `start(…)` API.
+    // ── 4. Subsystem initialisation ───────────────────────────────────
+    info!("initialising subsystems");
 
-    let _tor_manager = Arc::new(()); // picast_tor::TorManager::new(&config.tor_socks);
-    let _display = Arc::new(());     // picast_display::DisplayManager::new()?;
-    let _playback = Arc::new(());    // picast_playback::PlaybackEngine::new(_display.clone())?;
-    let _resolver = Arc::new(());    // picast_resolver::Resolver::new(_tor_manager.clone());
-    let _session = Arc::new(());     // picast_session::SessionManager::new(_resolver, _playback, _display, _tor_manager)?;
+    // 4a. Tor
+    let tor_manager = Arc::new(picast_tor::TorManager::new(&config.tor_socks));
+    info!(socks = %config.tor_socks, "Tor manager created");
 
-    let _http = Arc::new(());        // picast_protocols::HttpApiServer::new(&config.http_addr, _session.clone())?;
-    let _ws = Arc::new(());          // picast_protocols::WebSocketServer::new(&config.ws_addr, _session.clone())?;
-    let _dlna = Arc::new(());        // picast_protocols::DlnaRenderer::new(&config.dlna_name, _session.clone())?;
+    // 4b. Display
+    let display_manager = Arc::new(tokio::sync::Mutex::new(
+        picast_display::DisplayManager::new(&config.drm_device)?,
+    ));
+    info!(device = %config.drm_device, "Display manager created");
+
+    // 4c. Playback
+    let playback_engine = Arc::new(
+        picast_playback::PlaybackEngine::new(
+            picast_playback::PipelineConfig::default(),
+        )?,
+    );
+    info!("Playback engine created");
+
+    // 4d. Resolver
+    let resolver = Arc::new(picast_resolver::Resolver::new(tor_manager.clone()));
+    info!("Resolver created");
+
+    // ── 5. Session manager ────────────────────────────────────────────
+    // Wrap concrete types in trait adapters.
+    let tor_trait: Arc<dyn picast_session::interfaces::TorTrait> =
+        Arc::new(TorAdapter(tor_manager.clone()));
+    let display_trait: Arc<dyn picast_session::interfaces::DisplayTrait> =
+        Arc::new(DisplayAdapter(display_manager.clone()));
+    let playback_trait: Arc<dyn picast_session::interfaces::PlaybackTrait> =
+        Arc::new(PlaybackAdapter(playback_engine.clone()));
+    let resolver_trait: Arc<dyn picast_session::interfaces::ResolverTrait> =
+        Arc::new(ResolverAdapter(resolver.clone()));
+
+    let session = Arc::new(
+        picast_session::SessionManager::new(
+            &config.db_path,
+            resolver_trait,
+            playback_trait,
+            display_trait,
+            tor_trait,
+        )?,
+    );
+    info!(db = %config.db_path, "Session manager created");
+
+    // ── 6. Protocol servers ───────────────────────────────────────────
+    let http_server = picast_protocols::HttpApiServer::new(
+        &config.http_addr,
+        session.clone(),
+    );
+    let ws_server = picast_protocols::WebSocketServer::new(
+        &config.ws_addr,
+        session.clone(),
+    );
+    let dlna_renderer = picast_protocols::DlnaRenderer::new(
+        &config.dlna_name,
+        &config.tor_socks,
+    );
 
     info!("all components initialised");
 
-    // ── 5. Run until shutdown ─────────────────────────────────────────
+    // ── 7. Start servers ──────────────────────────────────────────────
+    let shutdown_http = shutdown_tx.subscribe();
+    let shutdown_ws = shutdown_tx.subscribe();
+
+    let http_handle = tokio::spawn(async move {
+        if let Err(e) = http_server.start(async {
+            let mut rx = shutdown_http;
+            let _ = rx.recv().await;
+        }).await {
+            error!(error = %e, "HTTP server error");
+        }
+    });
+
+    let ws_handle = tokio::spawn(async move {
+        if let Err(e) = ws_server.start(async {
+            let mut rx = shutdown_ws;
+            let _ = rx.recv().await;
+        }).await {
+            error!(error = %e, "WebSocket server error");
+        }
+    });
+
+    // Start DLNA renderer (non-blocking, may fail if gmediarender not installed).
+    let dlna_handle = tokio::spawn(async move {
+        if let Err(e) = dlna_renderer.start().await {
+            warn!(error = %e, "DLNA renderer failed to start — DLNA casting will be unavailable");
+        }
+    });
+
+    // ── 8. Run until shutdown ─────────────────────────────────────────
     shutdown_signal.await;
 
     // Signal all tasks to wind down.
     let _ = shutdown_tx.send(());
-    info!("shutdown signal broadcast – waiting for tasks to finish …");
+    info!("shutdown signal broadcast — waiting for tasks to finish …");
 
-    // TODO: await graceful termination of each spawned task here.
+    // Wait for servers to stop (with timeout).
+    let _ = tokio::time::timeout(
+        std::time::Duration::from_secs(5),
+        async {
+            let _ = http_handle.await;
+            let _ = ws_handle.await;
+            let _ = dlna_handle.await;
+        },
+    )
+    .await;
+
+    // Shutdown Tor if we own it.
+    if let Err(e) = tor_manager.shutdown().await {
+        warn!(error = %e, "Tor shutdown error");
+    }
 
     info!("PiCast stopped.");
     Ok(())

@@ -2,17 +2,20 @@
 name = "picast-resolver"
 version.workspace = true
 edition.workspace = true
+description = "URL resolution engine with yt-dlp subprocess for PiCast"
 
 [dependencies]
 picast-tor = { path = "../tor" }
-tokio.workspace = true
-serde.workspace = true
-serde_json.workspace = true
-thiserror.workspace = true
-tracing.workspace = true
-anyhow.workspace = true
-url.workspace = true
+tokio = { workspace = true, features = ["process", "time", "sync", "rt", "macros", "io-util"] }
+serde = { workspace = true }
+serde_json = { workspace = true }
+thiserror = { workspace = true }
+tracing = { workspace = true }
+anyhow = { workspace = true }
+url = { workspace = true }
+sha2 = { workspace = true }
+hex = { workspace = true }
 
 [dev-dependencies]
-tokio = { workspace = true }
+tokio = { workspace = true, features = ["rt-multi-thread", "macros", "time", "process"] }
 serde_json = { workspace = true }

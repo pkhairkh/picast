@@ -1,0 +1,398 @@
+//! PiCast HTTP REST API Server
+//!
+//! Provides a REST-like control surface for external clients
+//! (browser extension, curl, scripts) to interact with PiCast.
+//!
+//! ## Endpoints
+//!
+//! | Method | Path            | Description                     |
+//! |--------|-----------------|---------------------------------|
+//! | POST   | `/api/cast`     | Load and play a media URL       |
+//! | POST   | `/api/stop`     | Stop and unload                 |
+//! | POST   | `/api/pause`    | Pause playback                  |
+//! | POST   | `/api/resume`   | Resume playback                 |
+//! | POST   | `/api/seek`     | Seek to a position              |
+//! | POST   | `/api/volume`   | Set volume 0–100                |
+//! | GET    | `/api/status`   | Current player state & metadata |
+//! | GET    | `/api/health`   | Health check                    |
+
+use anyhow::Result;
+use hyper::body::Incoming;
+use hyper::{Method, Request, Response, StatusCode};
+use http_body_util::Full;
+use picast_session::{MediaSession, PlayerState, SessionEvent, SessionManager};
+use serde::{Deserialize, Serialize};
+use std::sync::Arc;
+use tokio::sync::broadcast;
+use tracing;
+
+/// Type alias for the HTTP response body.
+type BoxBody = Full<bytes::Bytes>;
+
+// ── Request Payloads ─────────────────────────────────────────────────
+
+#[derive(Debug, Deserialize)]
+struct CastRequest {
+    url: String,
+}
+
+#[derive(Debug, Deserialize)]
+struct SeekRequest {
+    position_ms: Option<u64>,
+    position_seconds: Option<f64>,
+}
+
+#[derive(Debug, Deserialize)]
+struct VolumeRequest {
+    volume: u8,
+}
+
+// ── Response Payloads ────────────────────────────────────────────────
+
+#[derive(Debug, Serialize)]
+struct StatusResponse {
+    session_id: Option<String>,
+    state: String,
+    source_url: Option<String>,
+    resolved_url: Option<String>,
+    position_ms: u64,
+    duration_ms: Option<u64>,
+    volume: u8,
+    title: Option<String>,
+}
+
+#[derive(Debug, Serialize)]
+struct CastResponse {
+    session_id: String,
+    status: String,
+}
+
+#[derive(Debug, Serialize)]
+struct ErrorResponse {
+    error: String,
+    code: u16,
+}
+
+#[derive(Debug, Serialize)]
+struct HealthResponse {
+    status: String,
+}
+
+// ── HTTP API Server ──────────────────────────────────────────────────
+
+/// REST API server built on `hyper`.
+///
+/// Routes requests to the [`SessionManager`] and returns JSON
+/// responses. Supports CORS for browser extension access.
+pub struct HttpApiServer {
+    /// Socket address the server binds to.
+    listen_addr: String,
+    /// Reference to the session manager.
+    session: Arc<SessionManager>,
+}
+
+impl HttpApiServer {
+    /// Create a new HTTP server bound to `listen_addr`.
+    pub fn new(listen_addr: &str, session: Arc<SessionManager>) -> Self {
+        Self {
+            listen_addr: listen_addr.to_owned(),
+            session,
+        }
+    }
+
+    /// Start accepting connections.
+    ///
+    /// Runs indefinitely until the `shutdown` future resolves.
+    pub async fn start(&self, shutdown: impl std::future::Future<Output = ()>) -> Result<()> {
+        use hyper::service::service_fn;
+        use hyper_util::rt::TokioIo;
+
+        let listener = tokio::net::TcpListener::bind(&self.listen_addr).await?;
+        tracing::info!(addr = %self.listen_addr, "HTTP API server listening");
+
+        let session = self.session.clone();
+
+        loop {
+            tokio::select! {
+                accept_result = listener.accept() => {
+                    let (stream, remote) = accept_result?;
+                    let io = TokioIo::new(stream);
+                    let session = session.clone();
+
+                    tokio::spawn(async move {
+                        let service = service_fn(move |req| {
+                            let session = session.clone();
+                            async move { handle_request(req, &session).await }
+                        });
+
+                        if let Err(e) = hyper::server::conn::http1::Builder::new()
+                            .serve_connection(io, service)
+                            .await
+                        {
+                            tracing::error!(error = %e, remote = %remote, "HTTP connection error");
+                        }
+                    });
+                }
+                _ = &mut std::pin::pin!(shutdown) => {
+                    tracing::info!("HTTP API server shutting down");
+                    break;
+                }
+            }
+        }
+
+        Ok(())
+    }
+}
+
+/// Route and handle an incoming HTTP request.
+async fn handle_request(
+    req: Request<Incoming>,
+    session: &Arc<SessionManager>,
+) -> Result<Response<BoxBody>> {
+    let (parts, body) = req.into_parts();
+
+    // CORS preflight.
+    if parts.method == Method::OPTIONS {
+        return Ok(cors_response(StatusCode::OK));
+    }
+
+    // Route by method + path.
+    let path = parts.uri.path();
+    let method = parts.method;
+
+    match (method, path) {
+        // Health check.
+        (Method::GET, "/api/health") => {
+            let resp = HealthResponse {
+                status: "ok".into(),
+            };
+            json_response(StatusCode::OK, &resp)
+        }
+
+        // Status.
+        (Method::GET, "/api/status") => {
+            match session.status().await {
+                Ok(s) => {
+                    let resp = StatusResponse::from_session(&s);
+                    json_response(StatusCode::OK, &resp)
+                }
+                Err(_) => {
+                    let resp = StatusResponse {
+                        session_id: None,
+                        state: "IDLE".into(),
+                        source_url: None,
+                        resolved_url: None,
+                        position_ms: 0,
+                        duration_ms: None,
+                        volume: 100,
+                        title: None,
+                    };
+                    json_response(StatusCode::OK, &resp)
+                }
+            }
+        }
+
+        // Cast.
+        (Method::POST, "/api/cast") => {
+            let payload = read_body_json::<CastRequest>(body).await?;
+            match session.load(&payload.url).await {
+                Ok(id) => {
+                    let resp = CastResponse {
+                        session_id: id.to_string(),
+                        status: "resolving".into(),
+                    };
+                    json_response(StatusCode::ACCEPTED, &resp)
+                }
+                Err(e) => {
+                    let (code, msg) = match &e {
+                        picast_session::SessionError::AlreadyActive => {
+                            (StatusCode::CONFLICT, e.to_string())
+                        }
+                        picast_session::SessionError::ResolutionFailed(_) => {
+                            (StatusCode::UNPROCESSABLE_ENTITY, e.to_string())
+                        }
+                        _ => (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()),
+                    };
+                    error_response(code, &msg)
+                }
+            }
+        }
+
+        // Stop.
+        (Method::POST, "/api/stop") => match session.stop().await {
+            Ok(()) => {
+                let resp = StatusResponse {
+                    session_id: None,
+                    state: "IDLE".into(),
+                    source_url: None,
+                    resolved_url: None,
+                    position_ms: 0,
+                    duration_ms: None,
+                    volume: 100,
+                    title: None,
+                };
+                json_response(StatusCode::OK, &resp)
+            }
+            Err(e) => error_response(StatusCode::CONFLICT, &e.to_string()),
+        },
+
+        // Pause.
+        (Method::POST, "/api/pause") => match session.pause().await {
+            Ok(()) => json_response(StatusCode::OK, &serde_json::json!({"status": "PAUSED"})),
+            Err(e) => error_response(StatusCode::CONFLICT, &e.to_string()),
+        },
+
+        // Resume.
+        (Method::POST, "/api/resume") => match session.resume().await {
+            Ok(()) => json_response(StatusCode::OK, &serde_json::json!({"status": "PLAYING"})),
+            Err(e) => error_response(StatusCode::CONFLICT, &e.to_string()),
+        },
+
+        // Seek.
+        (Method::POST, "/api/seek") => {
+            let payload = read_body_json::<SeekRequest>(body).await?;
+            let position_ms = payload
+                .position_ms
+                .or_else(|| payload.position_seconds.map(|s| (s * 1000.0) as u64))
+                .unwrap_or(0);
+
+            match session.seek(position_ms).await {
+                Ok(()) => json_response(StatusCode::OK, &serde_json::json!({"position_ms": position_ms})),
+                Err(e) => error_response(StatusCode::CONFLICT, &e.to_string()),
+            }
+        }
+
+        // Volume.
+        (Method::POST, "/api/volume") => {
+            let payload = read_body_json::<VolumeRequest>(body).await?;
+            match session.set_volume(payload.volume).await {
+                Ok(()) => json_response(
+                    StatusCode::OK,
+                    &serde_json::json!({"volume": payload.volume}),
+                ),
+                Err(e) => error_response(StatusCode::INTERNAL_SERVER_ERROR, &e.to_string()),
+            }
+        }
+
+        // 404.
+        _ => error_response(StatusCode::NOT_FOUND, "endpoint not found"),
+    }
+}
+
+// ── Response Helpers ─────────────────────────────────────────────────
+
+/// Create a JSON response with CORS headers.
+fn json_response<T: Serialize>(status: StatusCode, body: &T) -> Result<Response<BoxBody>> {
+    let json = serde_json::to_string(body)?;
+    Ok(Response::builder()
+        .status(status)
+        .header("Content-Type", "application/json")
+        .header("Access-Control-Allow-Origin", "*")
+        .header("Access-Control-Allow-Methods", "GET, POST, OPTIONS")
+        .header("Access-Control-Allow-Headers", "Content-Type")
+        .body(Full::new(bytes::Bytes::from(json)))?)
+}
+
+/// Create an error response.
+fn error_response(status: StatusCode, message: &str) -> Result<Response<BoxBody>> {
+    let resp = ErrorResponse {
+        error: message.to_owned(),
+        code: status.as_u16(),
+    };
+    json_response(status, &resp)
+}
+
+/// Create a CORS preflight response.
+fn cors_response(status: StatusCode) -> Response<BoxBody> {
+    Response::builder()
+        .status(status)
+        .header("Access-Control-Allow-Origin", "*")
+        .header("Access-Control-Allow-Methods", "GET, POST, OPTIONS")
+        .header("Access-Control-Allow-Headers", "Content-Type")
+        .header("Access-Control-Max-Age", "86400")
+        .body(Full::new(bytes::Bytes::new()))
+        .unwrap()
+}
+
+/// Read and parse a JSON body.
+async fn read_body_json<T: serde::de::DeserializeOwned>(
+    body: Incoming,
+) -> Result<T> {
+    let bytes = hyper::body::to_bytes(body).await?;
+    Ok(serde_json::from_slice(&bytes)?)
+}
+
+impl StatusResponse {
+    fn from_session(session: &MediaSession) -> Self {
+        Self {
+            session_id: Some(session.id.to_string()),
+            state: session.state.to_string(),
+            source_url: Some(session.source_url.clone()),
+            resolved_url: session.resolved_url.clone(),
+            position_ms: session.position_ms,
+            duration_ms: session.duration_ms,
+            volume: session.volume,
+            title: session.title.clone(),
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn status_response_from_session() {
+        let session = MediaSession::new("https://example.com/video.mp4".into());
+        let resp = StatusResponse::from_session(&session);
+        assert!(resp.session_id.is_some());
+        assert_eq!(resp.state, "IDLE");
+        assert_eq!(resp.source_url, Some("https://example.com/video.mp4".into()));
+    }
+
+    #[test]
+    fn error_response_json() {
+        let resp = ErrorResponse {
+            error: "not found".into(),
+            code: 404,
+        };
+        let json = serde_json::to_string(&resp).unwrap();
+        assert!(json.contains("not found"));
+        assert!(json.contains("404"));
+    }
+
+    #[test]
+    fn cast_request_deserialize() {
+        let json = r#"{"url":"https://youtube.com/watch?v=abc"}"#;
+        let req: CastRequest = serde_json::from_str(json).unwrap();
+        assert_eq!(req.url, "https://youtube.com/watch?v=abc");
+    }
+
+    #[test]
+    fn seek_request_ms() {
+        let json = r#"{"position_ms":5000}"#;
+        let req: SeekRequest = serde_json::from_str(json).unwrap();
+        assert_eq!(req.position_ms, Some(5000));
+    }
+
+    #[test]
+    fn seek_request_seconds() {
+        let json = r#"{"position_seconds":30.5}"#;
+        let req: SeekRequest = serde_json::from_str(json).unwrap();
+        assert_eq!(req.position_seconds, Some(30.5));
+    }
+
+    #[test]
+    fn volume_request() {
+        let json = r#"{"volume":75}"#;
+        let req: VolumeRequest = serde_json::from_str(json).unwrap();
+        assert_eq!(req.volume, 75);
+    }
+
+    #[test]
+    fn health_response() {
+        let resp = HealthResponse { status: "ok".into() };
+        let json = serde_json::to_string(&resp).unwrap();
+        assert!(json.contains("ok"));
+    }
+}

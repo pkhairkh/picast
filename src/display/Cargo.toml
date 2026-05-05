@@ -2,15 +2,21 @@
 name = "picast-display"
 version.workspace = true
 edition.workspace = true
+description = "DRM/KMS atomic modesetting display manager for PiCast on Raspberry Pi 4B+"
 
 [dependencies]
 drm = "0.12"
 gbm = "0.2"
 nix = { version = "0.28", features = ["ioctl"] }
-thiserror.workspace = true
-tracing.workspace = true
-anyhow.workspace = true
+thiserror = { workspace = true }
+tracing = { workspace = true }
+anyhow = { workspace = true }
 
 [dev-dependencies]
 tokio = { workspace = true }
 serde_json = { workspace = true }
+
+[features]
+default = []
+# Use vkms (virtual KMS) for testing on non-Pi hardware
+vkms = []
