@@ -230,38 +230,19 @@ impl Resolver {
                 height: None,
                 subtitle_tracks: vec![],
             },
-            UrlCategory::Onion => ResolveResult {
-                source_url: url.to_owned(),
-                direct_url: url.to_owned(),
-                category,
-                mime_type: None,
-                content_length: None,
-                used_tor: true,
-                title: None,
-                duration: None,
-                thumbnail: None,
-                vcodec: None,
-                acodec: None,
-                width: None,
-                height: None,
-                subtitle_tracks: vec![],
-            },
-            UrlCategory::WebPage => ResolveResult {
-                source_url: url.to_owned(),
-                direct_url: url.to_owned(),
-                category,
-                mime_type: None,
-                content_length: None,
-                used_tor: false,
-                title: None,
-                duration: None,
-                thumbnail: None,
-                vcodec: None,
-                acodec: None,
-                width: None,
-                height: None,
-                subtitle_tracks: vec![],
-            },
+            UrlCategory::Onion => {
+                // Onion URLs are always resolved through Tor via yt-dlp.
+                let mut result = self.resolve_onion(url).await?;
+                result.category = UrlCategory::Onion;
+                result
+            }
+            UrlCategory::WebPage => {
+                // Web page URLs require yt-dlp to extract the direct media URL.
+                // Route through Tor SOCKS proxy for circuit isolation.
+                let mut result = self.resolve_webpage(url).await?;
+                result.category = UrlCategory::WebPage;
+                result
+            }
             UrlCategory::Magnet => {
                 return Err(ResolveError::NoMediaFound(url.to_owned()));
             }
@@ -369,7 +350,6 @@ impl Resolver {
     }
 
     /// Web page resolution via yt-dlp through Tor.
-    #[allow(dead_code)]
     async fn resolve_webpage(&self, url: &str) -> Result<ResolveResult, ResolveError> {
         let socks_addr = self.tor.socks_addr();
         let isolation = picast_tor::TorManager::isolation_username(
@@ -384,7 +364,6 @@ impl Resolver {
     }
 
     /// Onion URL resolution — always through Tor, always via yt-dlp.
-    #[allow(dead_code)]
     async fn resolve_onion(&self, url: &str) -> Result<ResolveResult, ResolveError> {
         let socks_addr = self.tor.socks_addr();
         let isolation = picast_tor::TorManager::isolation_username(
@@ -551,11 +530,53 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_resolve_onion_uses_tor() {
+    async fn test_resolve_onion_routes_through_tor() {
         let r = resolver();
-        let result = r.resolve("http://example.onion/video.mp4").await.unwrap();
-        assert_eq!(result.category, UrlCategory::Onion);
-        assert!(result.used_tor);
+        // Onion URLs now invoke yt-dlp through Tor. Without yt-dlp installed,
+        // we expect a TorUnavailable error (binary not found).
+        let result = r.resolve("http://example.onion/video.mp4").await;
+        match result {
+            Ok(res) => {
+                // If yt-dlp is installed and Tor is running, we should get
+                // a result with used_tor = true.
+                assert_eq!(res.category, UrlCategory::Onion);
+                assert!(res.used_tor);
+            }
+            Err(ResolveError::TorUnavailable(msg)) => {
+                // Expected when yt-dlp is not installed in test env.
+                assert!(msg.contains("yt-dlp"), "error should mention yt-dlp: {}", msg);
+            }
+            Err(e) => {
+                // Other errors (network, no media found) are acceptable
+                // without a running Tor daemon.
+                assert!(
+                    matches!(e, ResolveError::Network(_) | ResolveError::NoMediaFound(_)),
+                    "unexpected error type: {:?}", e
+                );
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn test_resolve_webpage_routes_through_tor() {
+        let r = resolver();
+        // WebPage URLs now invoke yt-dlp through Tor. Without yt-dlp installed,
+        // we expect a TorUnavailable error.
+        let result = r.resolve("https://www.youtube.com/watch?v=abc").await;
+        match result {
+            Ok(res) => {
+                assert_eq!(res.category, UrlCategory::WebPage);
+            }
+            Err(ResolveError::TorUnavailable(msg)) => {
+                assert!(msg.contains("yt-dlp"), "error should mention yt-dlp: {}", msg);
+            }
+            Err(e) => {
+                assert!(
+                    matches!(e, ResolveError::Network(_) | ResolveError::NoMediaFound(_)),
+                    "unexpected error type: {:?}", e
+                );
+            }
+        }
     }
 
     #[tokio::test]

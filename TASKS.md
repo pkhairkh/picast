@@ -10,7 +10,7 @@ effort. Tasks are ordered by execution sequence within each phase.
 
 ## Phase 0 — Build & CI Foundation
 
-### T-0.1 Workspace compilation fix
+### T-0.1 Workspace compilation fix ✅
 - **Crate:** workspace
 - **Depends on:** nothing
 - **Effort:** 0.5 day
@@ -39,7 +39,7 @@ effort. Tasks are ordered by execution sequence within each phase.
   3. Add `--target aarch64-unknown-linux-gnu` to CI
   4. Document cross-compilation setup in `docs/contributing.md`
 
-### T-0.3 GitHub Actions CI workflow
+### T-0.3 GitHub Actions CI workflow ✅
 - **Crate:** `.github/`
 - **Depends on:** T-0.1
 - **Effort:** 1 day
@@ -53,7 +53,7 @@ effort. Tasks are ordered by execution sequence within each phase.
   4. Cache `~/.cargo/registry` and `target/`
   5. Run without `hw` feature on CI (x86 can't use Pi-specific libs)
 
-### T-0.4 Smoke test infrastructure
+### T-0.4 Smoke test infrastructure ✅
 - **Crate:** all
 - **Depends on:** T-0.1
 - **Effort:** 1 day
@@ -70,7 +70,7 @@ effort. Tasks are ordered by execution sequence within each phase.
   6. `picast-protocols`: test `HttpApiServer::new()`, `WebSocketServer::new()`, `DlnaRenderer::new()`
   7. `picast-server`: test `AppConfig::from_env()`
 
-### T-0.5 Conditional compilation for Pi deps
+### T-0.5 Conditional compilation for Pi deps ✅
 - **Crate:** playback, display
 - **Depends on:** T-0.1
 - **Effort:** 1 day
@@ -89,7 +89,7 @@ effort. Tasks are ordered by execution sequence within each phase.
 
 ## Phase 1 — Tor Daemon Integration
 
-### T-1.1 Tor process spawning
+### T-1.1 Tor process spawning ✅
 - **Crate:** `picast-tor`
 - **Depends on:** T-0.5
 - **Effort:** 1 day
@@ -105,7 +105,7 @@ effort. Tasks are ordered by execution sequence within each phase.
   4. Poll SOCKS port with exponential backoff until reachable or timeout
   5. Set `owns_process = true` only if we spawned the process
 
-### T-1.2 SOCKS5 connectivity verification
+### T-1.2 SOCKS5 connectivity verification ✅
 - **Crate:** `picast-tor`
 - **Depends on:** T-1.1
 - **Effort:** 0.5 day
@@ -120,7 +120,7 @@ effort. Tasks are ordered by execution sequence within each phase.
   4. If successful, measure round-trip latency via a `CONNECT` request to a known host
   5. Return `CircuitHealth { is_healthy: true, latency_ms: Some(measured), .. }`
 
-### T-1.3 Stream isolation via SOCKS5 username
+### T-1.3 Stream isolation via SOCKS5 username ✅
 - **Crate:** `picast-tor`
 - **Depends on:** T-1.2
 - **Effort:** 1 day
@@ -137,7 +137,7 @@ effort. Tasks are ordered by execution sequence within each phase.
   5. Add `socks5-proxy-username` field to `SocksProxy` config
   6. Unit test: same domain → same username; different domains → different usernames
 
-### T-1.4 Tor process lifecycle management
+### T-1.4 Tor process lifecycle management ✅
 - **Crate:** `picast-tor`
 - **Depends on:** T-1.1
 - **Effort:** 1 day
@@ -153,7 +153,7 @@ effort. Tasks are ordered by execution sequence within each phase.
   4. If unexpected exit (non-zero, not from shutdown): log error, optionally auto-restart
   5. `Drop` impl: try `child.start_kill()` if process still alive (sync, best-effort)
 
-### T-1.5 Circuit health monitoring via control port
+### T-1.5 Circuit health monitoring via control port ✅
 - **Crate:** `picast-tor`
 - **Depends on:** T-1.2
 - **Effort:** 1.5 days
@@ -270,7 +270,7 @@ effort. Tasks are ordered by execution sequence within each phase.
   4. Test buffer lock/unlock cycle
   5. Import GBM buffer into DRM: `gbm_bo_get_handle()` → `drmModeAddFB2()`
 
-### T-2.6 Mock display mode for x86 testing
+### T-2.6 Mock display mode for x86 testing ✅
 - **Crate:** `picast-display`
 - **Depends on:** T-0.5
 - **Effort:** 0.5 day
@@ -455,7 +455,7 @@ effort. Tasks are ordered by execution sequence within each phase.
 
 ## Phase 4 — Content Resolver (yt-dlp)
 
-### T-4.1 yt-dlp subprocess invocation
+### T-4.1 yt-dlp subprocess invocation ✅
 - **Crate:** `picast-resolver`
 - **Depends on:** T-1.3 (for stream isolation)
 - **Effort:** 1 day
@@ -471,7 +471,7 @@ effort. Tasks are ordered by execution sequence within each phase.
   4. Capture stderr → include in `ResolveError::Network` on failure
   5. Map exit codes: 0 = success, 1 = no video found, other = network error
 
-### T-4.2 yt-dlp JSON output parsing
+### T-4.2 yt-dlp JSON output parsing ✅
 - **Crate:** `picast-resolver`
 - **Depends on:** T-4.1
 - **Effort:** 1.5 days
@@ -486,7 +486,7 @@ effort. Tasks are ordered by execution sequence within each phase.
   4. Construct direct URL from selected format's `url` field
   5. If merged format: yt-dlp returns `url` pointing to `manifest_url` — may need HLS/DASH handling
 
-### T-4.3 Format selection: force H.264
+### T-4.3 Format selection: force H.264 ✅
 - **Crate:** `picast-resolver`
 - **Depends on:** T-4.1
 - **Effort:** 0.5 day
@@ -499,7 +499,7 @@ effort. Tasks are ordered by execution sequence within each phase.
   3. If no H.264 available: try `av1` or `vp9` software decode (limited resolution)
   4. Log a warning if forced to use non-H.264 codec
 
-### T-4.4 Tor SOCKS5h proxy routing for yt-dlp
+### T-4.4 Tor SOCKS5h proxy routing for yt-dlp ✅
 - **Crate:** `picast-resolver`
 - **Depends on:** T-4.1, T-1.3
 - **Effort:** 1 day
@@ -542,7 +542,7 @@ effort. Tasks are ordered by execution sequence within each phase.
   4. Download subtitle files to `/tmp/picast-subs/{session_id}/`
   5. Clean up subtitle files on session stop
 
-### T-4.7 Direct media passthrough
+### T-4.7 Direct media passthrough ✅
 - **Crate:** `picast-resolver`
 - **Depends on:** T-0.5
 - **Effort:** 0.5 day
@@ -556,7 +556,7 @@ effort. Tasks are ordered by execution sequence within each phase.
   3. For `HlsManifest`/`DashManifest`: pass through to GStreamer's adaptive demuxer
   4. Only `WebPage` category triggers yt-dlp resolution
 
-### T-4.8 Error handling and timeout
+### T-4.8 Error handling and timeout ✅
 - **Crate:** `picast-resolver`
 - **Depends on:** T-4.1
 - **Effort:** 0.5 day
@@ -589,7 +589,7 @@ effort. Tasks are ordered by execution sequence within each phase.
 
 ## Phase 5 — Session Manager
 
-### T-5.1 Trait-object wiring
+### T-5.1 Trait-object wiring ✅
 - **Crate:** `picast-session`
 - **Depends on:** T-1.3, T-2.6, T-3.4, T-4.2
 - **Effort:** 1 day
@@ -604,7 +604,7 @@ effort. Tasks are ordered by execution sequence within each phase.
   3. Ensure all trait methods are `async` and `Send`
   4. Write test: create mock implementations, verify wiring
 
-### T-5.2 Load flow: resolve → create session → play
+### T-5.2 Load flow: resolve → create session → play ✅
 - **Crate:** `picast-session`
 - **Depends on:** T-5.1
 - **Effort:** 2 days
@@ -622,7 +622,7 @@ effort. Tasks are ordered by execution sequence within each phase.
   6. Update state: `Buffering → Playing`
   7. Return `session.id`
 
-### T-5.3 State machine implementation
+### T-5.3 State machine implementation ✅
 - **Crate:** `picast-session`
 - **Depends on:** T-5.2
 - **Effort:** 2 days
