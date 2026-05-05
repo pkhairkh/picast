@@ -11,7 +11,7 @@ hw = ["drm", "gbm", "nix"]
 [dependencies]
 drm = { version = "0.12", optional = true }
 gbm = { version = "0.2", optional = true }
-nix = { version = "0.28", features = ["ioctl"], optional = true }
+nix = { version = "0.31", features = ["ioctl"], optional = true }
 thiserror = { workspace = true }
 tracing = { workspace = true }
 anyhow = { workspace = true }
