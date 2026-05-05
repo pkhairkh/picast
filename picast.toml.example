@@ -1,0 +1,34 @@
+# PiCast Configuration File
+#
+# Copy to one of these locations:
+#   ./picast.toml
+#   /etc/picast/picast.toml
+#   /usr/local/etc/picast/picast.toml
+#
+# Or set PICAST_CONFIG=/path/to/picast.toml
+#
+# Environment variables (PICAST_*) override config file values.
+
+[server]
+# HTTP REST API listen address.
+http_addr = "0.0.0.0:8585"
+# WebSocket server listen address.
+ws_addr = "0.0.0.0:8586"
+# Session database path (SQLite).
+db_path = "/var/lib/picast/sessions.db"
+
+[tor]
+# Tor SOCKS5 proxy address.
+socks_addr = "127.0.0.1:9050"
+
+[display]
+# DRM device path (empty = auto-detect, "mock" = no hardware).
+drm_device = ""
+
+[dlna]
+# Friendly name advertised on the local network via SSDP.
+friendly_name = "PiCast"
+
+[logging]
+# Log level: trace, debug, info, warn, error
+level = "info"

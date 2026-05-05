@@ -453,3 +453,142 @@ async fn test_seek_endpoint() {
 
     handle.abort();
 }
+
+/// Verify that resume without active session returns error.
+#[tokio::test]
+async fn test_resume_without_session_returns_error() {
+    let session = make_session();
+    let (addr, handle) = start_server(session, 18897).await;
+
+    let client = reqwest::Client::new();
+    let resp = client.post(format!("http://{}/api/resume", addr)).send().await.unwrap();
+    assert!(resp.status().is_client_error());
+
+    handle.abort();
+}
+
+/// Verify that seek without active session returns error.
+#[tokio::test]
+async fn test_seek_without_session_returns_error() {
+    let session = make_session();
+    let (addr, handle) = start_server(session, 18898).await;
+
+    let client = reqwest::Client::new();
+    let resp = client
+        .post(format!("http://{}/api/seek", addr))
+        .json(&serde_json::json!({ "position_ms": 1000 }))
+        .send()
+        .await
+        .unwrap();
+    assert!(resp.status().is_client_error());
+
+    handle.abort();
+}
+
+/// Verify that volume without active session returns error.
+#[tokio::test]
+async fn test_volume_without_session_returns_error() {
+    let session = make_session();
+    let (addr, handle) = start_server(session, 18899).await;
+
+    let client = reqwest::Client::new();
+    let resp = client
+        .post(format!("http://{}/api/volume", addr))
+        .json(&serde_json::json!({ "volume": 50 }))
+        .send()
+        .await
+        .unwrap();
+    assert!(resp.status().is_server_error());
+
+    handle.abort();
+}
+
+/// Verify cast-pause-resume-stop lifecycle.
+#[tokio::test]
+async fn test_pause_resume_lifecycle() {
+    let session = make_session();
+    let (addr, handle) = start_server(session, 18900).await;
+
+    let client = reqwest::Client::new();
+    let base = format!("http://{}", addr);
+
+    // Cast
+    let resp = client
+        .post(format!("{}/api/cast", base))
+        .json(&serde_json::json!({ "url": "https://example.com/video.mp4" }))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), 202);
+
+    // Pause
+    let resp = client.post(format!("{}/api/pause", base)).send().await.unwrap();
+    assert_eq!(resp.status(), 200);
+    let body: serde_json::Value = resp.json().await.unwrap();
+    assert_eq!(body["status"], "paused");
+
+    // Resume
+    let resp = client.post(format!("{}/api/resume", base)).send().await.unwrap();
+    assert_eq!(resp.status(), 200);
+    let body: serde_json::Value = resp.json().await.unwrap();
+    assert_eq!(body["status"], "playing");
+
+    // Stop
+    let resp = client.post(format!("{}/api/stop", base)).send().await.unwrap();
+    assert_eq!(resp.status(), 200);
+
+    handle.abort();
+}
+
+/// Verify that status after stop shows idle state with null session.
+#[tokio::test]
+async fn test_status_after_stop_shows_idle() {
+    let session = make_session();
+    let (addr, handle) = start_server(session, 18901).await;
+
+    let client = reqwest::Client::new();
+    let base = format!("http://{}", addr);
+
+    // Cast and immediately stop.
+    let _ = client
+        .post(format!("{}/api/cast", base))
+        .json(&serde_json::json!({ "url": "https://example.com/video.mp4" }))
+        .send()
+        .await
+        .unwrap();
+
+    let _ = client.post(format!("{}/api/stop", base)).send().await.unwrap();
+
+    // Status should show idle.
+    let resp = client.get(format!("{}/api/status", base)).send().await.unwrap();
+    let body: serde_json::Value = resp.json().await.unwrap();
+    assert_eq!(body["state"], "idle");
+    assert!(body["session_id"].is_null());
+
+    handle.abort();
+}
+
+/// Verify multiple cast-stop cycles work without errors.
+#[tokio::test]
+async fn test_multiple_cast_stop_cycles() {
+    let session = make_session();
+    let (addr, handle) = start_server(session, 18902).await;
+
+    let client = reqwest::Client::new();
+    let base = format!("http://{}", addr);
+
+    for i in 0..3 {
+        let resp = client
+            .post(format!("{}/api/cast", base))
+            .json(&serde_json::json!({ "url": format!("https://example.com/video{}.mp4", i) }))
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), 202, "cast {} should succeed", i);
+
+        let resp = client.post(format!("{}/api/stop", base)).send().await.unwrap();
+        assert_eq!(resp.status(), 200, "stop {} should succeed", i);
+    }
+
+    handle.abort();
+}

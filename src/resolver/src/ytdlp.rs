@@ -12,11 +12,13 @@
 //!   --socket-timeout 30 \
 //!   --proxy socks5h://picast-<isoid>@127.0.0.1:9050 \
 //!   --format "bestvideo[vcodec^=avc1][height<=1080]+bestaudio/best[vcodec^=avc1][height<=1080]/best[height<=1080]" \
+//!   --write-subs --sub-langs "en,es,fr,de" --sub-format vtt \
 //!   <url>
 //! ```
 //!
 //! The format string forces H.264 (avc1) at 1080p max, which
 //! is required for the V4L2 hardware decoder on Pi 4B+.
+//! The `--write-subs` flag extracts available subtitles in VTT format.
 
 use crate::{ResolveError, ResolveResult, UrlCategory};
 use serde::Deserialize;
@@ -25,6 +27,12 @@ use tokio::process::Command;
 
 /// Default timeout for yt-dlp subprocess execution (30 seconds).
 const YTDLP_TIMEOUT_SECS: u64 = 30;
+
+/// Default subtitle languages to request from yt-dlp.
+const DEFAULT_SUB_LANGS: &str = "en,es,fr,de";
+
+/// Subtitle format to request from yt-dlp.
+const SUB_FORMAT: &str = "vtt";
 
 /// The H.264 format string passed to yt-dlp's `--format` flag.
 /// Prioritises hardware-decodable H.264 at 1080p or below.
@@ -72,7 +80,7 @@ struct YtdlpOutput {
 ///
 /// Spawns `yt-dlp --dump-json` as a subprocess with the Tor
 /// SOCKS5h proxy configured. Parses the JSON output to extract
-/// the direct media URL and metadata.
+/// the direct media URL, metadata, and available subtitles.
 ///
 /// ## Timeouts
 ///
@@ -89,28 +97,55 @@ pub async fn resolve_with_ytdlp(
     socks_addr: &str,
     isolation_username: &str,
 ) -> Result<ResolveResult, ResolveError> {
+    resolve_with_ytdlp_and_subs(url, socks_addr, isolation_username, true).await
+}
+
+/// Resolve a web page URL using yt-dlp with optional subtitle extraction.
+///
+/// When `extract_subs` is true, adds `--write-subs --sub-langs --sub-format`
+/// flags to the yt-dlp command so that available subtitle tracks are
+/// included in the JSON output's `subtitles` field.
+pub async fn resolve_with_ytdlp_and_subs(
+    url: &str,
+    socks_addr: &str,
+    isolation_username: &str,
+    extract_subs: bool,
+) -> Result<ResolveResult, ResolveError> {
     let proxy_url = format!("socks5h://{}@{}", isolation_username, socks_addr);
 
     tracing::info!(
         url = url,
         proxy = %proxy_url,
+        extract_subs = extract_subs,
         "spawning yt-dlp subprocess"
     );
 
+    let mut cmd = Command::new("yt-dlp");
+    cmd.arg("--dump-json")
+        .arg("--no-download")
+        .arg("--no-warnings")
+        .arg("--socket-timeout")
+        .arg("30")
+        .arg("--proxy")
+        .arg(&proxy_url)
+        .arg("--format")
+        .arg(H264_FORMAT_STRING);
+
+    // Add subtitle extraction flags when requested.
+    if extract_subs {
+        cmd.arg("--write-subs")
+            .arg("--write-auto-subs")
+            .arg("--sub-langs")
+            .arg(DEFAULT_SUB_LANGS)
+            .arg("--sub-format")
+            .arg(SUB_FORMAT);
+    }
+
+    cmd.arg(url);
+
     let output = tokio::time::timeout(
         Duration::from_secs(YTDLP_TIMEOUT_SECS),
-        Command::new("yt-dlp")
-            .arg("--dump-json")
-            .arg("--no-download")
-            .arg("--no-warnings")
-            .arg("--socket-timeout")
-            .arg("30")
-            .arg("--proxy")
-            .arg(&proxy_url)
-            .arg("--format")
-            .arg(H264_FORMAT_STRING)
-            .arg(url)
-            .output(),
+        cmd.output(),
     )
     .await
     .map_err(|_| ResolveError::Network(format!("yt-dlp timed out after {}s", YTDLP_TIMEOUT_SECS)))?
@@ -296,5 +331,134 @@ mod tests {
             format: None,
         };
         assert_eq!(determine_mime_type(&ytdlp), Some("audio/mp4".into()));
+    }
+
+    #[test]
+    fn subtitle_extraction_from_ytdlp_json() {
+        // Simulate yt-dlp JSON output with subtitles.
+        let json = r#"{
+            "url": "https://example.com/video.mp4",
+            "title": "Test Video with Subtitles",
+            "duration": 120.5,
+            "thumbnail": "https://example.com/thumb.jpg",
+            "vcodec": "avc1",
+            "acodec": "mp4a",
+            "width": 1920,
+            "height": 1080,
+            "subtitles": {
+                "en": [{"url": "https://example.com/subs/en.vtt", "ext": "vtt"}],
+                "es": [{"url": "https://example.com/subs/es.vtt", "ext": "vtt"}],
+                "fr": [{"url": "https://example.com/subs/fr.vtt", "ext": "vtt"}]
+            },
+            "format": "137+251"
+        }"#;
+
+        let ytdlp: YtdlpOutput = serde_json::from_str(json).unwrap();
+        let mut subtitle_tracks: Vec<String> = ytdlp.subtitles.keys().cloned().collect();
+        subtitle_tracks.sort();
+
+        assert_eq!(subtitle_tracks, vec!["en", "es", "fr"]);
+        assert_eq!(ytdlp.title, Some("Test Video with Subtitles".into()));
+        assert_eq!(ytdlp.duration, Some(120.5));
+    }
+
+    #[test]
+    fn subtitle_tracks_empty_when_no_subs() {
+        let ytdlp = YtdlpOutput {
+            webpage_url: None,
+            url: String::new(),
+            title: None,
+            duration: None,
+            thumbnail: None,
+            vcodec: Some("avc1".into()),
+            acodec: Some("mp4a".into()),
+            width: None,
+            height: None,
+            subtitles: Default::default(),
+            format: None,
+        };
+        assert!(ytdlp.subtitles.is_empty());
+    }
+
+    #[test]
+    fn default_sub_langs_constant() {
+        assert!(DEFAULT_SUB_LANGS.contains("en"));
+        assert!(DEFAULT_SUB_LANGS.contains("es"));
+        assert!(DEFAULT_SUB_LANGS.contains("fr"));
+        assert!(DEFAULT_SUB_LANGS.contains("de"));
+    }
+
+    #[test]
+    fn sub_format_is_vtt() {
+        assert_eq!(SUB_FORMAT, "vtt");
+    }
+
+    #[test]
+    fn determine_mime_type_no_codecs() {
+        let ytdlp = YtdlpOutput {
+            webpage_url: None,
+            url: String::new(),
+            title: None,
+            duration: None,
+            thumbnail: None,
+            vcodec: Some("none".into()),
+            acodec: Some("none".into()),
+            width: None,
+            height: None,
+            subtitles: Default::default(),
+            format: None,
+        };
+        assert_eq!(determine_mime_type(&ytdlp), None);
+    }
+
+    #[test]
+    fn determine_category_no_format() {
+        let ytdlp = YtdlpOutput {
+            webpage_url: None,
+            url: "https://example.com/video.mp4".into(),
+            title: None,
+            duration: None,
+            thumbnail: None,
+            vcodec: Some("avc1".into()),
+            acodec: Some("mp4a".into()),
+            width: None,
+            height: None,
+            subtitles: Default::default(),
+            format: None,
+        };
+        assert_eq!(determine_category(&ytdlp), UrlCategory::DirectMedia);
+    }
+
+    #[test]
+    fn ytdlp_output_deserialize_full() {
+        // Full end-to-end deserialization test with all fields populated.
+        let json = r#"{
+            "webpage_url": "https://youtube.com/watch?v=abc",
+            "url": "https://rr.googlevideo.com/videoplayback?id=abc",
+            "title": "Full Test Video",
+            "duration": 300.0,
+            "thumbnail": "https://i.ytimg.com/vi/abc/maxresdefault.jpg",
+            "vcodec": "avc1.64001F",
+            "acodec": "mp4a.40.2",
+            "width": 1920,
+            "height": 1080,
+            "subtitles": {
+                "en": [{"url": "https://youtube.com/api/timedtext?lang=en", "ext": "vtt"}],
+                "de": [{"url": "https://youtube.com/api/timedtext?lang=de", "ext": "vtt"}]
+            },
+            "format": "137+251"
+        }"#;
+
+        let ytdlp: YtdlpOutput = serde_json::from_str(json).unwrap();
+        assert_eq!(ytdlp.url, "https://rr.googlevideo.com/videoplayback?id=abc");
+        assert_eq!(ytdlp.title, Some("Full Test Video".into()));
+        assert_eq!(ytdlp.duration, Some(300.0));
+        assert_eq!(ytdlp.width, Some(1920));
+        assert_eq!(ytdlp.height, Some(1080));
+        assert_eq!(ytdlp.vcodec, Some("avc1.64001F".into()));
+        assert_eq!(ytdlp.acodec, Some("mp4a.40.2".into()));
+        assert_eq!(ytdlp.subtitles.len(), 2);
+        assert!(ytdlp.subtitles.contains_key("en"));
+        assert!(ytdlp.subtitles.contains_key("de"));
     }
 }

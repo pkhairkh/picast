@@ -17,7 +17,10 @@
 //! subsystems run in mock mode — the server starts for protocol testing
 //! but actual media playback is unavailable.
 
+mod config;
+
 use anyhow::Result;
+use config::AppConfig;
 use std::sync::Arc;
 use tokio::signal;
 use tokio::sync::broadcast;
@@ -139,39 +142,7 @@ impl picast_session::interfaces::ResolverTrait for ResolverAdapter {
     }
 }
 
-// ── Application Configuration ────────────────────────────────────────
-
-/// Application configuration loaded from environment / config file.
-struct AppConfig {
-    /// HTTP API listen address.
-    http_addr: String,
-    /// WebSocket listen address.
-    ws_addr: String,
-    /// DLNA friendly name advertised on the network.
-    dlna_name: String,
-    /// Tor SOCKS5 proxy address.
-    tor_socks: String,
-    /// DRM device path.
-    drm_device: String,
-    /// Session database path.
-    db_path: String,
-}
-
-impl AppConfig {
-    /// Load configuration from environment variables with sensible defaults.
-    fn from_env() -> Self {
-        Self {
-            http_addr: std::env::var("PICAST_HTTP_ADDR").unwrap_or_else(|_| "0.0.0.0:8585".into()),
-            ws_addr: std::env::var("PICAST_WS_ADDR").unwrap_or_else(|_| "0.0.0.0:8586".into()),
-            dlna_name: std::env::var("PICAST_DLNA_NAME").unwrap_or_else(|_| "PiCast".into()),
-            tor_socks: std::env::var("PICAST_TOR_SOCKS")
-                .unwrap_or_else(|_| "127.0.0.1:9050".into()),
-            drm_device: std::env::var("PICAST_DRM_DEVICE").unwrap_or_else(|_| "".into()), // auto-detect
-            db_path: std::env::var("PICAST_DB_PATH")
-                .unwrap_or_else(|_| "/var/lib/picast/sessions.db".into()),
-        }
-    }
-}
+// AppConfig is now in config.rs with full TOML support.
 
 /// Initialize the `tracing-subscriber` with an `env-filter`.
 fn init_tracing() {
@@ -191,12 +162,15 @@ async fn main() -> Result<()> {
     info!("PiCast starting …");
 
     // ── 2. Configuration ──────────────────────────────────────────────
-    let config = AppConfig::from_env();
+    let config = AppConfig::load().unwrap_or_else(|e| {
+        error!(error = %e, "failed to load configuration");
+        std::process::exit(1);
+    });
     info!(
-        http_addr = %config.http_addr,
-        ws_addr = %config.ws_addr,
-        dlna_name = %config.dlna_name,
-        tor_socks = %config.tor_socks,
+        http_addr = %config.server.http_addr,
+        ws_addr = %config.server.ws_addr,
+        dlna_name = %config.dlna.friendly_name,
+        tor_socks = %config.tor.socks_addr,
         "configuration loaded"
     );
 
@@ -215,22 +189,22 @@ async fn main() -> Result<()> {
     info!("initialising subsystems");
 
     // 4a. Tor
-    let tor_manager = Arc::new(picast_tor::TorManager::new(&config.tor_socks));
-    info!(socks = %config.tor_socks, "Tor manager created");
+    let tor_manager = Arc::new(picast_tor::TorManager::new(&config.tor.socks_addr));
+    info!(socks = %config.tor.socks_addr, "Tor manager created");
 
     // 4b. Display
     #[cfg(feature = "hw")]
     let display_manager: Arc<tokio::sync::Mutex<picast_display::DisplayManager>> = {
-        let dm = picast_display::DisplayManager::new(&config.drm_device)?;
+        let dm = picast_display::DisplayManager::new(&config.display.drm_device)?;
         Arc::new(tokio::sync::Mutex::new(dm))
     };
     #[cfg(not(feature = "hw"))]
     let display_manager: Arc<tokio::sync::Mutex<picast_display::DisplayManager>> = {
         info!("hw feature disabled — display manager running in mock mode");
-        let dm = picast_display::DisplayManager::new(&config.drm_device)?;
+        let dm = picast_display::DisplayManager::new(&config.display.drm_device)?;
         Arc::new(tokio::sync::Mutex::new(dm))
     };
-    info!(device = %config.drm_device, "Display manager created");
+    info!(device = %config.display.drm_device, "Display manager created");
 
     // 4c. Playback
     #[cfg(feature = "hw")]
@@ -262,18 +236,18 @@ async fn main() -> Result<()> {
         Arc::new(ResolverAdapter(resolver.clone()));
 
     let session = Arc::new(picast_session::SessionManager::with_subsystems(
-        &config.db_path,
+        &config.server.db_path,
         resolver_trait,
         playback_trait,
         display_trait,
         tor_trait,
     )?);
-    info!(db = %config.db_path, "Session manager created (subsystems wired)");
+    info!(db = %config.server.db_path, "Session manager created (subsystems wired)");
 
     // ── 6. Protocol servers ───────────────────────────────────────────
-    let http_server = picast_protocols::HttpApiServer::new(&config.http_addr, session.clone());
-    let ws_server = picast_protocols::WebSocketServer::new(&config.ws_addr, session.clone());
-    let dlna_renderer = picast_protocols::DlnaRenderer::new(&config.dlna_name, &config.tor_socks);
+    let http_server = picast_protocols::HttpApiServer::new(&config.server.http_addr, session.clone());
+    let ws_server = picast_protocols::WebSocketServer::new(&config.server.ws_addr, session.clone());
+    let dlna_renderer = picast_protocols::DlnaRenderer::new(&config.dlna.friendly_name, &config.tor.socks_addr);
 
     info!("all components initialised");
 

@@ -528,7 +528,7 @@ effort. Tasks are ordered by execution sequence within each phase.
   4. Cache miss → resolve via yt-dlp → INSERT into cache
   5. Cleanup: `DELETE FROM resolved_urls WHERE resolved_at < datetime('now', '-1 hour')` on each resolve
 
-### T-4.6 Subtitle extraction
+### T-4.6 Subtitle extraction ✅
 - **Crate:** `picast-resolver`
 - **Depends on:** T-4.1
 - **Effort:** 1 day
@@ -930,7 +930,7 @@ effort. Tasks are ordered by execution sequence within each phase.
   2. `tor.health_check()`, `display.resolution()`, playback status, `which yt-dlp`
   3. Return `200 OK` if all healthy, `503` if any degraded
 
-### T-7.6 Configuration file support
+### T-7.6 Configuration file support ✅
 - **Crate:** `picast-server`
 - **Depends on:** T-0.1
 - **Effort:** 1 day
