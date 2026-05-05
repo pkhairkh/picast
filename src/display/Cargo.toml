@@ -10,3 +10,7 @@ nix = { version = "0.28", features = ["ioctl"] }
 thiserror.workspace = true
 tracing.workspace = true
 anyhow.workspace = true
+
+[dev-dependencies]
+tokio = { workspace = true }
+serde_json = { workspace = true }

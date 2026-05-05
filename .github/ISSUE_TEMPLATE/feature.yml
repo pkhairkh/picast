@@ -1,0 +1,79 @@
+name: Feature Request
+description: Propose a new feature or enhancement for PiCast
+labels: ["enhancement", "triage"]
+assignees:
+  - pkhairkh
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Thank you for suggesting a feature for PiCast. Please describe your idea clearly so we can evaluate it.
+
+  - type: textarea
+    id: description
+    attributes:
+      label: Feature Description
+      description: A clear and concise description of the feature you would like to see
+      placeholder: "e.g., Add support for HLS (HTTP Live Streaming) protocol in picast-protocols"
+    validations:
+      required: true
+
+  - type: textarea
+    id: use-case
+    attributes:
+      label: Use Case
+      description: |
+        Describe the real-world scenario where this feature would be useful.
+        Why do you need it? What problem does it solve?
+      placeholder: |
+        As a user casting media to my Pi, I want to be able to cast HLS streams
+        because many live streaming services use HLS as their primary format.
+    validations:
+      required: true
+
+  - type: dropdown
+    id: crate
+    attributes:
+      label: Affected Crate
+      description: Which crate in the PiCast workspace would this feature primarily affect?
+      options:
+        - picast-server
+        - picast-protocols
+        - picast-session
+        - picast-resolver
+        - picast-playback
+        - picast-display
+        - picast-tor
+        - Multiple / Cross-cutting
+    validations:
+      required: true
+
+  - type: textarea
+    id: implementation
+    attributes:
+      label: Proposed Implementation
+      description: |
+        If you have ideas about how this could be implemented, describe them here.
+        This is optional but helps speed up evaluation.
+      placeholder: |
+        - Add an HLS demuxer in picast-protocols using the existing GStreamer pipeline
+        - Create a new `HlsHandler` struct that implements the `ProtocolHandler` trait
+        - Extend the URL resolver in picast-resolver to detect .m3u8 URLs
+    validations:
+      required: false
+
+  - type: textarea
+    id: alternatives
+    attributes:
+      label: Alternatives Considered
+      description: Have you considered any alternative solutions or workarounds?
+    validations:
+      required: false
+
+  - type: textarea
+    id: additional
+    attributes:
+      label: Additional Context
+      description: Any other context, screenshots, or references that would help evaluate this feature
+    validations:
+      required: false

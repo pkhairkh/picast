@@ -195,3 +195,60 @@ impl SessionManager {
         Err(SessionError::NotFound(_session_id))
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn media_session_new() {
+        let session = MediaSession::new("https://example.com/video.mp4".into());
+        assert_eq!(session.source_url, "https://example.com/video.mp4");
+        assert!(session.resolved_url.is_none());
+        assert_eq!(session.state, PlayerState::Idle);
+        assert_eq!(session.position_ms, 0);
+        assert!(session.duration_ms.is_none());
+        assert_eq!(session.volume, 100);
+    }
+
+    #[test]
+    fn player_state_serde() {
+        // Verify each PlayerState variant round-trips through JSON.
+        for state in [
+            PlayerState::Idle,
+            PlayerState::Loaded,
+            PlayerState::Playing,
+            PlayerState::Paused,
+            PlayerState::Buffering,
+            PlayerState::Error,
+        ] {
+            let json = serde_json::to_string(&state).expect("serialize");
+            let decoded: PlayerState = serde_json::from_str(&json).expect("deserialize");
+            assert_eq!(decoded, state, "round-trip failed for {:?}", state);
+        }
+
+        // Verify the SCREAMING_SNAKE_CASE representation.
+        assert_eq!(
+            serde_json::to_string(&PlayerState::Idle).unwrap(),
+            r#""IDLE""#
+        );
+        assert_eq!(
+            serde_json::to_string(&PlayerState::Playing).unwrap(),
+            r#""PLAYING""#
+        );
+        assert_eq!(
+            serde_json::to_string(&PlayerState::Buffering).unwrap(),
+            r#""BUFFERING""#
+        );
+    }
+
+    #[test]
+    fn media_session_serialization_roundtrip() {
+        let session = MediaSession::new("https://example.com/video.mp4".into());
+        let json = serde_json::to_string(&session).expect("serialize");
+        let decoded: MediaSession = serde_json::from_str(&json).expect("deserialize");
+        assert_eq!(decoded.source_url, session.source_url);
+        assert_eq!(decoded.state, session.state);
+        assert_eq!(decoded.volume, session.volume);
+    }
+}

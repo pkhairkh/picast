@@ -1,0 +1,105 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - "v*"
+
+env:
+  CARGO_TERM_COLOR: always
+  TARGET: aarch64-unknown-linux-gnu
+
+jobs:
+  build-and-release:
+    name: Build & Release (aarch64)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust stable
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: aarch64-unknown-linux-gnu
+
+      - name: Install cross
+        run: cargo install cross --locked
+
+      - name: Cache Cargo
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/bin/
+            ~/.cargo/registry/index/
+            ~/.cargo/registry/cache/
+            ~/.cargo/git/db/
+            target/
+          key: ${{ runner.os }}-cargo-release-aarch64-${{ hashFiles('**/Cargo.lock') }}
+          restore-keys: ${{ runner.os }}-cargo-release-aarch64-
+
+      - name: Cross-compile release binary
+        run: cross build --target ${{ env.TARGET }} --release --workspace
+
+      - name: Prepare release artifacts
+        run: |
+          RELEASE_VERSION="${GITHUB_REF#refs/tags/v}"
+          ARTIFACT_DIR="picast-${RELEASE_VERSION}-aarch64"
+          mkdir -p "${ARTIFACT_DIR}"
+
+          cp "target/${{ env.TARGET }}/release/picast-server" "${ARTIFACT_DIR}/"
+          cp config/picast.service "${ARTIFACT_DIR}/"
+          cp config/torrc "${ARTIFACT_DIR}/"
+          cp config/iptables.rules "${ARTIFACT_DIR}/"
+          cp scripts/setup.sh "${ARTIFACT_DIR}/"
+          cp README.md "${ARTIFACT_DIR}/"
+          cp LICENSE "${ARTIFACT_DIR}/" 2>/dev/null || true
+
+          # Generate checksums
+          cd "${ARTIFACT_DIR}"
+          sha256sum picast-server > picast-server.sha256sum
+          sha256sum picast.service >> picast-server.sha256sum
+          sha256sum torrc >> picast-server.sha256sum
+          sha256sum iptables.rules >> picast-server.sha256sum
+          sha256sum setup.sh >> picast-server.sha256sum
+          cd ..
+
+          # Create tarball
+          tar czf "picast-${RELEASE_VERSION}-aarch64.tar.gz" "${ARTIFACT_DIR}"
+
+          # Generate tarball checksum
+          sha256sum "picast-${RELEASE_VERSION}-aarch64.tar.gz" > "picast-${RELEASE_VERSION}-aarch64.tar.gz.sha256sum"
+
+      - name: Generate release notes
+        id: release_notes
+        run: |
+          RELEASE_VERSION="${GITHUB_REF#refs/tags/v}"
+          echo "## PiCast v${RELEASE_VERSION}" > RELEASE_NOTES.md
+          echo "" >> RELEASE_NOTES.md
+          echo "### Binary Artifacts" >> RELEASE_NOTES.md
+          echo "" >> RELEASE_NOTES.md
+          echo "- \`picast-${RELEASE_VERSION}-aarch64.tar.gz\` — Pre-built aarch64 binary for Raspberry Pi 4B+" >> RELEASE_NOTES.md
+          echo "- \`picast-${RELEASE_VERSION}-aarch64.tar.gz.sha256sum\` — SHA-256 checksum for the tarball" >> RELEASE_NOTES.md
+          echo "" >> RELEASE_NOTES.md
+          echo "### Installation" >> RELEASE_NOTES.md
+          echo "" >> RELEASE_NOTES.md
+          echo '```bash' >> RELEASE_NOTES.md
+          echo "# Verify checksum" >> RELEASE_NOTES.md
+          echo "sha256sum -c picast-${RELEASE_VERSION}-aarch64.tar.gz.sha256sum" >> RELEASE_NOTES.md
+          echo "" >> RELEASE_NOTES.md
+          echo "# Extract" >> RELEASE_NOTES.md
+          echo "tar xzf picast-${RELEASE_VERSION}-aarch64.tar.gz" >> RELEASE_NOTES.md
+          echo "" >> RELEASE_NOTES.md
+          echo "# Run setup" >> RELEASE_NOTES.md
+          echo "cd picast-${RELEASE_VERSION}-aarch64" >> RELEASE_NOTES.md
+          echo "chmod +x setup.sh picast-server" >> RELEASE_NOTES.md
+          echo "sudo ./setup.sh" >> RELEASE_NOTES.md
+          echo '```' >> RELEASE_NOTES.md
+
+      - name: Create GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          body_path: RELEASE_NOTES.md
+          files: |
+            picast-*-aarch64.tar.gz
+            picast-*-aarch64.tar.gz.sha256sum
+          fail_on_unmatched_files: true
+          generate_release_notes: false

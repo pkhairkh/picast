@@ -1,0 +1,24 @@
+# PiCast Code Owners
+# https://docs.github.com/en/repositories/managing-your-repositorys-settings-and-features/customizing-your-repository/about-code-owners
+
+# Default owner for everything in the repository
+* @pkhairkh
+
+# Per-crate ownership
+/src/server/     @pkhairkh
+/src/protocols/  @pkhairkh
+/src/session/    @pkhairkh
+/src/resolver/   @pkhairkh
+/src/playback/   @pkhairkh
+/src/display/    @pkhairkh
+/src/tor/        @pkhairkh
+
+# Configuration and infrastructure
+/config/         @pkhairkh
+/scripts/        @pkhairkh
+/.github/        @pkhairkh
+
+# Documentation
+/docs/           @pkhairkh
+/ARCHITECTURE.md @pkhairkh
+/SPECIFICATION.md @pkhairkh

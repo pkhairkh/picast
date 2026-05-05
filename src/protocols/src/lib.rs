@@ -103,3 +103,52 @@ impl DlnaRenderer {
         Ok(())
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    // ── HTTP API Server construction ─────────────────────────────────
+
+    #[test]
+    fn http_api_server_new() {
+        let server = HttpApiServer::new("0.0.0.0:8080");
+        // Server should be constructed without error; the listen_addr
+        // is stored internally (no public accessor yet).
+        let _ = server;
+    }
+
+    #[test]
+    fn http_api_server_custom_addr() {
+        let server = HttpApiServer::new("192.168.1.100:9090");
+        let _ = server;
+    }
+
+    // ── WebSocket Server construction ────────────────────────────────
+
+    #[test]
+    fn websocket_server_new() {
+        let server = WebSocketServer::new("0.0.0.0:8081");
+        let _ = server;
+    }
+
+    #[test]
+    fn websocket_server_custom_addr() {
+        let server = WebSocketServer::new("10.0.0.1:7070");
+        let _ = server;
+    }
+
+    // ── DLNA Renderer construction ───────────────────────────────────
+
+    #[test]
+    fn dlna_renderer_new() {
+        let renderer = DlnaRenderer::new("PiCast");
+        let _ = renderer;
+    }
+
+    #[test]
+    fn dlna_renderer_custom_name() {
+        let renderer = DlnaRenderer::new("Living Room Pi");
+        let _ = renderer;
+    }
+}

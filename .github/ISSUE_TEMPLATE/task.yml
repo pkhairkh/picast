@@ -1,0 +1,86 @@
+name: Development Task
+description: Track a specific development task or improvement
+labels: ["task"]
+assignees:
+  - pkhairkh
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Use this template for actionable development tasks — refactoring, performance improvements, documentation updates, or other internal work items.
+
+  - type: textarea
+    id: description
+    attributes:
+      label: Task Description
+      description: A clear and concise description of the task
+      placeholder: "e.g., Refactor picast-session to use connection pooling for SQLite"
+    validations:
+      required: true
+
+  - type: dropdown
+    id: crate
+    attributes:
+      label: Crate
+      description: Which crate in the PiCast workspace does this task relate to?
+      options:
+        - picast-server
+        - picast-protocols
+        - picast-session
+        - picast-resolver
+        - picast-playback
+        - picast-display
+        - picast-tor
+        - Workspace / Cross-cutting
+    validations:
+      required: true
+
+  - type: textarea
+    id: implementation-notes
+    attributes:
+      label: Implementation Notes
+      description: |
+        Technical guidance on how to approach this task. Include references to
+        specific modules, traits, or functions that need to change.
+      placeholder: |
+        - Modify `src/session/src/lib.rs` to add a connection pool struct
+        - Update `SessionManager::new()` to initialize the pool
+        - Replace direct `rusqlite::Connection` calls with pool checkout/return
+        - Add a `PoolConfig` struct with max_connections and timeout fields
+    validations:
+      required: true
+
+  - type: textarea
+    id: acceptance-criteria
+    attributes:
+      label: Acceptance Criteria
+      description: |
+        Define the conditions that must be met for this task to be considered complete.
+        Use checkboxes for individual criteria.
+      placeholder: |
+        - [ ] Connection pool implementation passes all existing tests
+        - [ ] No more than N simultaneous SQLite connections under load
+        - [ ] Connection checkout timeout is configurable
+        - [ ] Documentation updated in src/session/README.md
+        - [ ] cargo clippy -- -D warnings passes
+    validations:
+      required: true
+
+  - type: textarea
+    id: dependencies
+    attributes:
+      label: Dependencies / Blockers
+      description: |
+        List any issues or tasks that must be completed before this one can start.
+        Reference issue numbers if applicable.
+      placeholder: "Depends on #12 (SQLite migration framework)"
+    validations:
+      required: false
+
+  - type: textarea
+    id: additional
+    attributes:
+      label: Additional Context
+      description: Any other relevant information, links, or references
+    validations:
+      required: false

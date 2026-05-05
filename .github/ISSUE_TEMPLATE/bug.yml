@@ -1,0 +1,125 @@
+name: Bug Report
+description: Report a bug or unexpected behavior in PiCast
+labels: ["bug", "triage"]
+assignees:
+  - pkhairkh
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Thank you for reporting a bug in PiCast. Please fill out the form below with as much detail as possible.
+
+  - type: textarea
+    id: summary
+    attributes:
+      label: Summary
+      description: A clear and concise description of the bug
+      placeholder: "e.g., Picast-server crashes when attempting to cast a DASH stream over Tor"
+    validations:
+      required: true
+
+  - type: dropdown
+    id: crate
+    attributes:
+      label: Crate Affected
+      description: Which crate in the PiCast workspace is affected?
+      options:
+        - picast-server
+        - picast-protocols
+        - picast-session
+        - picast-resolver
+        - picast-playback
+        - picast-display
+        - picast-tor
+        - Unsure / Multiple
+    validations:
+      required: true
+
+  - type: dropdown
+    id: pi-model
+    attributes:
+      label: Raspberry Pi Model
+      description: Which Raspberry Pi model are you running?
+      options:
+        - Pi 4B (1 GB)
+        - Pi 4B (2 GB)
+        - Pi 4B (4 GB)
+        - Pi 4B (8 GB)
+        - Pi 5
+        - Other / Emulated
+    validations:
+      required: true
+
+  - type: dropdown
+    id: tor-config
+    attributes:
+      label: Tor Configuration
+      description: How is Tor configured in your PiCast setup?
+      options:
+        - System Tor (default torrc)
+        - Custom torrc with stream isolation
+        - Tor via Docker
+        - Tor disabled
+        - Unsure
+    validations:
+      required: true
+
+  - type: textarea
+    id: reproduction
+    attributes:
+      label: Reproduction Steps
+      description: Step-by-step instructions to reproduce the issue
+      placeholder: |
+        1. Start picast-server with `sudo systemctl start picast`
+        2. Open the browser extension
+        3. Navigate to https://example.com/video
+        4. Click the cast button
+        5. Observe crash in journalctl
+      value: |
+        1.
+        2.
+        3.
+    validations:
+      required: true
+
+  - type: textarea
+    id: expected
+    attributes:
+      label: Expected Behavior
+      description: What did you expect to happen?
+    validations:
+      required: true
+
+  - type: textarea
+    id: actual
+    attributes:
+      label: Actual Behavior
+      description: What actually happened?
+    validations:
+      required: true
+
+  - type: textarea
+    id: logs
+    attributes:
+      label: Relevant Logs
+      description: |
+        Paste any relevant log output. You can retrieve PiCast logs with:
+        `journalctl -u picast -n 200 --no-pager`
+        Or for Tor: `journalctl -u tor -n 100 --no-pager`
+      render: shell
+    validations:
+      required: false
+
+  - type: textarea
+    id: env
+    attributes:
+      label: Environment
+      description: Additional environment details
+      placeholder: |
+        - OS: Raspberry Pi OS (Bullseye/Bookworm)
+        - Rust version: (from `rustc --version`)
+        - PiCast version/commit:
+        - GStreamer version:
+        - Tor version:
+    validations:
+      required: false

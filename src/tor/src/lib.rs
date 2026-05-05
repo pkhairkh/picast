@@ -194,3 +194,57 @@ impl Drop for TorManager {
         }
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn socks_proxy_default() {
+        let proxy = SocksProxy::default();
+        assert_eq!(proxy.host, "127.0.0.1");
+        assert_eq!(proxy.port, 9050);
+        assert!(!proxy.requires_auth);
+    }
+
+    #[test]
+    fn socks_proxy_addr_format() {
+        let proxy = SocksProxy::new("192.168.1.1", 9150);
+        assert_eq!(proxy.addr(), "192.168.1.1:9150");
+
+        let default = SocksProxy::default();
+        assert_eq!(default.addr(), "127.0.0.1:9050");
+    }
+
+    #[test]
+    fn circuit_health_default() {
+        let health = CircuitHealth::default();
+        assert_eq!(health.open_circuits, 0);
+        assert_eq!(health.built_circuits, 0);
+        assert_eq!(health.failed_circuits, 0);
+        assert!(health.latency_ms.is_none());
+        assert!(health.is_healthy, "default circuit health should be healthy");
+    }
+
+    #[test]
+    fn tor_manager_new_parses_addr() {
+        let mgr = TorManager::new("127.0.0.1:9050");
+        assert_eq!(mgr.socks().host, "127.0.0.1");
+        assert_eq!(mgr.socks().port, 9050);
+    }
+
+    #[test]
+    fn tor_manager_new_invalid_addr_falls_back() {
+        let mgr = TorManager::new("garbage");
+        // Parsing the port should fail, falling back to 9050
+        assert_eq!(mgr.socks().port, 9050);
+    }
+
+    #[test]
+    fn tor_manager_new_no_port_falls_back() {
+        let mgr = TorManager::new("127.0.0.1");
+        // No colon means parts.len() != 2, so defaults kick in
+        assert_eq!(mgr.socks().host, "127.0.0.1");
+        assert_eq!(mgr.socks().port, 9050);
+    }
+}

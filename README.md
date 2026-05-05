@@ -81,8 +81,11 @@ picast/
 ├── ARCHITECTURE.md       # Full system architecture document
 ├── SPECIFICATION.md      # API contracts, format matrix, config specs
 ├── DECISIONS.md          # Architecture Decision Records
+├── CHANGELOG.md          # Version history
+├── CONTRIBUTING.md       # Development workflow and conventions
+├── SECURITY.md           # Vulnerability reporting and threat model
 ├── src/
-│   ├── server/           # Main binary
+│   ├── server/           # Main binary + integration tests
 │   ├── protocols/        # HTTP API, WebSocket, DLNA
 │   ├── session/          # State machine, queue, ABR
 │   ├── resolver/         # URL classification, yt-dlp subprocess
@@ -90,9 +93,10 @@ picast/
 │   ├── display/          # DRM/KMS plane control
 │   ├── tor/              # SOCKS5 proxy, stream isolation
 │   └── extension/        # Browser extension (Manifest V3)
+├── .github/              # CI/CD, issue templates, PR template
 ├── config/               # systemd unit, torrc, iptables rules
-├── docs/                 # Detailed per-module documentation
-└── tests/                # Integration tests
+├── docs/                 # Detailed per-module documentation + ADRs
+└── scripts/              # Setup and development scripts
 ```
 
 ## Documentation
@@ -103,6 +107,12 @@ picast/
 | [ARCHITECTURE.md](ARCHITECTURE.md) | Complete system architecture |
 | [SPECIFICATION.md](SPECIFICATION.md) | API contracts and technical specs |
 | [DECISIONS.md](DECISIONS.md) | Architecture Decision Records |
+| [CONTRIBUTING.md](CONTRIBUTING.md) | Development workflow and conventions |
+| [SECURITY.md](SECURITY.md) | Vulnerability reporting and threat model |
+| [CHANGELOG.md](CHANGELOG.md) | Version history |
+| [docs/ROADMAP.md](docs/ROADMAP.md) | Development roadmap v0.1.0 → v2.0.0 |
+| [docs/GLOSSARY.md](docs/GLOSSARY.md) | Technical term definitions |
+| [docs/decisions/](docs/decisions/) | Individual ADR files |
 | [docs/hardware/](docs/hardware/) | BCM2711, V4L2, HVS deep dives |
 | [docs/protocols/](docs/protocols/) | HTTP, WebSocket, DLNA specs |
 | [docs/playback/](docs/playback/) | GStreamer pipelines, ABR, DRM/KMS |

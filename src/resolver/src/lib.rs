@@ -136,3 +136,66 @@ impl Resolver {
         }
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn resolver() -> Resolver {
+        Resolver::new(std::sync::Arc::new(()))
+    }
+
+    #[tokio::test]
+    async fn classify_youtube() {
+        let r = resolver();
+        let result = r.resolve("https://www.youtube.com/watch?v=dQw4w9WgXcQ")
+            .await
+            .expect("resolve should succeed");
+        assert_eq!(result.category, UrlCategory::WebPage);
+    }
+
+    #[tokio::test]
+    async fn classify_onion() {
+        let r = resolver();
+        let result = r.resolve("http://xyz123456.onion/video.mp4")
+            .await
+            .expect("resolve should succeed");
+        assert_eq!(result.category, UrlCategory::Onion);
+        assert!(result.used_tor, "onion URLs should report used_tor = true");
+    }
+
+    #[tokio::test]
+    async fn classify_hls_manifest() {
+        let r = resolver();
+        let result = r.resolve("https://cdn.example.com/live/stream.m3u8")
+            .await
+            .expect("resolve should succeed");
+        assert_eq!(result.category, UrlCategory::HlsManifest);
+    }
+
+    #[tokio::test]
+    async fn classify_dash_manifest() {
+        let r = resolver();
+        let result = r.resolve("https://cdn.example.com/vod/stream.mpd")
+            .await
+            .expect("resolve should succeed");
+        assert_eq!(result.category, UrlCategory::DashManifest);
+    }
+
+    #[tokio::test]
+    async fn classify_direct_media() {
+        for ext in &["mp4", "mkv", "webm", "mp3", "flac", "ogg"] {
+            let r = resolver();
+            let url = format!("https://example.com/media.{}", ext);
+            let result = r.resolve(&url)
+                .await
+                .expect("resolve should succeed");
+            assert_eq!(
+                result.category,
+                UrlCategory::DirectMedia,
+                ".{} should be DirectMedia",
+                ext
+            );
+        }
+    }
+}

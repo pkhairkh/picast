@@ -150,3 +150,49 @@ impl DisplayManager {
         &self.device_path
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn display_manager_default_path() {
+        let mgr = DisplayManager::new("").expect("new with empty path should succeed");
+        assert_eq!(mgr.device_path(), "/dev/dri/card0", "empty path should fall back to /dev/dri/card0");
+
+        let mgr = DisplayManager::new("/dev/dri/card1").expect("new with explicit path should succeed");
+        assert_eq!(mgr.device_path(), "/dev/dri/card1");
+    }
+
+    #[test]
+    fn display_error_variants() {
+        let err = DisplayError::DeviceOpen("/dev/dri/card0".into());
+        assert!(err.to_string().contains("failed to open DRM device"));
+
+        let err = DisplayError::Modeset("mode rejected".into());
+        assert!(err.to_string().contains("DRM mode-setting failed"));
+
+        let err = DisplayError::NoCrtc;
+        assert!(err.to_string().contains("no available CRTC"));
+
+        let err = DisplayError::NoPlane;
+        assert!(err.to_string().contains("no available plane"));
+
+        let err = DisplayError::GbmAlloc("out of memory".into());
+        assert!(err.to_string().contains("GBM allocation failed"));
+    }
+
+    #[test]
+    fn display_manager_planes_and_crtcs_empty() {
+        let mgr = DisplayManager::new("").expect("new should succeed");
+        assert!(mgr.planes().unwrap().is_empty(), "stub should return empty planes");
+        assert!(mgr.crtcs().unwrap().is_empty(), "stub should return empty CRTCs");
+    }
+
+    #[test]
+    fn display_manager_resolution_default() {
+        let mgr = DisplayManager::new("").expect("new should succeed");
+        let (w, h) = mgr.resolution().expect("resolution should succeed");
+        assert_eq!((w, h), (1920, 1080), "stub should return 1920x1080");
+    }
+}

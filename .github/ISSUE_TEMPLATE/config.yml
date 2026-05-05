@@ -1,0 +1,14 @@
+blank_issues_enabled: false
+contact_links:
+  - name: PiCast Documentation
+    url: https://github.com/pkhairkh/picast/blob/main/README.md
+    about: Please read the project documentation before opening an issue.
+  - name: Architecture Overview
+    url: https://github.com/pkhairkh/picast/blob/main/ARCHITECTURE.md
+    about: Review the PiCast architecture to understand how crates interact.
+  - name: Tor Integration Guide
+    url: https://github.com/pkhairkh/picast/blob/main/docs/tor/integration.md
+    about: Check the Tor integration guide for configuration and troubleshooting.
+  - name: Security Policy
+    url: https://github.com/pkhairkh/picast/security/policy
+    about: Report security vulnerabilities through the security policy, not public issues.
