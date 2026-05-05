@@ -1,0 +1,14 @@
+[package]
+name = "picast-resolver"
+version.workspace = true
+edition.workspace = true
+
+[dependencies]
+picast-tor = { path = "../tor" }
+tokio.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+thiserror.workspace = true
+tracing.workspace = true
+anyhow.workspace = true
+url.workspace = true

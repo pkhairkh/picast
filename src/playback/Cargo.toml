@@ -1,0 +1,14 @@
+[package]
+name = "picast-playback"
+version.workspace = true
+edition.workspace = true
+
+[dependencies]
+picast-display = { path = "../display" }
+gstreamer = "0.22"
+gstreamer-video = "0.22"
+tokio.workspace = true
+serde.workspace = true
+thiserror.workspace = true
+tracing.workspace = true
+anyhow.workspace = true

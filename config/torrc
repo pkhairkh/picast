@@ -1,0 +1,50 @@
+# /etc/tor/torrc — PiCast Configuration
+# See DECISIONS.md ADR-004 for rationale on using C Tor daemon over arti
+
+## ─── SOCKS Ports ───────────────────────────────────────────
+# Port 9050: Primary SOCKS5 with per-site stream isolation
+# SOCKS5 username determines which circuit to use (IsolateSOCKSAuth)
+SocksPort 9050 IsolateSOCKSAuth
+
+# Port 9051: Alternative port with per-destination-IP isolation
+# Used by GStreamer when per-IP isolation is preferred
+SocksPort 9051 IsolateDestAddr
+
+## ─── Streaming Optimizations ────────────────────────────────
+# Keep circuits alive longer (10 min default is too aggressive for video)
+MaxCircuitDirtiness 600
+
+# Fail fast on slow circuits — try another path
+CircuitBuildTimeout 30
+
+# Rotate to potentially better circuits periodically
+NewCircuitPeriod 120
+
+# Don't enforce entry node restrictions (reduces path diversity)
+StrictNodes 0
+
+## ─── Security ───────────────────────────────────────────────
+# Disable control port (not needed, reduces attack surface)
+ControlPort 0
+
+# Don't run as a relay or exit — client only
+ExitRelay 0
+PublishServerDescriptor 0
+
+# Disable hidden service functionality (not needed)
+HiddenServiceNonAnonymousMode 0
+
+# Reject SOCKS requests to private networks (prevent Tor bypass)
+ReachableDirAddresses *:80
+ReachableORAddresses *:443
+
+## ─── Logging ────────────────────────────────────────────────
+# Minimal logging for production
+Log notice syslog
+
+## ─── Performance ────────────────────────────────────────────
+# Use more concurrent circuits for adaptive streaming
+MaxClientCircuitsPending 32
+
+# Prefer faster nodes for streaming
+PathsNeededToBuildCircuits 0.75

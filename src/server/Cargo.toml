@@ -1,0 +1,16 @@
+[package]
+name = "picast-server"
+version.workspace = true
+edition.workspace = true
+
+[dependencies]
+picast-protocols = { path = "../protocols" }
+picast-session = { path = "../session" }
+picast-resolver = { path = "../resolver" }
+picast-playback = { path = "../playback" }
+picast-display = { path = "../display" }
+picast-tor = { path = "../tor" }
+tokio.workspace = true
+tracing.workspace = true
+tracing-subscriber.workspace = true
+anyhow.workspace = true

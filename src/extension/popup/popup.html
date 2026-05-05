@@ -1,0 +1,62 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>PiCast</title>
+  <style>
+    * { box-sizing: border-box; margin: 0; padding: 0; }
+    body { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', system-ui, sans-serif;
+           background: #1a1a2e; color: #eee; width: 320px; padding: 16px; }
+    h1 { font-size: 18px; margin-bottom: 12px; display: flex; align-items: center; gap: 8px; }
+    .status-dot { width: 10px; height: 10px; border-radius: 50%; display: inline-block; }
+    .status-dot.connected { background: #4caf50; }
+    .status-dot.disconnected { background: #f44336; }
+    .status-dot.playing { background: #4caf50; animation: pulse 1.5s infinite; }
+    @keyframes pulse { 0%,100% { opacity: 1; } 50% { opacity: 0.5; } }
+    .url-input { width: 100%; padding: 10px; border: 2px solid #333; border-radius: 8px;
+                 background: #222; color: #eee; font-size: 14px; margin-bottom: 12px; }
+    .btn-row { display: flex; gap: 8px; flex-wrap: wrap; }
+    button { padding: 8px 16px; border: none; border-radius: 6px; cursor: pointer;
+             font-size: 13px; font-weight: 600; transition: .15s; }
+    .btn-cast { background: #e50914; color: #fff; flex: 1; }
+    .btn-cast:hover { background: #ff1a25; }
+    .btn-ctrl { background: #333; color: #eee; }
+    .btn-ctrl:hover { background: #444; }
+    .status-box { margin-top: 12px; padding: 10px; background: #222; border-radius: 8px;
+                  font-size: 12px; min-height: 40px; }
+    .media-list { margin-top: 8px; max-height: 120px; overflow-y: auto; }
+    .media-item { padding: 6px 8px; background: #2a2a3e; border-radius: 4px; margin-bottom: 4px;
+                  font-size: 11px; cursor: pointer; word-break: break-all; }
+    .media-item:hover { background: #3a3a4e; }
+    .settings-link { margin-top: 12px; font-size: 11px; color: #888; cursor: pointer; }
+    .settings-link:hover { color: #aaa; }
+  </style>
+</head>
+<body>
+  <h1>
+    <span class="status-dot disconnected" id="statusDot"></span>
+    PiCast
+  </h1>
+
+  <input type="url" class="url-input" id="urlInput" placeholder="Paste video URL or use detected media">
+
+  <div class="btn-row">
+    <button class="btn-cast" id="castBtn">Cast</button>
+    <button class="btn-ctrl" id="pauseBtn">Pause</button>
+    <button class="btn-ctrl" id="stopBtn">Stop</button>
+    <button class="btn-ctrl" id="seekBackBtn">-10s</button>
+    <button class="btn-ctrl" id="seekFwdBtn">+10s</button>
+  </div>
+
+  <div class="media-list" id="mediaList">
+    <!-- Detected media URLs appear here -->
+  </div>
+
+  <div class="status-box" id="statusBox">Connecting to PiCast...</div>
+
+  <div class="settings-link" id="settingsLink">Settings</div>
+
+  <script src="popup.js"></script>
+</body>
+</html>

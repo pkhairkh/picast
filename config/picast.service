@@ -1,0 +1,51 @@
+[Unit]
+Description=PiCast Media Receiver
+After=network-online.target tor.service
+Wants=network-online.target
+Requires=tor.service
+
+[Service]
+Type=simple
+User=picast
+Group=picast
+SupplementaryGroups=video render audio
+
+# Environment
+Environment=DISPLAY=:0
+Environment=RUST_LOG=picast=info
+Environment=PICAST_HTTP_PORT=8585
+Environment=PICAST_WS_PORT=8586
+Environment=PICAST_DLNA_PORT=49152
+Environment=PICAST_TOR_SOCKS=127.0.0.1:9050
+
+# Main executable
+ExecStart=/usr/local/bin/picast
+
+# Restart policy
+Restart=on-failure
+RestartSec=5
+
+# Watchdog — if main loop doesn't tick in 30s, restart
+WatchdogSec=30
+
+# Hardening
+NoNewPrivileges=true
+ProtectSystem=strict
+ProtectHome=true
+ReadWritePaths=/tmp/picast /var/lib/picast
+PrivateTmp=false
+ProtectKernelTunables=true
+ProtectKernelModules=true
+ProtectControlGroups=true
+RestrictNamespaces=true
+LockPersonality=true
+MemoryDenyWriteExecute=true
+RestrictRealtime=true
+
+# Resource limits
+LimitNOFILE=4096
+CPUWeight=80
+IOWeight=80
+
+[Install]
+WantedBy=multi-user.target

@@ -1,0 +1,16 @@
+[package]
+name = "picast-session"
+version.workspace = true
+edition.workspace = true
+
+[dependencies]
+rusqlite = { version = "0.31", features = ["bundled"] }
+async-trait = "0.1"
+tokio.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+thiserror.workspace = true
+tracing.workspace = true
+anyhow.workspace = true
+uuid.workspace = true
+chrono.workspace = true
