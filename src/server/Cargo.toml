@@ -8,12 +8,16 @@ description = "PiCast main binary — orchestrates all subsystems"
 name = "picast"
 path = "src/main.rs"
 
+[features]
+default = []
+hw = ["picast-playback/hw", "picast-display/hw"]
+
 [dependencies]
 picast-protocols = { path = "../protocols" }
 picast-session = { path = "../session" }
 picast-resolver = { path = "../resolver" }
-picast-playback = { path = "../playback" }
-picast-display = { path = "../display" }
+picast-playback = { path = "../playback", default-features = false }
+picast-display = { path = "../display", default-features = false }
 picast-tor = { path = "../tor" }
 tokio = { workspace = true, features = ["full"] }
 tracing = { workspace = true }
@@ -24,3 +28,5 @@ async-trait = { workspace = true }
 [dev-dependencies]
 tokio = { workspace = true }
 serde_json = { workspace = true }
+reqwest = { version = "0.12", features = ["json"] }
+picast-tor = { path = "../tor" }

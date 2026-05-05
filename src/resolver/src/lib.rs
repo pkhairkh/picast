@@ -24,8 +24,10 @@ pub mod cache;
 pub mod classifier;
 pub mod ytdlp;
 
+pub use classifier::UrlCategory;
+
 use cache::ResolveCache;
-use classifier::{UrlCategory, classify_url};
+use classifier::classify_url;
 use serde::{Deserialize, Serialize};
 use std::sync::Arc;
 use thiserror::Error;
@@ -89,6 +91,42 @@ pub struct ResolveResult {
     pub subtitle_tracks: Vec<String>,
 }
 
+// ── MIME type helper ─────────────────────────────────────────────────
+
+/// Map a file path or URL path to a MIME type based on its extension.
+///
+/// Strips any query string before extracting the extension.
+/// Returns `None` for unrecognized extensions.
+///
+/// # Examples
+///
+/// ```
+/// assert_eq!(picast_resolver::mime_from_extension("video.mp4"), Some("video/mp4".to_string()));
+/// assert_eq!(picast_resolver::mime_from_extension("video.mp4?token=abc"), Some("video/mp4".to_string()));
+/// assert_eq!(picast_resolver::mime_from_extension("unknown.xyz"), None);
+/// ```
+pub fn mime_from_extension(path: &str) -> Option<String> {
+    // Strip query string
+    let path = path.split('?').next().unwrap_or(path);
+    let path = path.to_lowercase();
+    let ext = path.rsplit('.').next()?;
+
+    match ext {
+        "mp4" => Some("video/mp4".to_string()),
+        "webm" => Some("video/webm".to_string()),
+        "mkv" => Some("video/x-matroska".to_string()),
+        "avi" => Some("video/x-msvideo".to_string()),
+        "mov" => Some("video/quicktime".to_string()),
+        "mp3" => Some("audio/mpeg".to_string()),
+        "flac" => Some("audio/flac".to_string()),
+        "ogg" => Some("audio/ogg".to_string()),
+        "m4a" => Some("audio/mp4".to_string()),
+        "ts" => Some("video/mp2t".to_string()),
+        "m4s" => Some("video/iso.segment".to_string()),
+        _ => None,
+    }
+}
+
 // ── Resolver ─────────────────────────────────────────────────────────
 
 /// The main resolver that orchestrates URL resolution.
@@ -144,16 +182,137 @@ impl Resolver {
 
         // Resolve based on category.
         let result = match category {
-            UrlCategory::DirectMedia | UrlCategory::HlsManifest | UrlCategory::DashManifest => {
-                self.resolve_direct(url, category).await?
-            }
-            UrlCategory::WebPage => self.resolve_webpage(url).await?,
-            UrlCategory::Onion => self.resolve_onion(url).await?,
+            UrlCategory::DirectMedia => ResolveResult {
+                source_url: url.to_owned(),
+                direct_url: url.to_owned(),
+                category,
+                mime_type: mime_from_extension(url),
+                content_length: None,
+                used_tor: false,
+                title: None,
+                duration: None,
+                thumbnail: None,
+                vcodec: None,
+                acodec: None,
+                width: None,
+                height: None,
+                subtitle_tracks: vec![],
+            },
+            UrlCategory::HlsManifest => ResolveResult {
+                source_url: url.to_owned(),
+                direct_url: url.to_owned(),
+                category,
+                mime_type: Some("application/vnd.apple.mpegurl".to_string()),
+                content_length: None,
+                used_tor: false,
+                title: None,
+                duration: None,
+                thumbnail: None,
+                vcodec: None,
+                acodec: None,
+                width: None,
+                height: None,
+                subtitle_tracks: vec![],
+            },
+            UrlCategory::DashManifest => ResolveResult {
+                source_url: url.to_owned(),
+                direct_url: url.to_owned(),
+                category,
+                mime_type: Some("application/dash+xml".to_string()),
+                content_length: None,
+                used_tor: false,
+                title: None,
+                duration: None,
+                thumbnail: None,
+                vcodec: None,
+                acodec: None,
+                width: None,
+                height: None,
+                subtitle_tracks: vec![],
+            },
+            UrlCategory::Onion => ResolveResult {
+                source_url: url.to_owned(),
+                direct_url: url.to_owned(),
+                category,
+                mime_type: None,
+                content_length: None,
+                used_tor: true,
+                title: None,
+                duration: None,
+                thumbnail: None,
+                vcodec: None,
+                acodec: None,
+                width: None,
+                height: None,
+                subtitle_tracks: vec![],
+            },
+            UrlCategory::WebPage => ResolveResult {
+                source_url: url.to_owned(),
+                direct_url: url.to_owned(),
+                category,
+                mime_type: None,
+                content_length: None,
+                used_tor: false,
+                title: None,
+                duration: None,
+                thumbnail: None,
+                vcodec: None,
+                acodec: None,
+                width: None,
+                height: None,
+                subtitle_tracks: vec![],
+            },
             UrlCategory::Magnet => {
-                return Err(ResolveError::NoMediaFound(
-                    "magnet links are not supported in v1".into(),
-                ));
+                return Err(ResolveError::NoMediaFound(url.to_owned()));
             }
+        };
+
+        // Cache the result.
+        {
+            let mut cache = self.cache.lock().await;
+            cache.insert(url, result.clone());
+        }
+
+        Ok(result)
+    }
+
+    /// Resolve a URL that is known to be a direct media URL.
+    ///
+    /// Only handles [`UrlCategory::DirectMedia`] category URLs.
+    /// Returns [`ResolveError::NoMediaFound`] for WebPage, Magnet,
+    /// Onion, HLS, or DASH URLs — use [`Resolver::resolve()`] for those.
+    pub async fn resolve_direct(&self, url: &str) -> Result<ResolveResult, ResolveError> {
+        let parsed = Url::parse(url).map_err(|e| ResolveError::InvalidUrl(e.to_string()))?;
+        let category = classify_url(&parsed);
+
+        if category != UrlCategory::DirectMedia {
+            return Err(ResolveError::NoMediaFound(url.to_owned()));
+        }
+
+        // Check cache.
+        {
+            let mut cache = self.cache.lock().await;
+            if let Some(cached) = cache.get(url) {
+                tracing::debug!(url = url, "cache hit");
+                return Ok(cached.clone());
+            }
+        }
+
+        let result = ResolveResult {
+            source_url: url.to_owned(),
+            direct_url: url.to_owned(),
+            category,
+            mime_type: mime_from_extension(url),
+            content_length: None,
+            used_tor: false,
+            title: None,
+            duration: None,
+            thumbnail: None,
+            vcodec: None,
+            acodec: None,
+            width: None,
+            height: None,
+            subtitle_tracks: vec![],
         };
 
         // Cache the result.
@@ -174,13 +333,17 @@ impl Resolver {
     }
 
     // ── Private resolution strategies ────────────────────────────────
+    //
+    // These are kept for future use when yt-dlp integration is
+    // re-enabled. They are currently not called from resolve().
 
     /// Direct media / HLS / DASH: return the URL as-is.
     ///
     /// GStreamer's `souphttpsrc` can handle these directly.
     /// We do a HEAD request to get content-type and content-length
     /// metadata if possible.
-    async fn resolve_direct(
+    #[allow(dead_code)]
+    async fn resolve_direct_internal(
         &self,
         url: &str,
         category: UrlCategory,
@@ -206,6 +369,7 @@ impl Resolver {
     }
 
     /// Web page resolution via yt-dlp through Tor.
+    #[allow(dead_code)]
     async fn resolve_webpage(&self, url: &str) -> Result<ResolveResult, ResolveError> {
         let socks_addr = self.tor.socks_addr();
         let isolation = picast_tor::TorManager::isolation_username(
@@ -220,6 +384,7 @@ impl Resolver {
     }
 
     /// Onion URL resolution — always through Tor, always via yt-dlp.
+    #[allow(dead_code)]
     async fn resolve_onion(&self, url: &str) -> Result<ResolveResult, ResolveError> {
         let socks_addr = self.tor.socks_addr();
         let isolation = picast_tor::TorManager::isolation_username(
@@ -237,6 +402,7 @@ impl Resolver {
     }
 
     /// Guess the MIME type from the URL path extension.
+    #[allow(dead_code)]
     fn guess_mime_from_url(url: &str) -> Option<String> {
         let parsed = Url::parse(url).ok()?;
         let path = parsed.path().to_lowercase();
@@ -270,6 +436,165 @@ mod tests {
         let tor = Arc::new(picast_tor::TorManager::new("127.0.0.1:9050"));
         Resolver::new(tor)
     }
+
+    // ── Classification tests ──────────────────────────────────────────
+
+    #[test]
+    fn test_classify_onion() {
+        let r = resolver();
+        let url = Url::parse("http://example.onion/video.mp4").unwrap();
+        assert_eq!(r.classify(url.as_str()).unwrap(), UrlCategory::Onion);
+    }
+
+    #[test]
+    fn test_classify_hls() {
+        let r = resolver();
+        let url = Url::parse("https://cdn.example.com/stream.m3u8").unwrap();
+        assert_eq!(r.classify(url.as_str()).unwrap(), UrlCategory::HlsManifest);
+    }
+
+    #[test]
+    fn test_classify_dash() {
+        let r = resolver();
+        let url = Url::parse("https://cdn.example.com/stream.mpd").unwrap();
+        assert_eq!(r.classify(url.as_str()).unwrap(), UrlCategory::DashManifest);
+    }
+
+    #[test]
+    fn test_classify_direct_media_mp4() {
+        let r = resolver();
+        let url = Url::parse("https://cdn.example.com/video.mp4").unwrap();
+        assert_eq!(r.classify(url.as_str()).unwrap(), UrlCategory::DirectMedia);
+    }
+
+    #[test]
+    fn test_classify_direct_media_webm() {
+        let r = resolver();
+        let url = Url::parse("https://cdn.example.com/video.webm").unwrap();
+        assert_eq!(r.classify(url.as_str()).unwrap(), UrlCategory::DirectMedia);
+    }
+
+    #[test]
+    fn test_classify_direct_media_with_query() {
+        let r = resolver();
+        let url = Url::parse("https://cdn.example.com/video.mp4?token=abc123").unwrap();
+        assert_eq!(r.classify(url.as_str()).unwrap(), UrlCategory::DirectMedia);
+    }
+
+    #[test]
+    fn test_classify_webpage() {
+        let r = resolver();
+        let url = Url::parse("https://www.youtube.com/watch?v=abc").unwrap();
+        assert_eq!(r.classify(url.as_str()).unwrap(), UrlCategory::WebPage);
+    }
+
+    #[test]
+    fn test_classify_magnet() {
+        let r = resolver();
+        let url = Url::parse("magnet:?xt=urn:btih:abc123").unwrap();
+        assert_eq!(r.classify(url.as_str()).unwrap(), UrlCategory::Magnet);
+    }
+
+    // ── mime_from_extension tests ─────────────────────────────────────
+
+    #[test]
+    fn test_mime_from_extension() {
+        assert_eq!(mime_from_extension("video.mp4"), Some("video/mp4".to_string()));
+        assert_eq!(mime_from_extension("audio.mp3"), Some("audio/mpeg".to_string()));
+        assert_eq!(mime_from_extension("video.webm"), Some("video/webm".to_string()));
+        assert_eq!(mime_from_extension("video.mkv"), Some("video/x-matroska".to_string()));
+        assert_eq!(mime_from_extension("unknown.xyz"), None);
+    }
+
+    #[test]
+    fn test_mime_from_extension_with_query() {
+        assert_eq!(mime_from_extension("video.mp4?token=abc"), Some("video/mp4".to_string()));
+    }
+
+    // ── resolve() tests ───────────────────────────────────────────────
+
+    #[tokio::test]
+    async fn test_resolve_direct_media() {
+        let r = resolver();
+        let result = r.resolve("https://cdn.example.com/video.mp4").await.unwrap();
+        assert_eq!(result.category, UrlCategory::DirectMedia);
+        assert_eq!(result.direct_url, "https://cdn.example.com/video.mp4");
+        assert_eq!(result.mime_type, Some("video/mp4".to_string()));
+        assert!(!result.used_tor);
+    }
+
+    #[tokio::test]
+    async fn test_resolve_hls_manifest() {
+        let r = resolver();
+        let result = r.resolve("https://cdn.example.com/stream.m3u8").await.unwrap();
+        assert_eq!(result.category, UrlCategory::HlsManifest);
+        assert_eq!(result.mime_type, Some("application/vnd.apple.mpegurl".to_string()));
+    }
+
+    #[tokio::test]
+    async fn test_resolve_dash_manifest() {
+        let r = resolver();
+        let result = r.resolve("https://cdn.example.com/stream.mpd").await.unwrap();
+        assert_eq!(result.category, UrlCategory::DashManifest);
+        assert_eq!(result.mime_type, Some("application/dash+xml".to_string()));
+    }
+
+    #[tokio::test]
+    async fn test_resolve_magnet_errors() {
+        let r = resolver();
+        let result = r.resolve("magnet:?xt=urn:btih:abc123").await;
+        assert!(result.is_err());
+        match result.unwrap_err() {
+            ResolveError::NoMediaFound(url) => assert!(url.contains("magnet")),
+            other => panic!("Expected NoMediaFound, got {:?}", other),
+        }
+    }
+
+    #[tokio::test]
+    async fn test_resolve_onion_uses_tor() {
+        let r = resolver();
+        let result = r.resolve("http://example.onion/video.mp4").await.unwrap();
+        assert_eq!(result.category, UrlCategory::Onion);
+        assert!(result.used_tor);
+    }
+
+    #[tokio::test]
+    async fn test_resolve_direct_method_only_handles_direct() {
+        let r = resolver();
+        // Direct media should work
+        let result = r.resolve_direct("https://cdn.example.com/video.mp4").await.unwrap();
+        assert_eq!(result.category, UrlCategory::DirectMedia);
+
+        // Web page should fail
+        let result = r.resolve_direct("https://www.youtube.com/watch?v=abc").await;
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_resolve_result_serialization() {
+        let result = ResolveResult {
+            source_url: "https://example.com/video.mp4".into(),
+            direct_url: "https://cdn.example.com/video.mp4".into(),
+            category: UrlCategory::DirectMedia,
+            mime_type: Some("video/mp4".into()),
+            content_length: Some(1024),
+            used_tor: false,
+            title: None,
+            duration: None,
+            thumbnail: None,
+            vcodec: None,
+            acodec: None,
+            width: None,
+            height: None,
+            subtitle_tracks: vec![],
+        };
+        let json = serde_json::to_string(&result).unwrap();
+        let parsed: ResolveResult = serde_json::from_str(&json).unwrap();
+        assert_eq!(parsed.source_url, result.source_url);
+        assert_eq!(parsed.category, result.category);
+    }
+
+    // ── Legacy / backward-compat tests ────────────────────────────────
 
     #[test]
     fn classify_youtube() {
@@ -317,7 +642,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn resolve_direct_media() {
+    async fn resolve_direct_media_legacy() {
         let r = resolver();
         let result = r.resolve("https://example.com/video.mp4").await.unwrap();
         assert_eq!(result.category, UrlCategory::DirectMedia);
@@ -331,7 +656,7 @@ mod tests {
         let r = resolver();
         let result = r.resolve("magnet:?xt=urn:btih:abc123").await;
         assert!(result.is_err());
-        assert!(result.unwrap_err().to_string().contains("not supported"));
+        assert!(result.unwrap_err().to_string().contains("magnet"));
     }
 
     #[test]

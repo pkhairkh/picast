@@ -11,7 +11,7 @@
 //!
 //! ## Usage
 //!
-//! ```no_run
+//! ```ignore
 //! use picast_playback::{PlaybackEngine, PipelineConfig};
 //!
 //! #[tokio::main]
@@ -29,16 +29,22 @@
 //! }
 //! ```
 
+#[cfg(feature = "hw")]
 pub mod events;
+#[cfg(feature = "hw")]
 pub mod pipeline;
 
+#[cfg(feature = "hw")]
 use events::PlaybackEvent;
+#[cfg(feature = "hw")]
 use pipeline::{GstPipeline, PipelineState};
 use serde::{Deserialize, Serialize};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use thiserror::Error;
+#[cfg(feature = "hw")]
 use tokio::sync::mpsc;
+#[cfg(feature = "hw")]
 use tokio::sync::Mutex;
 
 // ── Errors ───────────────────────────────────────────────────────────
@@ -65,6 +71,10 @@ pub enum PlaybackError {
     /// No pipeline is currently loaded.
     #[error("no pipeline loaded — call play() first")]
     NoPipeline,
+
+    /// Hardware playback is not available (compiled without the `hw` feature).
+    #[error("hardware playback unavailable — compile with the 'hw' feature")]
+    HardwareUnavailable,
 }
 
 // ── Pipeline Config ──────────────────────────────────────────────────
@@ -138,12 +148,17 @@ impl Default for BufferHealth {
 /// (play, pause, seek, volume) into GStreamer bus messages and
 /// element property changes. Events are pushed to an `mpsc` channel
 /// so the session layer can react asynchronously.
+///
+/// When compiled without the `hw` feature, the engine is constructable
+/// but all playback operations return [`PlaybackError::HardwareUnavailable`].
 pub struct PlaybackEngine {
     /// Pipeline configuration.
     config: PipelineConfig,
     /// The GStreamer pipeline (wrapped in Arc<Mutex> for thread safety).
+    #[cfg(feature = "hw")]
     gst_pipeline: Arc<Mutex<Option<GstPipeline>>>,
     /// Event sender — cloned receivers are handed out via `events()`.
+    #[cfg(feature = "hw")]
     event_tx: mpsc::Sender<PlaybackEvent>,
     /// Whether the engine is currently playing.
     is_playing: Arc<AtomicBool>,
@@ -158,18 +173,23 @@ impl PlaybackEngine {
         // GStreamer init is deferred to pipeline construction.
         Ok(Self {
             config,
+            #[cfg(feature = "hw")]
             gst_pipeline: Arc::new(Mutex::new(None)),
+            #[cfg(feature = "hw")]
             event_tx: mpsc::channel(64).0,
             is_playing: Arc::new(AtomicBool::new(false)),
         })
     }
 
     /// Create a new engine with a custom event channel size.
-    pub fn with_channel_size(config: PipelineConfig, channel_size: usize) -> Result<Self, PlaybackError> {
-        let (event_tx, _) = mpsc::channel(channel_size);
+    pub fn with_channel_size(config: PipelineConfig, _channel_size: usize) -> Result<Self, PlaybackError> {
+        #[cfg(feature = "hw")]
+        let event_tx = mpsc::channel(_channel_size).0;
         Ok(Self {
             config,
+            #[cfg(feature = "hw")]
             gst_pipeline: Arc::new(Mutex::new(None)),
+            #[cfg(feature = "hw")]
             event_tx,
             is_playing: Arc::new(AtomicBool::new(false)),
         })
@@ -183,6 +203,7 @@ impl PlaybackEngine {
     ///
     /// The `isolation_username` is used as the SOCKS5 username for
     /// Tor's `IsolateSOCKSAuth` circuit isolation.
+    #[cfg(feature = "hw")]
     pub async fn play(
         &self,
         url: &str,
@@ -265,7 +286,19 @@ impl PlaybackEngine {
         Ok(())
     }
 
+    /// Load a URL and transition to the Playing state (stub without hardware).
+    #[cfg(not(feature = "hw"))]
+    pub async fn play(
+        &self,
+        _url: &str,
+        _socks_addr: &str,
+        _isolation_username: &str,
+    ) -> Result<(), PlaybackError> {
+        Err(PlaybackError::HardwareUnavailable)
+    }
+
     /// Pause the pipeline.
+    #[cfg(feature = "hw")]
     pub async fn pause(&self) -> Result<(), PlaybackError> {
         let mut guard = self.gst_pipeline.lock().await;
         let pipeline = guard
@@ -274,7 +307,14 @@ impl PlaybackEngine {
         pipeline.pause()
     }
 
+    /// Pause the pipeline (stub without hardware).
+    #[cfg(not(feature = "hw"))]
+    pub async fn pause(&self) -> Result<(), PlaybackError> {
+        Err(PlaybackError::HardwareUnavailable)
+    }
+
     /// Resume after a pause.
+    #[cfg(feature = "hw")]
     pub async fn resume(&self) -> Result<(), PlaybackError> {
         let mut guard = self.gst_pipeline.lock().await;
         let pipeline = guard
@@ -283,7 +323,14 @@ impl PlaybackEngine {
         pipeline.resume()
     }
 
+    /// Resume after a pause (stub without hardware).
+    #[cfg(not(feature = "hw"))]
+    pub async fn resume(&self) -> Result<(), PlaybackError> {
+        Err(PlaybackError::HardwareUnavailable)
+    }
+
     /// Stop and tear down the pipeline.
+    #[cfg(feature = "hw")]
     pub async fn stop(&self) -> Result<(), PlaybackError> {
         let mut guard = self.gst_pipeline.lock().await;
         if let Some(ref mut pipeline) = *guard {
@@ -295,7 +342,14 @@ impl PlaybackEngine {
         Ok(())
     }
 
+    /// Stop and tear down the pipeline (stub without hardware).
+    #[cfg(not(feature = "hw"))]
+    pub async fn stop(&self) -> Result<(), PlaybackError> {
+        Err(PlaybackError::HardwareUnavailable)
+    }
+
     /// Seek to an absolute position in milliseconds.
+    #[cfg(feature = "hw")]
     pub async fn seek(&self, position_ms: u64) -> Result<(), PlaybackError> {
         let mut guard = self.gst_pipeline.lock().await;
         let pipeline = guard
@@ -304,7 +358,14 @@ impl PlaybackEngine {
         pipeline.seek(position_ms)
     }
 
+    /// Seek to an absolute position in milliseconds (stub without hardware).
+    #[cfg(not(feature = "hw"))]
+    pub async fn seek(&self, _position_ms: u64) -> Result<(), PlaybackError> {
+        Err(PlaybackError::HardwareUnavailable)
+    }
+
     /// Set the playback volume (0.0–1.0).
+    #[cfg(feature = "hw")]
     pub async fn set_volume(&self, volume: f64) -> Result<(), PlaybackError> {
         let mut guard = self.gst_pipeline.lock().await;
         let pipeline = guard
@@ -313,7 +374,14 @@ impl PlaybackEngine {
         pipeline.set_volume(volume)
     }
 
+    /// Set the playback volume (stub without hardware).
+    #[cfg(not(feature = "hw"))]
+    pub async fn set_volume(&self, _volume: f64) -> Result<(), PlaybackError> {
+        Err(PlaybackError::HardwareUnavailable)
+    }
+
     /// Return the current playback position in milliseconds.
+    #[cfg(feature = "hw")]
     pub async fn position_ms(&self) -> Result<u64, PlaybackError> {
         let guard = self.gst_pipeline.lock().await;
         let pipeline = guard
@@ -322,7 +390,14 @@ impl PlaybackEngine {
         pipeline.position_ms()
     }
 
+    /// Return the current playback position in milliseconds (stub without hardware).
+    #[cfg(not(feature = "hw"))]
+    pub async fn position_ms(&self) -> Result<u64, PlaybackError> {
+        Err(PlaybackError::HardwareUnavailable)
+    }
+
     /// Return the total duration in milliseconds.
+    #[cfg(feature = "hw")]
     pub async fn duration_ms(&self) -> Result<Option<u64>, PlaybackError> {
         let guard = self.gst_pipeline.lock().await;
         let pipeline = guard
@@ -331,13 +406,26 @@ impl PlaybackEngine {
         pipeline.duration_ms()
     }
 
+    /// Return the total duration in milliseconds (stub without hardware).
+    #[cfg(not(feature = "hw"))]
+    pub async fn duration_ms(&self) -> Result<Option<u64>, PlaybackError> {
+        Err(PlaybackError::HardwareUnavailable)
+    }
+
     /// Query the current buffer health.
+    #[cfg(feature = "hw")]
     pub async fn buffer_health(&self) -> BufferHealth {
         let guard = self.gst_pipeline.lock().await;
         match guard.as_ref() {
             Some(pipeline) => pipeline.buffer_health(),
             None => BufferHealth::default(),
         }
+    }
+
+    /// Query the current buffer health (stub without hardware).
+    #[cfg(not(feature = "hw"))]
+    pub async fn buffer_health(&self) -> BufferHealth {
+        BufferHealth::default()
     }
 
     /// Return a receiver for playback events.
@@ -347,6 +435,7 @@ impl PlaybackEngine {
     /// Note: this creates a new channel pair since mpsc is single-consumer.
     /// For broadcast semantics, use `tokio::sync::broadcast` in the
     /// session layer.
+    #[cfg(feature = "hw")]
     pub fn events(&self) -> mpsc::Receiver<PlaybackEvent> {
         // Since mpsc::Sender is single-consumer, we need a workaround.
         // For v1, we'll use a broadcast channel internally.
@@ -407,6 +496,9 @@ mod tests {
 
         let err = PlaybackError::NoPipeline;
         assert!(err.to_string().contains("no pipeline loaded"));
+
+        let err = PlaybackError::HardwareUnavailable;
+        assert!(err.to_string().contains("hardware playback unavailable"));
     }
 
     #[test]
@@ -446,5 +538,30 @@ mod tests {
     fn playback_engine_custom_channel_size() {
         let engine = PlaybackEngine::with_channel_size(PipelineConfig::default(), 128);
         assert!(engine.is_ok());
+    }
+
+    #[tokio::test]
+    async fn playback_engine_hw_unavailable_without_feature() {
+        let engine = PlaybackEngine::new(PipelineConfig::default()).unwrap();
+
+        // All playback methods should return HardwareUnavailable when hw feature is off.
+        let result = engine.play("https://example.com/video.mp4", "", "").await;
+        assert!(result.is_err());
+        match result.unwrap_err() {
+            PlaybackError::HardwareUnavailable => {},
+            other => panic!("Expected HardwareUnavailable, got {:?}", other),
+        }
+
+        assert!(engine.pause().await.is_err());
+        assert!(engine.resume().await.is_err());
+        assert!(engine.stop().await.is_err());
+        assert!(engine.seek(0).await.is_err());
+        assert!(engine.set_volume(0.5).await.is_err());
+        assert!(engine.position_ms().await.is_err());
+        assert!(engine.duration_ms().await.is_err());
+
+        // buffer_health should return defaults without error.
+        let health = engine.buffer_health().await;
+        assert_eq!(health.fill_percent, 100);
     }
 }

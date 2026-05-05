@@ -11,6 +11,7 @@ tracing = { workspace = true }
 reqwest = { version = "0.12", features = ["socks"] }
 sha2 = { workspace = true }
 hex = { workspace = true }
+url = { workspace = true }
 libc = "0.2"
 
 [dev-dependencies]

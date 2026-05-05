@@ -19,6 +19,7 @@ serde_json = { workspace = true }
 tracing = { workspace = true }
 anyhow = { workspace = true }
 uuid = { workspace = true }
+libc = "0.2"
 
 [dev-dependencies]
 tokio = { workspace = true, features = ["rt-multi-thread", "macros", "time", "sync"] }

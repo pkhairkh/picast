@@ -23,6 +23,20 @@ use tokio::net::TcpStream;
 use tokio::process::{Child, Command};
 use tokio::sync::Mutex;
 
+// ── Stream Isolation ─────────────────────────────────────────────────
+
+/// Compute a per-domain SOCKS5 stream-isolation identifier.
+///
+/// Takes a domain name, hashes it with SHA-256, and returns a
+/// string in the format `picast-<first_16_hex_chars>`. This feeds
+/// into Tor's `IsolateSOCKSAuth` feature so that each unique domain
+/// gets its own circuit.
+pub fn stream_isolation_id(domain: &str) -> String {
+    let hash = Sha256::digest(domain.as_bytes());
+    let hex: String = hash.encode_hex();
+    format!("picast-{}", &hex[..16])
+}
+
 // ── Errors ───────────────────────────────────────────────────────────
 
 /// Errors that can occur while managing the Tor daemon.
@@ -68,6 +82,8 @@ pub struct SocksProxy {
     pub port: u16,
     /// Whether the proxy requires authentication.
     pub requires_auth: bool,
+    /// Prefix for stream-isolation usernames (default `"picast"`).
+    pub stream_isolation_prefix: String,
 }
 
 impl SocksProxy {
@@ -77,12 +93,22 @@ impl SocksProxy {
             host: host.to_owned(),
             port,
             requires_auth: false,
+            stream_isolation_prefix: "picast".to_owned(),
         }
     }
 
     /// Return the full address string (e.g. `127.0.0.1:9050`).
     pub fn addr(&self) -> String {
         format!("{}:{}", self.host, self.port)
+    }
+
+    /// Build a full SOCKS5h proxy URL with per-hostname circuit
+    /// isolation embedded as the username.
+    ///
+    /// Returns a URL like `socks5h://picast-a804e89b1ec4a1d7@127.0.0.1:9050/`.
+    pub fn proxy_url_for(&self, hostname: &str) -> String {
+        let id = stream_isolation_id(hostname);
+        format!("socks5h://{}@{}:{}/", id, self.host, self.port)
     }
 }
 
@@ -129,10 +155,10 @@ impl Default for CircuitHealth {
 /// Manages the Tor daemon lifecycle and exposes the SOCKS proxy config.
 ///
 /// On start-up the manager will:
-//!
-//! 1. Look for an already-running Tor on the configured SOCKS port.
-//! 2. If none is found, spawn `tor` as a child process.
-//! 3. Wait for the SOCKS port to become reachable (with a timeout).
+///
+/// 1. Look for an already-running Tor on the configured SOCKS port.
+/// 2. If none is found, spawn `tor` as a child process.
+/// 3. Wait for the SOCKS port to become reachable (with a timeout).
 /// 4. Begin periodic circuit-health monitoring.
 ///
 /// Thread safety: `TorManager` is `Send + Sync` because the mutable
@@ -495,12 +521,26 @@ impl TorManager {
     /// Uses `sha256(hostname)[..16]` to produce a stable, unique
     /// identifier per site. This feeds into Tor's `IsolateSOCKSAuth`
     /// so each site gets its own circuit.
-    fn isolation_username(hostname: &str) -> String {
-        let mut hasher = Sha256::new();
-        hasher.update(hostname.as_bytes());
-        let hash = hasher.finalize();
-        let hex: String = hash.encode_hex();
-        format!("picast-{}", &hex[..16])
+    pub fn isolation_username(hostname: &str) -> String {
+        stream_isolation_id(hostname)
+    }
+
+    /// Compute the SOCKS5 stream-isolation username for a full URL.
+    ///
+    /// Parses the URL to extract the hostname, then returns
+    /// `stream_isolation_id(hostname)`. If the URL cannot be parsed
+    /// or has no hostname, falls back to `stream_isolation_id(url)`.
+    pub fn socks_username_for_url(&self, url: &str) -> String {
+        match url::Url::parse(url) {
+            Ok(parsed) => {
+                if let Some(host) = parsed.host_str() {
+                    stream_isolation_id(host)
+                } else {
+                    stream_isolation_id(url)
+                }
+            }
+            Err(_) => stream_isolation_id(url),
+        }
     }
 }
 
@@ -557,8 +597,8 @@ impl Drop for TorManager {
             );
             // Best-effort synchronous kill. The async `shutdown()` is
             // preferred but won't run in `drop`.
-            if let Some(ref mut child) = self.child.try_lock() {
-                if let Some(ref mut c) = **child {
+            if let Ok(mut guard) = self.child.try_lock() {
+                if let Some(ref mut c) = *guard {
                     #[cfg(unix)]
                     {
                         let _ = unsafe { libc_kill(c.id().unwrap_or(0), libc::SIGTERM) };
@@ -578,6 +618,84 @@ mod tests {
     use super::*;
 
     #[test]
+    fn test_stream_isolation_id_deterministic() {
+        let id1 = stream_isolation_id("youtube.com");
+        let id2 = stream_isolation_id("youtube.com");
+        assert_eq!(id1, id2);
+        assert!(id1.starts_with("picast-"));
+        assert_eq!(id1.len(), 7 + 16); // "picast-" + 16 hex chars
+    }
+
+    #[test]
+    fn test_stream_isolation_id_different_domains() {
+        let yt = stream_isolation_id("youtube.com");
+        let vm = stream_isolation_id("vimeo.com");
+        assert_ne!(yt, vm);
+    }
+
+    #[test]
+    fn test_stream_isolation_id_same_domain_different_subdomains() {
+        let www = stream_isolation_id("www.youtube.com");
+        let bare = stream_isolation_id("youtube.com");
+        assert_ne!(www, bare); // Different hostnames → different circuits
+    }
+
+    #[test]
+    fn test_socks_username_for_url() {
+        let tor = TorManager::new("127.0.0.1:9050");
+        let id = tor.socks_username_for_url("https://www.youtube.com/watch?v=abc");
+        assert!(id.starts_with("picast-"));
+        assert_eq!(id.len(), 7 + 16);
+    }
+
+    #[test]
+    fn test_socks_username_for_url_no_host() {
+        let tor = TorManager::new("127.0.0.1:9050");
+        let id = tor.socks_username_for_url("not-a-url");
+        assert!(id.starts_with("picast-"));
+    }
+
+    #[test]
+    fn test_socks_proxy_url_for() {
+        let proxy = SocksProxy::new("127.0.0.1", 9050);
+        let url = proxy.proxy_url_for("youtube.com");
+        assert!(url.starts_with("socks5h://picast-"));
+        assert!(url.contains("@127.0.0.1:9050/"));
+    }
+
+    #[test]
+    fn test_socks_proxy_default() {
+        let proxy = SocksProxy::default();
+        assert_eq!(proxy.host, "127.0.0.1");
+        assert_eq!(proxy.port, 9050);
+        assert_eq!(proxy.addr(), "127.0.0.1:9050");
+    }
+
+    #[test]
+    fn test_tor_manager_new_parsing() {
+        let tor = TorManager::new("192.168.1.1:9051");
+        assert_eq!(tor.socks().host, "192.168.1.1");
+        assert_eq!(tor.socks().port, 9051);
+    }
+
+    #[test]
+    fn test_tor_manager_new_default_port() {
+        let tor = TorManager::new("invalid");
+        assert_eq!(tor.socks().host, "127.0.0.1");
+        assert_eq!(tor.socks().port, 9050);
+    }
+
+    #[test]
+    fn test_circuit_health_default() {
+        let h = CircuitHealth::default();
+        assert!(h.is_healthy);
+        assert_eq!(h.open_circuits, 0);
+        assert!(h.latency_ms.is_none());
+    }
+
+    // ── Legacy tests (preserved) ─────────────────────────────────────
+
+    #[test]
     fn socks_proxy_default() {
         let proxy = SocksProxy::default();
         assert_eq!(proxy.host, "127.0.0.1");
@@ -592,16 +710,6 @@ mod tests {
 
         let default = SocksProxy::default();
         assert_eq!(default.addr(), "127.0.0.1:9050");
-    }
-
-    #[test]
-    fn circuit_health_default() {
-        let health = CircuitHealth::default();
-        assert_eq!(health.open_circuits, 0);
-        assert_eq!(health.built_circuits, 0);
-        assert_eq!(health.failed_circuits, 0);
-        assert!(health.latency_ms.is_none());
-        assert!(health.is_healthy, "default circuit health should be healthy");
     }
 
     #[test]

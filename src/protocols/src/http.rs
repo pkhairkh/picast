@@ -20,10 +20,9 @@ use anyhow::Result;
 use hyper::body::Incoming;
 use hyper::{Method, Request, Response, StatusCode};
 use http_body_util::Full;
-use picast_session::{MediaSession, PlayerState, SessionEvent, SessionManager};
+use picast_session::{MediaSession, SessionManager};
 use serde::{Deserialize, Serialize};
 use std::sync::Arc;
-use tokio::sync::broadcast;
 use tracing;
 
 /// Type alias for the HTTP response body.
@@ -111,6 +110,7 @@ impl HttpApiServer {
         tracing::info!(addr = %self.listen_addr, "HTTP API server listening");
 
         let session = self.session.clone();
+        let mut shutdown = std::pin::pin!(shutdown);
 
         loop {
             tokio::select! {
@@ -133,7 +133,7 @@ impl HttpApiServer {
                         }
                     });
                 }
-                _ = &mut std::pin::pin!(shutdown) => {
+                _ = shutdown.as_mut() => {
                     tracing::info!("HTTP API server shutting down");
                     break;
                 }
@@ -171,7 +171,7 @@ async fn handle_request(
 
         // Status.
         (Method::GET, "/api/status") => {
-            match session.status().await {
+            match session.current_status().await {
                 Ok(s) => {
                     let resp = StatusResponse::from_session(&s);
                     json_response(StatusCode::OK, &resp)
@@ -179,7 +179,7 @@ async fn handle_request(
                 Err(_) => {
                     let resp = StatusResponse {
                         session_id: None,
-                        state: "IDLE".into(),
+                        state: "idle".into(),
                         source_url: None,
                         resolved_url: None,
                         position_ms: 0,
@@ -223,7 +223,7 @@ async fn handle_request(
             Ok(()) => {
                 let resp = StatusResponse {
                     session_id: None,
-                    state: "IDLE".into(),
+                    state: "idle".into(),
                     source_url: None,
                     resolved_url: None,
                     position_ms: 0,
@@ -238,13 +238,13 @@ async fn handle_request(
 
         // Pause.
         (Method::POST, "/api/pause") => match session.pause().await {
-            Ok(()) => json_response(StatusCode::OK, &serde_json::json!({"status": "PAUSED"})),
+            Ok(()) => json_response(StatusCode::OK, &serde_json::json!({"status": "paused"})),
             Err(e) => error_response(StatusCode::CONFLICT, &e.to_string()),
         },
 
         // Resume.
         (Method::POST, "/api/resume") => match session.resume().await {
-            Ok(()) => json_response(StatusCode::OK, &serde_json::json!({"status": "PLAYING"})),
+            Ok(()) => json_response(StatusCode::OK, &serde_json::json!({"status": "playing"})),
             Err(e) => error_response(StatusCode::CONFLICT, &e.to_string()),
         },
 
@@ -318,7 +318,8 @@ fn cors_response(status: StatusCode) -> Response<BoxBody> {
 async fn read_body_json<T: serde::de::DeserializeOwned>(
     body: Incoming,
 ) -> Result<T> {
-    let bytes = hyper::body::to_bytes(body).await?;
+    use http_body_util::BodyExt;
+    let bytes = body.collect().await?.to_bytes();
     Ok(serde_json::from_slice(&bytes)?)
 }
 
@@ -346,7 +347,7 @@ mod tests {
         let session = MediaSession::new("https://example.com/video.mp4".into());
         let resp = StatusResponse::from_session(&session);
         assert!(resp.session_id.is_some());
-        assert_eq!(resp.state, "IDLE");
+        assert_eq!(resp.state, "idle");
         assert_eq!(resp.source_url, Some("https://example.com/video.mp4".into()));
     }
 

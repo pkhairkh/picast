@@ -90,16 +90,19 @@ impl ResolveCache {
     pub fn get(&mut self, url: &str) -> Option<&ResolveResult> {
         let now = Instant::now();
 
-        if let Some(entry) = self.entries.get(url) {
-            if now.duration_since(entry.inserted_at) < self.ttl {
-                return Some(&entry.result);
-            } else {
-                // Entry expired — remove it.
-                self.entries.remove(url);
-            }
+        // Check if the entry exists and is still valid.
+        let is_valid = self.entries.get(url).map_or(false, |entry| {
+            now.duration_since(entry.inserted_at) < self.ttl
+        });
+
+        if !is_valid {
+            // Remove expired entry if it exists.
+            self.entries.remove(url);
+            return None;
         }
 
-        None
+        // Entry is valid — return a reference.
+        Some(&self.entries.get(url).unwrap().result)
     }
 
     /// Remove all expired entries from the cache.

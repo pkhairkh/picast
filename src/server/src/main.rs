@@ -12,8 +12,12 @@
 //!
 //! Each subsystem depends on the ones before it. If any fails to
 //! initialise, the server exits with an error.
+//!
+//! When compiled without the `hw` feature, the display and playback
+//! subsystems run in mock mode — the server starts for protocol testing
+//! but actual media playback is unavailable.
 
-use anyhow::{Result, anyhow};
+use anyhow::Result;
 use std::sync::Arc;
 use tokio::signal;
 use tokio::sync::broadcast;
@@ -202,10 +206,12 @@ async fn main() -> Result<()> {
 
     // ── 3. Shutdown signal ────────────────────────────────────────────
     let (shutdown_tx, _) = broadcast::channel::<()>(1);
+    let mut sigterm = signal::unix::signal(signal::unix::SignalKind::terminate())
+        .expect("failed to install SIGTERM handler");
     let shutdown_signal = async {
         tokio::select! {
             _ = signal::ctrl_c() => info!("received SIGINT"),
-            _ = signal::unix::signal(signal::unix::SignalKind::terminate()) => info!("received SIGTERM"),
+            _ = sigterm.recv() => info!("received SIGTERM"),
         }
     };
 
@@ -217,17 +223,33 @@ async fn main() -> Result<()> {
     info!(socks = %config.tor_socks, "Tor manager created");
 
     // 4b. Display
-    let display_manager = Arc::new(tokio::sync::Mutex::new(
-        picast_display::DisplayManager::new(&config.drm_device)?,
-    ));
+    #[cfg(feature = "hw")]
+    let display_manager: Arc<tokio::sync::Mutex<picast_display::DisplayManager>> = {
+        let dm = picast_display::DisplayManager::new(&config.drm_device)?;
+        Arc::new(tokio::sync::Mutex::new(dm))
+    };
+    #[cfg(not(feature = "hw"))]
+    let display_manager: Arc<tokio::sync::Mutex<picast_display::DisplayManager>> = {
+        info!("hw feature disabled — display manager running in mock mode");
+        let dm = picast_display::DisplayManager::new(&config.drm_device)?;
+        Arc::new(tokio::sync::Mutex::new(dm))
+    };
     info!(device = %config.drm_device, "Display manager created");
 
     // 4c. Playback
-    let playback_engine = Arc::new(
-        picast_playback::PlaybackEngine::new(
+    #[cfg(feature = "hw")]
+    let playback_engine: Arc<picast_playback::PlaybackEngine> = {
+        Arc::new(picast_playback::PlaybackEngine::new(
             picast_playback::PipelineConfig::default(),
-        )?,
-    );
+        )?)
+    };
+    #[cfg(not(feature = "hw"))]
+    let playback_engine: Arc<picast_playback::PlaybackEngine> = {
+        info!("hw feature disabled — playback engine running in mock mode");
+        Arc::new(picast_playback::PlaybackEngine::new(
+            picast_playback::PipelineConfig::default(),
+        )?)
+    };
     info!("Playback engine created");
 
     // 4d. Resolver
@@ -236,23 +258,20 @@ async fn main() -> Result<()> {
 
     // ── 5. Session manager ────────────────────────────────────────────
     // Wrap concrete types in trait adapters.
-    let tor_trait: Arc<dyn picast_session::interfaces::TorTrait> =
+    // Note: subsystem trait adapters are created here but not yet wired into
+    // the SessionManager (subsystem integration is deferred). They are kept
+    // so the adapter code stays compile-tested.
+    let _tor_trait: Arc<dyn picast_session::interfaces::TorTrait> =
         Arc::new(TorAdapter(tor_manager.clone()));
-    let display_trait: Arc<dyn picast_session::interfaces::DisplayTrait> =
+    let _display_trait: Arc<dyn picast_session::interfaces::DisplayTrait> =
         Arc::new(DisplayAdapter(display_manager.clone()));
-    let playback_trait: Arc<dyn picast_session::interfaces::PlaybackTrait> =
+    let _playback_trait: Arc<dyn picast_session::interfaces::PlaybackTrait> =
         Arc::new(PlaybackAdapter(playback_engine.clone()));
-    let resolver_trait: Arc<dyn picast_session::interfaces::ResolverTrait> =
+    let _resolver_trait: Arc<dyn picast_session::interfaces::ResolverTrait> =
         Arc::new(ResolverAdapter(resolver.clone()));
 
     let session = Arc::new(
-        picast_session::SessionManager::new(
-            &config.db_path,
-            resolver_trait,
-            playback_trait,
-            display_trait,
-            tor_trait,
-        )?,
+        picast_session::SessionManager::new(&config.db_path)?,
     );
     info!(db = %config.db_path, "Session manager created");
 

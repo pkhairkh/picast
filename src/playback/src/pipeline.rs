@@ -1,3 +1,4 @@
+#![cfg(feature = "hw")]
 //! PiCast GStreamer Pipeline Construction
 //!
 //! Builds and manages the GStreamer pipeline for H.264 video playback

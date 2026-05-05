@@ -33,14 +33,26 @@
 //! ```sh
 //! modprobe vkms enable_writeback=1
 //! ```
+//!
+//! When compiled without the `hw` feature, the display manager
+//! operates in mock mode — all types are available but DRM operations
+//! are no-ops.
 
+#[cfg(feature = "hw")]
 use drm::control::Mode;
+#[cfg(feature = "hw")]
 use drm::control::connector::{Connector, Info as ConnectorInfo, State as ConnectorState};
+#[cfg(feature = "hw")]
 use drm::control::crtc::{Info as CrtcInfo, Crtc};
+#[cfg(feature = "hw")]
 use drm::control::plane::{Info as PlaneInfo, PlaneType};
+#[cfg(feature = "hw")]
 use drm::Device as DrmDevice;
+#[cfg(feature = "hw")]
 use std::fs::OpenOptions;
+#[cfg(feature = "hw")]
 use std::os::unix::io::AsRawFd;
+#[cfg(feature = "hw")]
 use std::path::Path;
 use thiserror::Error;
 
@@ -80,6 +92,10 @@ pub enum DisplayError {
     /// GBM buffer allocation failed.
     #[error("GBM allocation failed: {0}")]
     GbmAlloc(String),
+
+    /// Hardware display is not available (compiled without the `hw` feature).
+    #[error("hardware display unavailable — compile with the 'hw' feature")]
+    HardwareUnavailable,
 
     /// An I/O error occurred.
     #[error("IO error: {0}")]
@@ -148,10 +164,15 @@ pub struct DisplayConnector {
 /// Typically created once at startup and held for the lifetime of the
 /// application. On creation, the manager opens the DRM device node,
 /// acquires DRM master, and enumerates available resources.
+///
+/// When compiled without the `hw` feature, the manager operates in
+/// mock mode — `new()` always succeeds, and `acquire()`/`release()`
+/// are no-ops.
 pub struct DisplayManager {
     /// Path to the DRM device node (e.g. `/dev/dri/card0`).
     device_path: String,
     /// Raw file descriptor for the DRM device.
+    #[cfg(feature = "hw")]
     drm_fd: Option<std::fs::File>,
     /// Cached list of connectors (populated on acquire).
     connectors: Vec<DisplayConnector>,
@@ -162,10 +183,12 @@ pub struct DisplayManager {
     /// Currently active CRTC (set after acquire).
     active_crtc: Option<DrmCrtc>,
     /// Saved CRTC state for restoration on release.
+    #[cfg(feature = "hw")]
     saved_crtc: Option<SavedCrtcState>,
 }
 
 /// Saved CRTC state for restoration on release.
+#[cfg(feature = "hw")]
 struct SavedCrtcState {
     crtc_id: u32,
     fb_id: Option<u32>,
@@ -174,6 +197,9 @@ struct SavedCrtcState {
     y: u32,
 }
 
+// ── HW implementation ────────────────────────────────────────────────
+
+#[cfg(feature = "hw")]
 impl DisplayManager {
     /// Open the DRM device at `device_path` and acquire master.
     ///
@@ -427,6 +453,82 @@ impl DisplayManager {
     }
 }
 
+// ── Mock implementation (no hw feature) ──────────────────────────────
+
+#[cfg(not(feature = "hw"))]
+impl DisplayManager {
+    /// Create a mock display manager.
+    ///
+    /// In mock mode, the manager does not open any DRM device.
+    /// All operations return success with default values.
+    pub fn new(device_path: &str) -> Result<Self, DisplayError> {
+        let path = if device_path.is_empty() {
+            "/dev/dri/card0".to_owned()
+        } else {
+            device_path.to_owned()
+        };
+
+        tracing::info!(path = %path, "created mock display manager (hw feature disabled)");
+
+        Ok(Self {
+            device_path: path,
+            connectors: Vec::new(),
+            planes: Vec::new(),
+            crtcs: Vec::new(),
+            active_crtc: None,
+        })
+    }
+
+    /// Enumerate available DRM planes (empty in mock mode).
+    pub fn planes(&self) -> Result<&[DrmPlane], DisplayError> {
+        Ok(&self.planes)
+    }
+
+    /// Enumerate available CRTCs (empty in mock mode).
+    pub fn crtcs(&self) -> Result<&[DrmCrtc], DisplayError> {
+        Ok(&self.crtcs)
+    }
+
+    /// Enumerate connected display connectors (empty in mock mode).
+    pub fn connectors(&self) -> Result<&[DisplayConnector], DisplayError> {
+        Ok(&self.connectors)
+    }
+
+    /// Acquire the primary CRTC (no-op in mock mode).
+    pub fn acquire(&mut self) -> Result<(), DisplayError> {
+        tracing::debug!("acquire called in mock mode — no-op");
+        Ok(())
+    }
+
+    /// Release the CRTC (no-op in mock mode).
+    pub fn release(&mut self) -> Result<(), DisplayError> {
+        tracing::debug!("release called in mock mode — no-op");
+        self.active_crtc = None;
+        Ok(())
+    }
+
+    /// Return the current display resolution (default 1920×1080 in mock mode).
+    pub fn resolution(&self) -> Result<(u32, u32), DisplayError> {
+        Ok((1920, 1080))
+    }
+
+    /// Return the DRM device path.
+    pub fn device_path(&self) -> &str {
+        &self.device_path
+    }
+
+    /// Return the active CRTC (always None in mock mode).
+    pub fn active_crtc(&self) -> Option<&DrmCrtc> {
+        self.active_crtc.as_ref()
+    }
+
+    /// Clear the screen (no-op in mock mode).
+    pub fn clear_screen(&mut self) -> Result<(), DisplayError> {
+        tracing::debug!("clear_screen called in mock mode — no-op");
+        Ok(())
+    }
+}
+
 impl Drop for DisplayManager {
     fn drop(&mut self) {
         if self.active_crtc.is_some() {
@@ -467,6 +569,9 @@ mod tests {
 
         let err = DisplayError::GbmAlloc("out of memory".into());
         assert!(err.to_string().contains("GBM allocation failed"));
+
+        let err = DisplayError::HardwareUnavailable;
+        assert!(err.to_string().contains("hardware display unavailable"));
     }
 
     #[test]
@@ -512,32 +617,50 @@ mod tests {
     }
 
     #[test]
-    fn display_manager_new_fails_gracefully_without_device() {
-        // On a system without /dev/dri, this should return an error.
+    fn display_manager_new_succeeds_in_mock_mode() {
+        // Without the hw feature, DisplayManager::new always succeeds
+        // (mock mode — doesn't actually open a DRM device).
         let result = DisplayManager::new("/dev/dri/nonexistent");
-        assert!(result.is_err(), "should fail with nonexistent device");
+        assert!(result.is_ok(), "mock DisplayManager::new should succeed");
     }
 
     #[test]
     fn display_manager_default_resolution_without_crtc() {
-        // Construct a manager with a fake path — cannot actually open
-        // the DRM device on a non-Pi system, so we test the resolution
-        // fallback logic manually.
-        // The real test is: resolution() returns (1920, 1080) when no
-        // active CRTC is set.
-        let expected = (1920u32, 1080u32);
-        // Can't create DisplayManager without /dev/dri, so test the
-        // fallback value directly.
-        assert_eq!(expected, (1920, 1080));
+        let dm = DisplayManager::new("").unwrap();
+        let res = dm.resolution().unwrap();
+        assert_eq!(res, (1920, 1080));
     }
 
     #[test]
-    fn find_dri_device_returns_path_if_exists() {
-        // This tests the auto-detection logic.
-        // On most CI systems, /dev/dri/card0 doesn't exist, so this
-        // will return an error — that's expected.
-        let result = DisplayManager::find_dri_device();
-        // Just verify it doesn't panic.
-        let _ = result;
+    fn display_manager_acquire_release_mock() {
+        let mut dm = DisplayManager::new("").unwrap();
+        assert!(dm.acquire().is_ok());
+        assert!(dm.release().is_ok());
+    }
+
+    #[test]
+    fn display_manager_clear_screen_mock() {
+        let mut dm = DisplayManager::new("").unwrap();
+        assert!(dm.clear_screen().is_ok());
+    }
+
+    #[test]
+    fn display_manager_planes_crtcs_connectors_empty() {
+        let dm = DisplayManager::new("").unwrap();
+        assert!(dm.planes().unwrap().is_empty());
+        assert!(dm.crtcs().unwrap().is_empty());
+        assert!(dm.connectors().unwrap().is_empty());
+    }
+
+    #[test]
+    fn display_manager_active_crtc_none() {
+        let dm = DisplayManager::new("").unwrap();
+        assert!(dm.active_crtc().is_none());
+    }
+
+    #[test]
+    fn display_manager_device_path() {
+        let dm = DisplayManager::new("/dev/dri/card1").unwrap();
+        assert_eq!(dm.device_path(), "/dev/dri/card1");
     }
 }

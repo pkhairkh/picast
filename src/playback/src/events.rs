@@ -1,3 +1,4 @@
+#![cfg(feature = "hw")]
 //! PiCast Playback Events
 //!
 //! Defines the event types emitted by the playback engine during

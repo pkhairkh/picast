@@ -109,6 +109,8 @@ impl WebSocketServer {
         let listener = TcpListener::bind(&self.listen_addr).await?;
         tracing::info!(addr = %self.listen_addr, "WebSocket server listening");
 
+        let mut shutdown = std::pin::pin!(shutdown);
+
         loop {
             tokio::select! {
                 accept_result = listener.accept() => {
@@ -130,7 +132,7 @@ impl WebSocketServer {
                         }
                     });
                 }
-                _ = &mut std::pin::pin!(shutdown) => {
+                _ = shutdown.as_mut() => {
                     tracing::info!("WebSocket server shutting down");
                     break;
                 }
@@ -202,6 +204,9 @@ async fn handle_client(
                                 }
                             }
                         }
+                    }
+                    Some(Ok(Message::Pong(_))) => {
+                        // Pong received — auto-handled by tungstenite.
                     }
                     Some(Ok(Message::Frame(_))) => {}
                     Some(Err(e)) => {
@@ -297,9 +302,9 @@ fn map_session_event(event: &SessionEvent) -> Option<ServerEvent> {
             // for full details. We send a lightweight status update.
             Some(ServerEvent::MediaStatus {
                 state: match event {
-                    SessionEvent::Playing { .. } => "PLAYING",
-                    SessionEvent::Paused { .. } => "PAUSED",
-                    SessionEvent::Stopped { .. } => "IDLE",
+                    SessionEvent::Playing { .. } => "playing",
+                    SessionEvent::Paused { .. } => "paused",
+                    SessionEvent::Stopped { .. } => "idle",
                     _ => "UNKNOWN",
                 }
                 .into(),
@@ -325,7 +330,7 @@ fn map_session_event(event: &SessionEvent) -> Option<ServerEvent> {
             duration_ms,
             ..
         } => Some(ServerEvent::MediaStatus {
-            state: "PLAYING".into(),
+            state: "playing".into(),
             position_ms: *position_ms,
             duration_ms: *duration_ms,
             volume: 100,
@@ -333,10 +338,18 @@ fn map_session_event(event: &SessionEvent) -> Option<ServerEvent> {
             title: None,
         }),
         SessionEvent::VolumeChanged { volume, .. } => Some(ServerEvent::MediaStatus {
-            state: "PLAYING".into(),
+            state: "playing".into(),
             position_ms: 0,
             duration_ms: None,
             volume: *volume,
+            source_url: None,
+            title: None,
+        }),
+        SessionEvent::Seeking { position_ms, .. } => Some(ServerEvent::MediaStatus {
+            state: "seeking".into(),
+            position_ms: *position_ms,
+            duration_ms: None,
+            volume: 100,
             source_url: None,
             title: None,
         }),
