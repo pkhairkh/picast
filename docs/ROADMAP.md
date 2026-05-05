@@ -6,6 +6,8 @@
 
 This roadmap defines the release plan from foundation through production hardening and future capabilities. Each version is tagged, milestone-driven, and maps features to the implementing crate.
 
+> **For concrete task-by-task execution, see [IMPLEMENTATION-PLAN.md](IMPLEMENTATION-PLAN.md)** — that document breaks each milestone into ordered, dependency-aware tasks with exact file paths and acceptance criteria.
+
 ---
 
 ## v0.1.0 — Foundation
@@ -62,7 +64,7 @@ This milestone establishes the core rendering, playback, networking, and control
 
 ### Server — `picast-server`
 
-- [ ] HTTP REST API on port 8585 using `axum` or `actix-web`
+- [ ] HTTP REST API on port 8585 using `hyper` (NOT axum/actix — per AGENT.md convention)
 - [ ] `POST /api/cast` — initiate a new casting session (returns 202 Accepted with sessionId)
 - [ ] `POST /api/stop` — stop current session
 - [ ] `POST /api/pause` — toggle pause state
