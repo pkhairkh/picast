@@ -466,7 +466,6 @@ impl TorManager {
             // Try graceful SIGTERM first.
             #[cfg(unix)]
             {
-                use tokio::signal::unix::{signal, SignalKind};
                 let _ = unsafe { libc_kill(child.id().unwrap_or(0), libc::SIGTERM) };
             }
             #[cfg(not(unix))]

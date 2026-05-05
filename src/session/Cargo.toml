@@ -19,3 +19,5 @@ url.workspace = true
 [dev-dependencies]
 tokio = { workspace = true }
 serde_json = { workspace = true }
+picast-tor = { path = "../tor" }
+async-trait = { workspace = true }

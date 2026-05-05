@@ -41,6 +41,7 @@ const H264_FORMAT_STRING: &str = concat!(
 #[derive(Debug, Deserialize)]
 struct YtdlpOutput {
     /// The webpage URL (same as input).
+    #[allow(dead_code)]
     #[serde(default)]
     webpage_url: Option<String>,
     /// Direct media URL for the best format.

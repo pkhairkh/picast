@@ -460,7 +460,8 @@ impl DisplayManager {
     /// Create a mock display manager.
     ///
     /// In mock mode, the manager does not open any DRM device.
-    /// All operations return success with default values.
+    /// All operations return success with mock data that simulates
+    /// a Pi 4B+ with vc4 driver connected to a 1080p60 HDMI monitor.
     pub fn new(device_path: &str) -> Result<Self, DisplayError> {
         let path = if device_path.is_empty() {
             "/dev/dri/card0".to_owned()
@@ -470,33 +471,72 @@ impl DisplayManager {
 
         tracing::info!(path = %path, "created mock display manager (hw feature disabled)");
 
+        // Pre-populate with mock data that simulates Pi 4B+ hardware.
+        let connectors = vec![DisplayConnector {
+            connector_id: 89,
+            connector_type: "HDMI-A-1".into(),
+            connected: true,
+            preferred_mode: Some((1920, 1080, 60000)),
+        }];
+
+        let planes = vec![
+            DrmPlane {
+                plane_id: 31,
+                zpos: 0,
+                formats: vec![0x34325258, 0x34325241], // XR24, AR24
+                is_primary: true,
+                possible_crtcs: 0x1,
+            },
+            DrmPlane {
+                plane_id: 32,
+                zpos: 1,
+                formats: vec![0x3231564E, 0x3132564E], // NV12, NV21
+                is_primary: false,
+                possible_crtcs: 0x1,
+            },
+        ];
+
+        let crtcs = vec![DrmCrtc {
+            crtc_id: 56,
+            width: 1920,
+            height: 1080,
+            refresh_mhz: 60000,
+            fb_id: None,
+        }];
+
         Ok(Self {
             device_path: path,
-            connectors: Vec::new(),
-            planes: Vec::new(),
-            crtcs: Vec::new(),
+            connectors,
+            planes,
+            crtcs,
             active_crtc: None,
         })
     }
 
-    /// Enumerate available DRM planes (empty in mock mode).
+    /// Enumerate available DRM planes (mock data simulating Pi 4B+).
     pub fn planes(&self) -> Result<&[DrmPlane], DisplayError> {
         Ok(&self.planes)
     }
 
-    /// Enumerate available CRTCs (empty in mock mode).
+    /// Enumerate available CRTCs (mock data simulating Pi 4B+).
     pub fn crtcs(&self) -> Result<&[DrmCrtc], DisplayError> {
         Ok(&self.crtcs)
     }
 
-    /// Enumerate connected display connectors (empty in mock mode).
+    /// Enumerate connected display connectors (mock data simulating Pi 4B+).
     pub fn connectors(&self) -> Result<&[DisplayConnector], DisplayError> {
         Ok(&self.connectors)
     }
 
-    /// Acquire the primary CRTC (no-op in mock mode).
+    /// Acquire the primary CRTC (simulated in mock mode).
+    ///
+    /// Sets the first CRTC as active, simulating a successful
+    /// atomic modeset to 1080p60.
     pub fn acquire(&mut self) -> Result<(), DisplayError> {
-        tracing::debug!("acquire called in mock mode — no-op");
+        tracing::debug!("acquire called in mock mode — simulating modeset");
+        if let Some(crtc) = self.crtcs.first() {
+            self.active_crtc = Some(crtc.clone());
+        }
         Ok(())
     }
 
@@ -645,11 +685,41 @@ mod tests {
     }
 
     #[test]
-    fn display_manager_planes_crtcs_connectors_empty() {
+    fn display_manager_planes_crtcs_connectors_mock_data() {
         let dm = DisplayManager::new("").unwrap();
-        assert!(dm.planes().unwrap().is_empty());
-        assert!(dm.crtcs().unwrap().is_empty());
-        assert!(dm.connectors().unwrap().is_empty());
+        // Mock mode now provides realistic Pi 4B+ mock data.
+        assert_eq!(dm.planes().unwrap().len(), 2, "should have 2 mock planes");
+        assert_eq!(dm.crtcs().unwrap().len(), 1, "should have 1 mock CRTC");
+        assert_eq!(dm.connectors().unwrap().len(), 1, "should have 1 mock connector");
+
+        // Verify mock plane properties.
+        let primary = dm.planes().unwrap().iter().find(|p| p.is_primary).unwrap();
+        assert_eq!(primary.zpos, 0);
+        assert!(primary.formats.len() >= 1);
+
+        let overlay = dm.planes().unwrap().iter().find(|p| !p.is_primary).unwrap();
+        assert_eq!(overlay.zpos, 1);
+
+        // Verify mock connector.
+        let conn = dm.connectors().unwrap().first().unwrap();
+        assert!(conn.connected);
+        assert_eq!(conn.connector_type, "HDMI-A-1");
+        assert_eq!(conn.preferred_mode, Some((1920, 1080, 60000)));
+
+        // Verify mock CRTC.
+        let crtc = dm.crtcs().unwrap().first().unwrap();
+        assert_eq!(crtc.width, 1920);
+        assert_eq!(crtc.height, 1080);
+    }
+
+    #[test]
+    fn display_manager_acquire_sets_active_crtc() {
+        let mut dm = DisplayManager::new("").unwrap();
+        assert!(dm.active_crtc().is_none(), "no active CRTC before acquire");
+        dm.acquire().unwrap();
+        let crtc = dm.active_crtc().expect("should have active CRTC after acquire");
+        assert_eq!(crtc.width, 1920);
+        assert_eq!(crtc.height, 1080);
     }
 
     #[test]
