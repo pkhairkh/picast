@@ -1,0 +1,95 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>PiCast Settings</title>
+  <link rel="stylesheet" href="options.css">
+</head>
+<body>
+  <div class="container">
+    <header class="header">
+      <img src="../icons/icon-48.png" alt="PiCast" class="logo">
+      <div>
+        <h1>PiCast Settings</h1>
+        <p class="subtitle">Configure your PiCast receiver connection</p>
+      </div>
+    </header>
+
+    <div class="card">
+      <h2 class="card-title">Connection</h2>
+
+      <div class="field">
+        <label for="piHost">PiCast Receiver Address</label>
+        <input type="text" id="piHost" placeholder="picast.local">
+        <p class="help">Hostname or IP address of your Raspberry Pi on the local network. Use <code>picast.local</code> for mDNS discovery.</p>
+      </div>
+
+      <div class="field-row">
+        <div class="field">
+          <label for="httpPort">HTTP API Port</label>
+          <input type="number" id="httpPort" value="8585" min="1" max="65535">
+          <p class="help">Default: 8585</p>
+        </div>
+        <div class="field">
+          <label for="wsPort">WebSocket Port</label>
+          <input type="number" id="wsPort" value="8586" min="1" max="65535">
+          <p class="help">Default: 8586</p>
+        </div>
+      </div>
+
+      <div class="field">
+        <button class="btn-test" id="testBtn">Test Connection</button>
+        <span id="testResult" class="test-result"></span>
+      </div>
+    </div>
+
+    <div class="card">
+      <h2 class="card-title">Privacy</h2>
+
+      <div class="field">
+        <label for="torMode">Tor Routing Mode</label>
+        <select id="torMode">
+          <option value="full">Full — All traffic through Tor</option>
+          <option value="resolution-only">Resolution Only — yt-dlp via Tor, media direct</option>
+          <option value="off">Off — No Tor (testing only)</option>
+        </select>
+        <p class="help">
+          <strong>Full</strong> provides maximum privacy — both URL resolution and media streaming go through Tor.
+          <strong>Resolution Only</strong> trades metadata privacy for better playback quality (media streams directly).
+          <strong>Off</strong> disables Tor entirely — only use for local network testing.
+        </p>
+      </div>
+    </div>
+
+    <div class="card">
+      <h2 class="card-title">Behavior</h2>
+
+      <div class="field">
+        <label class="checkbox-label">
+          <input type="checkbox" id="showNotifications">
+          Show browser notifications for state changes
+        </label>
+        <p class="help">Displays notifications when playback starts, stops, or encounters errors.</p>
+      </div>
+
+      <div class="field">
+        <label class="checkbox-label">
+          <input type="checkbox" id="autoCast">
+          Auto-cast when media is detected on the page
+        </label>
+        <p class="help">Automatically sends the page URL to PiCast when a video element is detected. Requires trust in the sites you visit.</p>
+      </div>
+    </div>
+
+    <div class="actions">
+      <button class="btn-save" id="saveBtn">Save Settings</button>
+      <button class="btn-reset" id="resetBtn">Reset to Defaults</button>
+    </div>
+
+    <div class="status" id="saveStatus"></div>
+  </div>
+
+  <script src="options.js"></script>
+</body>
+</html>

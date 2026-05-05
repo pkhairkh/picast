@@ -1,0 +1,14 @@
+{
+  "extensionName": {
+    "message": "PiCast",
+    "description": "Name of the extension"
+  },
+  "extensionDescription": {
+    "message": "Cast any web video to your PiCast receiver on Raspberry Pi — all traffic routed through Tor for privacy",
+    "description": "Description of the extension"
+  },
+  "actionTitle": {
+    "message": "Cast to PiCast",
+    "description": "Tooltip for the browser action button"
+  }
+}

@@ -22,14 +22,15 @@
   },
 
   "background": {
-    "service_worker": "background/service-worker.js",
+    "scripts": ["background/service-worker.js"],
     "type": "module"
   },
 
   "permissions": [
     "activeTab",
     "storage",
-    "webRequest"
+    "webRequest",
+    "dns"
   ],
 
   "optional_permissions": [
@@ -61,5 +62,12 @@
       "resources": ["icons/*"],
       "matches": ["<all_urls>"]
     }
-  ]
+  ],
+
+  "browser_specific_settings": {
+    "gecko": {
+      "id": "picast@pkhairkh.github.io",
+      "strict_min_version": "109.0"
+    }
+  }
 }
