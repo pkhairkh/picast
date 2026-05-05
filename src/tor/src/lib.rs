@@ -267,12 +267,11 @@ impl TorManager {
             let mut guard = self.child.lock().await;
             *guard = Some(child);
         }
-        self.owns_process
-            .store(true, std::sync::atomic::Ordering::SeqCst);
+        self.owns_process.store(true, std::sync::atomic::Ordering::SeqCst);
 
         // Poll the SOCKS port until it accepts connections.
-        let deadline = tokio::time::Instant::now()
-            + tokio::time::Duration::from_millis(startup_timeout_ms);
+        let deadline =
+            tokio::time::Instant::now() + tokio::time::Duration::from_millis(startup_timeout_ms);
         loop {
             if TcpStream::connect(&self.socks.addr()).await.is_ok() {
                 tracing::info!(addr = %self.socks.addr(), "Tor SOCKS port is now reachable");
@@ -286,15 +285,18 @@ impl TorManager {
                     match child.try_wait() {
                         Ok(Some(status)) => {
                             let code = status.code().unwrap_or(-1);
-                            tracing::error!(exit_code = code, "Tor process exited during bootstrap");
+                            tracing::error!(
+                                exit_code = code,
+                                "Tor process exited during bootstrap"
+                            );
                             return Err(TorError::ProcessExited(code));
-                        }
+                        },
                         Ok(None) => {
                             // Still running but port not open — timeout.
-                        }
+                        },
                         Err(e) => {
                             tracing::error!(error = %e, "Failed to check Tor process status");
-                        }
+                        },
                     }
                 }
                 return Err(TorError::SocksTimeout(startup_timeout_ms));
@@ -417,7 +419,7 @@ impl TorManager {
     /// monitoring task. Returns the default `CircuitHealth` if the
     /// monitor hasn't run yet or the control port is not available.
     pub fn last_circuit_health(&self) -> CircuitHealth {
-        self.circuit_health.lock().unwrap().clone()
+        *self.circuit_health.lock().unwrap()
     }
 
     /// Return the SOCKS5 proxy address string.
@@ -476,29 +478,22 @@ impl TorManager {
     pub async fn socks5_handshake(&self) -> Result<u64, TorError> {
         let addr = self.socks.addr();
         let mut stream = TcpStream::connect(&addr).await.map_err(|e| {
-            TorError::HealthCheck(format!(
-                "cannot connect to SOCKS port {}: {}",
-                addr, e
-            ))
+            TorError::HealthCheck(format!("cannot connect to SOCKS port {}: {}", addr, e))
         })?;
 
         // SOCKS5 greeting: version 5, 2 methods: No Auth (0x00), Username/Password (0x02)
         let greeting = [0x05, 0x02, 0x00, 0x02];
-        stream.write_all(&greeting).await.map_err(|e| {
-            TorError::HealthCheck(format!("SOCKS5 greeting write failed: {}", e))
-        })?;
+        stream
+            .write_all(&greeting)
+            .await
+            .map_err(|e| TorError::HealthCheck(format!("SOCKS5 greeting write failed: {}", e)))?;
 
         // Server responds with [version, selected_method]
         let mut response = [0u8; 2];
-        tokio::time::timeout(
-            std::time::Duration::from_secs(5),
-            stream.read_exact(&mut response),
-        )
-        .await
-        .map_err(|_| TorError::HealthCheck("SOCKS5 handshake timed out".into()))?
-        .map_err(|e| {
-            TorError::HealthCheck(format!("SOCKS5 greeting read failed: {}", e))
-        })?;
+        tokio::time::timeout(std::time::Duration::from_secs(5), stream.read_exact(&mut response))
+            .await
+            .map_err(|_| TorError::HealthCheck("SOCKS5 handshake timed out".into()))?
+            .map_err(|e| TorError::HealthCheck(format!("SOCKS5 greeting read failed: {}", e)))?;
 
         if response[0] != 0x05 {
             return Err(TorError::HealthCheck(format!(
@@ -526,9 +521,10 @@ impl TorManager {
             auth_msg.push(password.len() as u8);
             auth_msg.extend_from_slice(password);
 
-            stream.write_all(&auth_msg).await.map_err(|e| {
-                TorError::HealthCheck(format!("SOCKS5 auth write failed: {}", e))
-            })?;
+            stream
+                .write_all(&auth_msg)
+                .await
+                .map_err(|e| TorError::HealthCheck(format!("SOCKS5 auth write failed: {}", e)))?;
 
             let mut auth_resp = [0u8; 2];
             tokio::time::timeout(
@@ -537,9 +533,7 @@ impl TorManager {
             )
             .await
             .map_err(|_| TorError::HealthCheck("SOCKS5 auth response timed out".into()))?
-            .map_err(|e| {
-                TorError::HealthCheck(format!("SOCKS5 auth read failed: {}", e))
-            })?;
+            .map_err(|e| TorError::HealthCheck(format!("SOCKS5 auth read failed: {}", e)))?;
 
             if auth_resp[1] != 0x00 {
                 return Err(TorError::HealthCheck(format!(
@@ -564,23 +558,17 @@ impl TorManager {
         connect_req.extend_from_slice(target_host);
         connect_req.extend_from_slice(&target_port.to_be_bytes());
 
-        stream.write_all(&connect_req).await.map_err(|e| {
-            TorError::HealthCheck(format!("SOCKS5 CONNECT write failed: {}", e))
-        })?;
+        stream
+            .write_all(&connect_req)
+            .await
+            .map_err(|e| TorError::HealthCheck(format!("SOCKS5 CONNECT write failed: {}", e)))?;
 
         // Read the CONNECT response (variable length, domain type: min 10 bytes)
         let mut connect_resp = [0u8; 256];
-        tokio::time::timeout(
-            std::time::Duration::from_secs(15),
-            stream.read(&mut connect_resp),
-        )
-        .await
-        .map_err(|_| {
-            TorError::HealthCheck("SOCKS5 CONNECT response timed out".into())
-        })?
-        .map_err(|e| {
-            TorError::HealthCheck(format!("SOCKS5 CONNECT read failed: {}", e))
-        })?;
+        tokio::time::timeout(std::time::Duration::from_secs(15), stream.read(&mut connect_resp))
+            .await
+            .map_err(|_| TorError::HealthCheck("SOCKS5 CONNECT response timed out".into()))?
+            .map_err(|e| TorError::HealthCheck(format!("SOCKS5 CONNECT read failed: {}", e)))?;
 
         let latency_ms = connect_start.elapsed().as_millis() as u64;
 
@@ -592,10 +580,7 @@ impl TorManager {
             )));
         }
 
-        tracing::debug!(
-            latency_ms = latency_ms,
-            "SOCKS5 handshake and CONNECT succeeded"
-        );
+        tracing::debug!(latency_ms = latency_ms, "SOCKS5 handshake and CONNECT succeeded");
 
         Ok(latency_ms)
     }
@@ -635,10 +620,12 @@ impl TorManager {
                     .send()
                     .await
                 {
-                    Ok(resp) if resp.status().is_success() => Some(start.elapsed().as_millis() as u64),
+                    Ok(resp) if resp.status().is_success() => {
+                        Some(start.elapsed().as_millis() as u64)
+                    },
                     _ => None,
                 }
-            }
+            },
             Err(_) => None,
         };
 
@@ -650,7 +637,7 @@ impl TorManager {
             built_circuits: self.circuit_health.lock().unwrap().built_circuits,
             failed_circuits: self.circuit_health.lock().unwrap().failed_circuits,
             latency_ms: best_latency,
-            is_healthy: connect_ms < 1000 && best_latency.map_or(false, |l| l < 5000),
+            is_healthy: connect_ms < 1000 && best_latency.is_some_and(|l| l < 5000),
         })
     }
 
@@ -664,17 +651,17 @@ impl TorManager {
         let control_addr = format!("{}:{}", self.socks.host, self.control_port);
 
         // Read the cookie file for authentication.
-        let cookie = tokio::fs::read(&self.cookie_path)
-            .await
-            .map_err(|e| TorError::ControlPort(format!("cannot read cookie file {}: {}", self.cookie_path, e)))?;
+        let cookie = tokio::fs::read(&self.cookie_path).await.map_err(|e| {
+            TorError::ControlPort(format!("cannot read cookie file {}: {}", self.cookie_path, e))
+        })?;
 
         let cookie_hex: String = cookie.encode_hex();
 
         tracing::debug!(control_addr = %control_addr, "connecting to Tor control port");
 
-        let mut stream = TcpStream::connect(&control_addr)
-            .await
-            .map_err(|e| TorError::ControlPort(format!("cannot connect to {}: {}", control_addr, e)))?;
+        let mut stream = TcpStream::connect(&control_addr).await.map_err(|e| {
+            TorError::ControlPort(format!("cannot connect to {}: {}", control_addr, e))
+        })?;
 
         let (read_half, write_half) = stream.split();
         let mut reader = BufReader::new(read_half);
@@ -688,10 +675,9 @@ impl TorManager {
             .map_err(|e| TorError::ControlPort(format!("write AUTHENTICATE failed: {}", e)))?;
 
         let mut response = String::new();
-        reader
-            .read_line(&mut response)
-            .await
-            .map_err(|e| TorError::ControlPort(format!("read AUTHENTICATE response failed: {}", e)))?;
+        reader.read_line(&mut response).await.map_err(|e| {
+            TorError::ControlPort(format!("read AUTHENTICATE response failed: {}", e))
+        })?;
 
         if !response.starts_with("250") {
             return Err(TorError::ControlPort(format!(
@@ -707,16 +693,12 @@ impl TorManager {
             .map_err(|e| TorError::ControlPort(format!("write SIGNAL NEWNYM failed: {}", e)))?;
 
         response.clear();
-        reader
-            .read_line(&mut response)
-            .await
-            .map_err(|e| TorError::ControlPort(format!("read SIGNAL NEWNYM response failed: {}", e)))?;
+        reader.read_line(&mut response).await.map_err(|e| {
+            TorError::ControlPort(format!("read SIGNAL NEWNYM response failed: {}", e))
+        })?;
 
         if !response.starts_with("250") {
-            return Err(TorError::ControlPort(format!(
-                "NEWNYM rejected: {}",
-                response.trim()
-            )));
+            return Err(TorError::ControlPort(format!("NEWNYM rejected: {}", response.trim())));
         }
 
         tracing::info!("sent SIGNAL NEWNYM — Tor will build fresh circuits");
@@ -735,10 +717,7 @@ impl TorManager {
         // that we're intentionally shutting down.
         self.auto_restart.store(false, std::sync::atomic::Ordering::SeqCst);
 
-        if !self
-            .owns_process
-            .load(std::sync::atomic::Ordering::SeqCst)
-        {
+        if !self.owns_process.load(std::sync::atomic::Ordering::SeqCst) {
             tracing::debug!("not the Tor process owner — nothing to shut down");
             return Ok(());
         }
@@ -758,28 +737,24 @@ impl TorManager {
             }
 
             // Wait up to 5 seconds for the process to exit.
-            let result = tokio::time::timeout(
-                tokio::time::Duration::from_secs(5),
-                child.wait(),
-            )
-            .await;
+            let result =
+                tokio::time::timeout(tokio::time::Duration::from_secs(5), child.wait()).await;
 
             match result {
                 Ok(Ok(status)) => {
                     tracing::info!(exit_code = ?status.code(), "Tor process exited");
-                }
+                },
                 Ok(Err(e)) => {
                     tracing::warn!(error = %e, "error waiting for Tor process to exit");
-                }
+                },
                 Err(_) => {
                     tracing::warn!("Tor process did not exit in 5s — killing");
                     let _ = child.kill().await;
-                }
+                },
             }
 
             *guard = None;
-            self.owns_process
-                .store(false, std::sync::atomic::Ordering::SeqCst);
+            self.owns_process.store(false, std::sync::atomic::Ordering::SeqCst);
         }
 
         Ok(())
@@ -821,7 +796,7 @@ impl TorManager {
                 } else {
                     stream_isolation_id(url)
                 }
-            }
+            },
             Err(_) => stream_isolation_id(url),
         }
     }
@@ -841,10 +816,7 @@ fn which_tor() -> Result<String, TorError> {
 
     // Try `which tor` as a last resort.
     // We can't use tokio::process here since this is a sync function.
-    if let Ok(output) = std::process::Command::new("which")
-        .arg("tor")
-        .output()
-    {
+    if let Ok(output) = std::process::Command::new("which").arg("tor").output() {
         if output.status.success() {
             let path = String::from_utf8_lossy(&output.stdout).trim().to_string();
             if !path.is_empty() {
@@ -912,19 +884,13 @@ async fn query_circuit_health(
         .map_err(|e| TorError::ControlPort(format!("read AUTHENTICATE response failed: {}", e)))?;
 
     if !response.starts_with("250") {
-        return Err(TorError::ControlPort(format!(
-            "authentication rejected: {}",
-            response.trim()
-        )));
+        return Err(TorError::ControlPort(format!("authentication rejected: {}", response.trim())));
     }
 
     // Query circuit status.
-    writer
-        .write_all(b"GETINFO circuit-status\r\n")
-        .await
-        .map_err(|e| {
-            TorError::ControlPort(format!("write GETINFO circuit-status failed: {}", e))
-        })?;
+    writer.write_all(b"GETINFO circuit-status\r\n").await.map_err(|e| {
+        TorError::ControlPort(format!("write GETINFO circuit-status failed: {}", e))
+    })?;
 
     // Read the multi-line response. Format:
     // 250+circuit-status=
@@ -935,10 +901,9 @@ async fn query_circuit_health(
     let mut line = String::new();
     loop {
         line.clear();
-        reader
-            .read_line(&mut line)
-            .await
-            .map_err(|e| TorError::ControlPort(format!("read circuit-status line failed: {}", e)))?;
+        reader.read_line(&mut line).await.map_err(|e| {
+            TorError::ControlPort(format!("read circuit-status line failed: {}", e))
+        })?;
 
         if line.starts_with("250 OK") || line.starts_with("250-") {
             break;
@@ -969,20 +934,20 @@ async fn query_circuit_health(
             "BUILT" => {
                 built += 1;
                 open += 1;
-            }
+            },
             "EXTENDED" | "GUARD_WAIT" => {
                 open += 1;
-            }
+            },
             "FAILED" => {
                 failed += 1;
-            }
+            },
             "CLOSED" => {
                 failed += 1;
-            }
+            },
             _ => {
                 // Other states (LAUNCHED, etc.) count as open but not built.
                 open += 1;
-            }
+            },
         }
     }
 
@@ -1004,10 +969,7 @@ async fn query_circuit_health(
 
 impl Drop for TorManager {
     fn drop(&mut self) {
-        if self
-            .owns_process
-            .load(std::sync::atomic::Ordering::SeqCst)
-        {
+        if self.owns_process.load(std::sync::atomic::Ordering::SeqCst) {
             tracing::warn!(
                 "TorManager dropped while still owning the Tor process — \
                  attempting synchronous cleanup"
@@ -1190,8 +1152,7 @@ mod tests {
 
     #[test]
     fn with_cookie_path_builder() {
-        let mgr = TorManager::new("127.0.0.1:9050")
-            .with_cookie_path("/tmp/test-cookie");
+        let mgr = TorManager::new("127.0.0.1:9050").with_cookie_path("/tmp/test-cookie");
         assert_eq!(mgr.cookie_path, "/tmp/test-cookie");
     }
 
@@ -1255,7 +1216,7 @@ mod tests {
         match result.unwrap_err() {
             TorError::HealthCheck(msg) => {
                 assert!(msg.contains("cannot connect to SOCKS port"), "unexpected msg: {}", msg);
-            }
+            },
             other => panic!("expected HealthCheck error, got: {:?}", other),
         }
     }
@@ -1270,7 +1231,7 @@ mod tests {
         match result.unwrap_err() {
             TorError::HealthCheck(msg) => {
                 assert!(msg.contains("cannot connect to SOCKS port"), "unexpected msg: {}", msg);
-            }
+            },
             other => panic!("expected HealthCheck error, got: {:?}", other),
         }
     }

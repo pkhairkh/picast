@@ -39,13 +39,13 @@
 //! are no-ops.
 
 #[cfg(feature = "hw")]
-use drm::control::Mode;
-#[cfg(feature = "hw")]
 use drm::control::connector::{Connector, Info as ConnectorInfo, State as ConnectorState};
 #[cfg(feature = "hw")]
-use drm::control::crtc::{Info as CrtcInfo, Crtc};
+use drm::control::crtc::{Crtc, Info as CrtcInfo};
 #[cfg(feature = "hw")]
 use drm::control::plane::{Info as PlaneInfo, PlaneType};
+#[cfg(feature = "hw")]
+use drm::control::Mode;
 #[cfg(feature = "hw")]
 use drm::Device as DrmDevice;
 #[cfg(feature = "hw")]
@@ -207,11 +207,8 @@ impl DisplayManager {
     /// On Raspberry Pi 4B+ with vc4, the device is typically
     /// `/dev/dri/card1` (card0 is the firmware framebuffer).
     pub fn new(device_path: &str) -> Result<Self, DisplayError> {
-        let path = if device_path.is_empty() {
-            Self::find_dri_device()?
-        } else {
-            device_path.to_owned()
-        };
+        let path =
+            if device_path.is_empty() { Self::find_dri_device()? } else { device_path.to_owned() };
 
         let file = OpenOptions::new()
             .read(true)
@@ -299,11 +296,8 @@ impl DisplayManager {
         self.connectors = found_connectors;
 
         // Find a connected connector.
-        let connector = self
-            .connectors
-            .iter()
-            .find(|c| c.connected)
-            .ok_or(DisplayError::NoConnector)?;
+        let connector =
+            self.connectors.iter().find(|c| c.connected).ok_or(DisplayError::NoConnector)?;
 
         tracing::info!(
             connector_id = connector.connector_id,
@@ -350,11 +344,7 @@ impl DisplayManager {
         self.planes = found_planes;
 
         // Select the best CRTC for our connector.
-        let crtc = self
-            .crtcs
-            .first()
-            .ok_or(DisplayError::NoCrtc)?
-            .clone();
+        let crtc = self.crtcs.first().ok_or(DisplayError::NoCrtc)?.clone();
         self.active_crtc = Some(crtc.clone());
 
         tracing::info!(
@@ -372,10 +362,7 @@ impl DisplayManager {
     /// an inconsistent state.
     pub fn release(&mut self) -> Result<(), DisplayError> {
         if let Some(ref saved) = self.saved_crtc {
-            tracing::info!(
-                crtc_id = saved.crtc_id,
-                "restoring saved CRTC state"
-            );
+            tracing::info!(crtc_id = saved.crtc_id, "restoring saved CRTC state");
             // Restore would go here with actual atomic commit.
         }
         self.active_crtc = None;
@@ -504,13 +491,7 @@ impl DisplayManager {
             fb_id: None,
         }];
 
-        Ok(Self {
-            device_path: path,
-            connectors,
-            planes,
-            crtcs,
-            active_crtc: None,
-        })
+        Ok(Self { device_path: path, connectors, planes, crtcs, active_crtc: None })
     }
 
     /// Enumerate available DRM planes (mock data simulating Pi 4B+).
@@ -630,13 +611,8 @@ mod tests {
 
     #[test]
     fn drm_crtc_fields() {
-        let crtc = DrmCrtc {
-            crtc_id: 55,
-            width: 1920,
-            height: 1080,
-            refresh_mhz: 60000,
-            fb_id: Some(99),
-        };
+        let crtc =
+            DrmCrtc { crtc_id: 55, width: 1920, height: 1080, refresh_mhz: 60000, fb_id: Some(99) };
         assert_eq!(crtc.crtc_id, 55);
         assert_eq!(crtc.width, 1920);
         assert_eq!(crtc.height, 1080);

@@ -32,10 +32,7 @@ pub fn wait_for_server(addr: &str, timeout_ms: u64) {
             return;
         }
         if Instant::now() >= deadline {
-            panic!(
-                "server at {} did not become reachable within {}ms",
-                addr, timeout_ms
-            );
+            panic!("server at {} did not become reachable within {}ms", addr, timeout_ms);
         }
         std::thread::sleep(Duration::from_millis(50));
     }

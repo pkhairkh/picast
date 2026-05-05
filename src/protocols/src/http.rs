@@ -17,9 +17,9 @@
 //! | GET    | `/api/health`   | Health check                    |
 
 use anyhow::Result;
+use http_body_util::Full;
 use hyper::body::Incoming;
 use hyper::{Method, Request, Response, StatusCode};
-use http_body_util::Full;
 use picast_session::{MediaSession, SessionManager};
 use serde::{Deserialize, Serialize};
 use std::sync::Arc;
@@ -93,10 +93,7 @@ pub struct HttpApiServer {
 impl HttpApiServer {
     /// Create a new HTTP server bound to `listen_addr`.
     pub fn new(listen_addr: &str, session: Arc<SessionManager>) -> Self {
-        Self {
-            listen_addr: listen_addr.to_owned(),
-            session,
-        }
+        Self { listen_addr: listen_addr.to_owned(), session }
     }
 
     /// Start accepting connections.
@@ -163,60 +160,54 @@ async fn handle_request(
     match (method, path) {
         // Health check.
         (Method::GET, "/api/health") => {
-            let resp = HealthResponse {
-                status: "ok".into(),
-            };
+            let resp = HealthResponse { status: "ok".into() };
             json_response(StatusCode::OK, &resp)
-        }
+        },
 
         // Status.
-        (Method::GET, "/api/status") => {
-            match session.current_status().await {
-                Ok(s) => {
-                    let resp = StatusResponse::from_session(&s);
-                    json_response(StatusCode::OK, &resp)
-                }
-                Err(_) => {
-                    let resp = StatusResponse {
-                        session_id: None,
-                        state: "idle".into(),
-                        source_url: None,
-                        resolved_url: None,
-                        position_ms: 0,
-                        duration_ms: None,
-                        volume: 100,
-                        title: None,
-                    };
-                    json_response(StatusCode::OK, &resp)
-                }
-            }
-        }
+        (Method::GET, "/api/status") => match session.current_status().await {
+            Ok(s) => {
+                let resp = StatusResponse::from_session(&s);
+                json_response(StatusCode::OK, &resp)
+            },
+            Err(_) => {
+                let resp = StatusResponse {
+                    session_id: None,
+                    state: "idle".into(),
+                    source_url: None,
+                    resolved_url: None,
+                    position_ms: 0,
+                    duration_ms: None,
+                    volume: 100,
+                    title: None,
+                };
+                json_response(StatusCode::OK, &resp)
+            },
+        },
 
         // Cast.
         (Method::POST, "/api/cast") => {
             let payload = read_body_json::<CastRequest>(body).await?;
             match session.load(&payload.url).await {
                 Ok(id) => {
-                    let resp = CastResponse {
-                        session_id: id.to_string(),
-                        status: "resolving".into(),
-                    };
+                    let resp =
+                        CastResponse { session_id: id.to_string(), status: "resolving".into() };
                     json_response(StatusCode::ACCEPTED, &resp)
-                }
+                },
                 Err(e) => {
                     let (code, msg) = match &e {
                         picast_session::SessionError::AlreadyActive => {
                             (StatusCode::CONFLICT, e.to_string())
-                        }
+                        },
                         picast_session::SessionError::ResolutionFailed(_) => {
                             (StatusCode::UNPROCESSABLE_ENTITY, e.to_string())
-                        }
+                        },
                         _ => (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()),
                     };
                     error_response(code, &msg)
-                }
+                },
             }
-        }
+        },
 
         // Stop.
         (Method::POST, "/api/stop") => match session.stop().await {
@@ -232,7 +223,7 @@ async fn handle_request(
                     title: None,
                 };
                 json_response(StatusCode::OK, &resp)
-            }
+            },
             Err(e) => error_response(StatusCode::CONFLICT, &e.to_string()),
         },
 
@@ -257,22 +248,23 @@ async fn handle_request(
                 .unwrap_or(0);
 
             match session.seek(position_ms).await {
-                Ok(()) => json_response(StatusCode::OK, &serde_json::json!({"position_ms": position_ms})),
+                Ok(()) => {
+                    json_response(StatusCode::OK, &serde_json::json!({"position_ms": position_ms}))
+                },
                 Err(e) => error_response(StatusCode::CONFLICT, &e.to_string()),
             }
-        }
+        },
 
         // Volume.
         (Method::POST, "/api/volume") => {
             let payload = read_body_json::<VolumeRequest>(body).await?;
             match session.set_volume(payload.volume).await {
-                Ok(()) => json_response(
-                    StatusCode::OK,
-                    &serde_json::json!({"volume": payload.volume}),
-                ),
+                Ok(()) => {
+                    json_response(StatusCode::OK, &serde_json::json!({"volume": payload.volume}))
+                },
                 Err(e) => error_response(StatusCode::INTERNAL_SERVER_ERROR, &e.to_string()),
             }
-        }
+        },
 
         // 404.
         _ => error_response(StatusCode::NOT_FOUND, "endpoint not found"),
@@ -295,10 +287,7 @@ fn json_response<T: Serialize>(status: StatusCode, body: &T) -> Result<Response<
 
 /// Create an error response.
 fn error_response(status: StatusCode, message: &str) -> Result<Response<BoxBody>> {
-    let resp = ErrorResponse {
-        error: message.to_owned(),
-        code: status.as_u16(),
-    };
+    let resp = ErrorResponse { error: message.to_owned(), code: status.as_u16() };
     json_response(status, &resp)
 }
 
@@ -315,9 +304,7 @@ fn cors_response(status: StatusCode) -> Response<BoxBody> {
 }
 
 /// Read and parse a JSON body.
-async fn read_body_json<T: serde::de::DeserializeOwned>(
-    body: Incoming,
-) -> Result<T> {
+async fn read_body_json<T: serde::de::DeserializeOwned>(body: Incoming) -> Result<T> {
     use http_body_util::BodyExt;
     let bytes = body.collect().await?.to_bytes();
     Ok(serde_json::from_slice(&bytes)?)
@@ -353,10 +340,7 @@ mod tests {
 
     #[test]
     fn error_response_json() {
-        let resp = ErrorResponse {
-            error: "not found".into(),
-            code: 404,
-        };
+        let resp = ErrorResponse { error: "not found".into(), code: 404 };
         let json = serde_json::to_string(&resp).unwrap();
         assert!(json.contains("not found"));
         assert!(json.contains("404"));

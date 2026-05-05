@@ -301,7 +301,7 @@ effort. Tasks are ordered by execution sequence within each phase.
 
 ## Phase 3 — GStreamer Playback Engine
 
-### T-3.1 GStreamer initialization and pipeline construction
+### T-3.1 GStreamer initialization and pipeline construction ✅
 - **Crate:** `picast-playback`
 - **Depends on:** T-0.5, T-2.6 (for mock display)
 - **Effort:** 2 days
@@ -349,7 +349,7 @@ effort. Tasks are ordered by execution sequence within each phase.
   4. `souphttpsrc.set_property("proxy-id", "")` (disable HTTP proxy)
   5. Test: verify media URL resolves through Tor (check IPs if possible)
 
-### T-3.4 Play/Pause/Resume/Stop state transitions
+### T-3.4 Play/Pause/Resume/Stop state transitions ✅
 - **Crate:** `picast-playback`
 - **Depends on:** T-3.2
 - **Effort:** 2 days
@@ -377,7 +377,7 @@ effort. Tasks are ordered by execution sequence within each phase.
   3. Query position: `pipeline.query_position(gst::Format::Time)`
   4. Handle seek failures: `PlaybackError::SeekFailed`
 
-### T-3.6 Volume control
+### T-3.6 Volume control ✅
 - **Crate:** `picast-playback`
 - **Depends on:** T-3.1
 - **Effort:** 0.5 day
@@ -513,7 +513,7 @@ effort. Tasks are ordered by execution sequence within each phase.
   4. `socks5h` (h = remote DNS) ensures DNS goes through Tor, not local resolver
   5. Test: resolve a URL, check Tor control port for circuit with matching username
 
-### T-4.5 Resolution cache with TTL
+### T-4.5 Resolution cache with TTL ✅
 - **Crate:** `picast-resolver`
 - **Depends on:** T-4.2
 - **Effort:** 1.5 days
@@ -698,7 +698,7 @@ effort. Tasks are ordered by execution sequence within each phase.
 
 ## Phase 6 — Protocol Servers
 
-### T-6.1 HTTP API: POST /api/cast
+### T-6.1 HTTP API: POST /api/cast ✅
 - **Crate:** `picast-protocols`
 - **Depends on:** T-5.2
 - **Effort:** 1 day
@@ -713,7 +713,7 @@ effort. Tasks are ordered by execution sequence within each phase.
   4. Return `202 Accepted` with `{"sessionId": id, "status": "resolving"}`
   5. Handle: `400` (bad URL), `409` (session active), `422` (resolution failed), `503` (pipeline error)
 
-### T-6.2 HTTP API: POST /api/stop
+### T-6.2 HTTP API: POST /api/stop ✅
 - **Crate:** `picast-protocols`
 - **Depends on:** T-5.4
 - **Effort:** 0.5 day
@@ -725,7 +725,7 @@ effort. Tasks are ordered by execution sequence within each phase.
   3. Return `200 OK` with previous session ID
   4. `404` if no active session
 
-### T-6.3 HTTP API: POST /api/pause
+### T-6.3 HTTP API: POST /api/pause ✅
 - **Crate:** `picast-protocols`
 - **Depends on:** T-5.4
 - **Effort:** 0.5 day
@@ -737,7 +737,7 @@ effort. Tasks are ordered by execution sequence within each phase.
   2. Return current state + position + duration
   3. `409` if no active session
 
-### T-6.4 HTTP API: POST /api/seek
+### T-6.4 HTTP API: POST /api/seek ✅
 - **Crate:** `picast-protocols`
 - **Depends on:** T-5.4
 - **Effort:** 0.5 day
@@ -750,7 +750,7 @@ effort. Tasks are ordered by execution sequence within each phase.
   4. Validate bounds: 0 ≤ position ≤ duration
   5. `session.seek(id, position_ms).await?`
 
-### T-6.5 HTTP API: GET /api/status
+### T-6.5 HTTP API: GET /api/status ✅
 - **Crate:** `picast-protocols`
 - **Depends on:** T-5.4
 - **Effort:** 1 day
@@ -764,7 +764,7 @@ effort. Tasks are ordered by execution sequence within each phase.
   4. Include `videoCodec`, `videoResolution`, `audioCodec` from pipeline queries
   5. When idle: return `{"sessionId": null, "status": "idle"}`
 
-### T-6.6 HTTP API: POST /api/volume
+### T-6.6 HTTP API: POST /api/volume ✅
 - **Crate:** `picast-protocols`
 - **Depends on:** T-5.4
 - **Effort:** 0.5 day
@@ -775,7 +775,7 @@ effort. Tasks are ordered by execution sequence within each phase.
   2. Validate: `0.0 ≤ level ≤ 1.0`
   3. `session.set_volume(id, (level * 100.0) as u8).await?`
 
-### T-6.7 CORS headers for browser extension
+### T-6.7 CORS headers for browser extension ✅
 - **Crate:** `picast-protocols`
 - **Depends on:** T-6.1
 - **Effort:** 0.5 day
@@ -788,7 +788,7 @@ effort. Tasks are ordered by execution sequence within each phase.
   3. Handle `OPTIONS` requests with `204 No Content`
   4. Apply to all `/api/*` routes
 
-### T-6.8 WebSocket server
+### T-6.8 WebSocket server ✅
 - **Crate:** `picast-protocols`
 - **Depends on:** T-5.5
 - **Effort:** 3 days
@@ -805,7 +805,7 @@ effort. Tasks are ordered by execution sequence within each phase.
   6. Subscribe to `watch` channel: broadcast `MEDIA_STATUS` to all clients
   7. Ping/pong every 30s; disconnect unresponsive clients after 10s
 
-### T-6.9 WebSocket: RESOLVE_PROGRESS messages
+### T-6.9 WebSocket: RESOLVE_PROGRESS messages ✅
 - **Crate:** `picast-protocols`
 - **Depends on:** T-6.8, T-4.1
 - **Effort:** 1 day
@@ -820,7 +820,7 @@ effort. Tasks are ordered by execution sequence within each phase.
   4. Send `RESOLVE_PROGRESS` to all WebSocket clients
   5. Also send `RESOLVE_PROGRESS` via HTTP (polling) as fallback
 
-### T-6.10 DLNA via gmediarender
+### T-6.10 DLNA via gmediarender ✅
 - **Crate:** `picast-protocols`
 - **Depends on:** T-5.4
 - **Effort:** 3 days
@@ -837,7 +837,7 @@ effort. Tasks are ordered by execution sequence within each phase.
   5. On `Play`/`Pause`/`Stop`: call corresponding session methods
   6. Handle gmediarender crashes: restart subprocess
 
-### T-6.11 HTTP API integration tests
+### T-6.11 HTTP API integration tests ✅
 - **Crate:** `picast-protocols`
 - **Depends on:** T-6.1 through T-6.7
 - **Effort:** 1 day
@@ -856,7 +856,7 @@ effort. Tasks are ordered by execution sequence within each phase.
 
 ## Phase 7 — Server Orchestration
 
-### T-7.1 Real component initialization
+### T-7.1 Real component initialization ✅
 - **Crate:** `picast-server`
 - **Depends on:** T-1.4, T-2.4, T-3.4, T-4.2, T-5.4, T-6.1
 - **Effort:** 1 day
@@ -873,7 +873,7 @@ effort. Tasks are ordered by execution sequence within each phase.
   7. `WebSocketServer::new(&config.ws_addr, session.clone())`
   8. `DlnaRenderer::new(&config.dlna_name, session.clone())`
 
-### T-7.2 Task spawning and concurrent execution
+### T-7.2 Task spawning and concurrent execution ✅
 - **Crate:** `picast-server`
 - **Depends on:** T-7.1
 - **Effort:** 1 day
@@ -887,7 +887,7 @@ effort. Tasks are ordered by execution sequence within each phase.
   4. Wait for shutdown signal
   5. Broadcast shutdown to all tasks
 
-### T-7.3 Graceful shutdown sequence
+### T-7.3 Graceful shutdown sequence ✅
 - **Crate:** `picast-server`
 - **Depends on:** T-7.2
 - **Effort:** 1 day
@@ -902,7 +902,7 @@ effort. Tasks are ordered by execution sequence within each phase.
   5. `tokio::join!(http_task, ws_task, dlna_task)` with 10s timeout
   6. Force kill any remaining tasks after timeout
 
-### T-7.4 Startup ordering validation
+### T-7.4 Startup ordering validation ✅
 - **Crate:** `picast-server`
 - **Depends on:** T-7.1
 - **Effort:** 0.5 day
@@ -917,7 +917,7 @@ effort. Tasks are ordered by execution sequence within each phase.
   3. Continue through chain
   4. Each failure: `tracing::error!()` with actionable message
 
-### T-7.5 Health check endpoint
+### T-7.5 Health check endpoint ✅
 - **Crate:** `picast-server`
 - **Depends on:** T-7.1
 - **Effort:** 0.5 day

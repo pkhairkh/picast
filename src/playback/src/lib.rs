@@ -39,8 +39,8 @@ use events::PlaybackEvent;
 #[cfg(feature = "hw")]
 use pipeline::{GstPipeline, PipelineState};
 use serde::{Deserialize, Serialize};
-use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::Arc;
 use thiserror::Error;
 #[cfg(feature = "hw")]
 use tokio::sync::mpsc;
@@ -182,7 +182,10 @@ impl PlaybackEngine {
     }
 
     /// Create a new engine with a custom event channel size.
-    pub fn with_channel_size(config: PipelineConfig, _channel_size: usize) -> Result<Self, PlaybackError> {
+    pub fn with_channel_size(
+        config: PipelineConfig,
+        _channel_size: usize,
+    ) -> Result<Self, PlaybackError> {
         #[cfg(feature = "hw")]
         let event_tx = mpsc::channel(_channel_size).0;
         Ok(Self {
@@ -251,28 +254,28 @@ impl PlaybackEngine {
                             }
                         }
                     }
-                }
+                },
                 MessageView::Eos(_) => {
                     tracing::info!("end of stream reached");
                     let _ = event_tx.try_send(PlaybackEvent::EndOfStream);
                     is_playing.store(false, Ordering::Relaxed);
-                }
+                },
                 MessageView::Error(e) => {
                     let msg = e.error().to_string();
                     let debug = e.debug().map(|d| d.to_string());
                     tracing::error!(error = %msg, debug = ?debug, "GStreamer error");
                     let _ = event_tx.try_send(PlaybackEvent::Error { message: msg, debug });
                     is_playing.store(false, Ordering::Relaxed);
-                }
+                },
                 MessageView::Buffering(b) => {
                     let percent = b.percent() as u8;
                     tracing::debug!(percent = percent, "buffering progress");
                     let _ = event_tx.try_send(PlaybackEvent::Buffering { percent });
-                }
+                },
                 MessageView::Latency(l) => {
                     // Latency message — not forwarding in v1.
-                }
-                _ => {}
+                },
+                _ => {},
             }
 
             gstreamer::Continue(true)
@@ -301,9 +304,7 @@ impl PlaybackEngine {
     #[cfg(feature = "hw")]
     pub async fn pause(&self) -> Result<(), PlaybackError> {
         let mut guard = self.gst_pipeline.lock().await;
-        let pipeline = guard
-            .as_mut()
-            .ok_or(PlaybackError::NoPipeline)?;
+        let pipeline = guard.as_mut().ok_or(PlaybackError::NoPipeline)?;
         pipeline.pause()
     }
 
@@ -317,9 +318,7 @@ impl PlaybackEngine {
     #[cfg(feature = "hw")]
     pub async fn resume(&self) -> Result<(), PlaybackError> {
         let mut guard = self.gst_pipeline.lock().await;
-        let pipeline = guard
-            .as_mut()
-            .ok_or(PlaybackError::NoPipeline)?;
+        let pipeline = guard.as_mut().ok_or(PlaybackError::NoPipeline)?;
         pipeline.resume()
     }
 
@@ -352,9 +351,7 @@ impl PlaybackEngine {
     #[cfg(feature = "hw")]
     pub async fn seek(&self, position_ms: u64) -> Result<(), PlaybackError> {
         let mut guard = self.gst_pipeline.lock().await;
-        let pipeline = guard
-            .as_mut()
-            .ok_or(PlaybackError::NoPipeline)?;
+        let pipeline = guard.as_mut().ok_or(PlaybackError::NoPipeline)?;
         pipeline.seek(position_ms)
     }
 
@@ -368,9 +365,7 @@ impl PlaybackEngine {
     #[cfg(feature = "hw")]
     pub async fn set_volume(&self, volume: f64) -> Result<(), PlaybackError> {
         let mut guard = self.gst_pipeline.lock().await;
-        let pipeline = guard
-            .as_mut()
-            .ok_or(PlaybackError::NoPipeline)?;
+        let pipeline = guard.as_mut().ok_or(PlaybackError::NoPipeline)?;
         pipeline.set_volume(volume)
     }
 
@@ -384,9 +379,7 @@ impl PlaybackEngine {
     #[cfg(feature = "hw")]
     pub async fn position_ms(&self) -> Result<u64, PlaybackError> {
         let guard = self.gst_pipeline.lock().await;
-        let pipeline = guard
-            .as_ref()
-            .ok_or(PlaybackError::NoPipeline)?;
+        let pipeline = guard.as_ref().ok_or(PlaybackError::NoPipeline)?;
         pipeline.position_ms()
     }
 
@@ -400,9 +393,7 @@ impl PlaybackEngine {
     #[cfg(feature = "hw")]
     pub async fn duration_ms(&self) -> Result<Option<u64>, PlaybackError> {
         let guard = self.gst_pipeline.lock().await;
-        let pipeline = guard
-            .as_ref()
-            .ok_or(PlaybackError::NoPipeline)?;
+        let pipeline = guard.as_ref().ok_or(PlaybackError::NoPipeline)?;
         pipeline.duration_ms()
     }
 
@@ -505,8 +496,7 @@ mod tests {
     fn pipeline_config_serialization_roundtrip() {
         let config = PipelineConfig::default();
         let json = serde_json::to_string(&config).expect("serialize");
-        let deserialized: PipelineConfig =
-            serde_json::from_str(&json).expect("deserialize");
+        let deserialized: PipelineConfig = serde_json::from_str(&json).expect("deserialize");
         assert_eq!(deserialized.video_sink, config.video_sink);
         assert_eq!(deserialized.audio_sink, config.audio_sink);
         assert_eq!(deserialized.buffer_duration_ms, config.buffer_duration_ms);
@@ -518,8 +508,7 @@ mod tests {
     fn buffer_health_serialization_roundtrip() {
         let health = BufferHealth::default();
         let json = serde_json::to_string(&health).expect("serialize");
-        let deserialized: BufferHealth =
-            serde_json::from_str(&json).expect("deserialize");
+        let deserialized: BufferHealth = serde_json::from_str(&json).expect("deserialize");
         assert_eq!(deserialized.fill_percent, health.fill_percent);
         assert!((deserialized.buffered_seconds - health.buffered_seconds).abs() < f64::EPSILON);
         assert_eq!(deserialized.estimated_fill_ms, health.estimated_fill_ms);

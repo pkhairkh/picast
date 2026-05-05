@@ -3,8 +3,4 @@
 
 max_width = 100
 use_small_heuristics = "Max"
-imports_granularity = "Crate"
-group_imports = "StdExternalCrate"
-reorder_impl_items = true
-trailing_comma = "Vertical"
 match_block_trailing_comma = true

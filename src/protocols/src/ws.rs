@@ -34,7 +34,7 @@
 //! Server sends ping every 30 seconds. Clients that don't respond
 //! within 10 seconds are disconnected.
 
-use anyhow::{Result, anyhow};
+use anyhow::{anyhow, Result};
 use futures_util::{SinkExt, StreamExt};
 use picast_session::{SessionEvent, SessionManager};
 use serde::{Deserialize, Serialize};
@@ -96,10 +96,7 @@ pub struct WebSocketServer {
 impl WebSocketServer {
     /// Create a new WebSocket server bound to `listen_addr`.
     pub fn new(listen_addr: &str, session: Arc<SessionManager>) -> Self {
-        Self {
-            listen_addr: listen_addr.to_owned(),
-            session,
-        }
+        Self { listen_addr: listen_addr.to_owned(), session }
     }
 
     /// Start accepting WebSocket connections.
@@ -156,7 +153,7 @@ async fn handle_client(
     // Send connected event.
     let connected = ServerEvent::Connected;
     let connected_json = serde_json::to_string(&connected)?;
-    ws_sender.send(Message::Text(connected_json.into())).await?;
+    ws_sender.send(Message::Text(connected_json)).await?;
 
     // Ping interval.
     let mut ping_interval = tokio::time::interval(Duration::from_secs(30));
@@ -174,7 +171,7 @@ async fn handle_client(
                                         message: e.to_string(),
                                     };
                                     let err_json = serde_json::to_string(&err_event)?;
-                                    ws_sender.send(Message::Text(err_json.into())).await?;
+                                    ws_sender.send(Message::Text(err_json)).await?;
                                 }
                             }
                             Err(e) => {
@@ -182,7 +179,7 @@ async fn handle_client(
                                     message: format!("invalid command: {}", e),
                                 };
                                 let err_json = serde_json::to_string(&err_event)?;
-                                ws_sender.send(Message::Text(err_json.into())).await?;
+                                ws_sender.send(Message::Text(err_json)).await?;
                             }
                         }
                     }
@@ -200,7 +197,7 @@ async fn handle_client(
                                 if let Err(e) = handle_command(&session, cmd).await {
                                     let err_event = ServerEvent::Error { message: e.to_string() };
                                     let err_json = serde_json::to_string(&err_event)?;
-                                    ws_sender.send(Message::Text(err_json.into())).await?;
+                                    ws_sender.send(Message::Text(err_json)).await?;
                                 }
                             }
                         }
@@ -223,7 +220,7 @@ async fn handle_client(
                         let server_event = map_session_event(&session_event);
                         if let Some(event) = server_event {
                             let json = serde_json::to_string(&event)?;
-                            ws_sender.send(Message::Text(json.into())).await?;
+                            ws_sender.send(Message::Text(json)).await?;
                         }
                     }
                     Err(broadcast::error::RecvError::Lagged(count)) => {
@@ -237,7 +234,7 @@ async fn handle_client(
 
             // Ping.
             _ = ping_interval.tick() => {
-                if ws_sender.send(Message::Ping(vec![].into())).await.is_err() {
+                if ws_sender.send(Message::Ping(vec![])).await.is_err() {
                     break;
                 }
             }
@@ -251,45 +248,27 @@ async fn handle_client(
 async fn handle_command(session: &SessionManager, cmd: ClientCommand) -> Result<()> {
     match cmd {
         ClientCommand::Cast { url } => {
-            session
-                .load(&url)
-                .await
-                .map_err(|e| anyhow!("cast failed: {}", e))?;
-        }
+            session.load(&url).await.map_err(|e| anyhow!("cast failed: {}", e))?;
+        },
         ClientCommand::Stop => {
-            session
-                .stop()
-                .await
-                .map_err(|e| anyhow!("stop failed: {}", e))?;
-        }
+            session.stop().await.map_err(|e| anyhow!("stop failed: {}", e))?;
+        },
         ClientCommand::Pause => {
-            session
-                .pause()
-                .await
-                .map_err(|e| anyhow!("pause failed: {}", e))?;
-        }
+            session.pause().await.map_err(|e| anyhow!("pause failed: {}", e))?;
+        },
         ClientCommand::Resume => {
-            session
-                .resume()
-                .await
-                .map_err(|e| anyhow!("resume failed: {}", e))?;
-        }
+            session.resume().await.map_err(|e| anyhow!("resume failed: {}", e))?;
+        },
         ClientCommand::Seek { position_ms } => {
-            session
-                .seek(position_ms)
-                .await
-                .map_err(|e| anyhow!("seek failed: {}", e))?;
-        }
+            session.seek(position_ms).await.map_err(|e| anyhow!("seek failed: {}", e))?;
+        },
         ClientCommand::Volume { volume } => {
-            session
-                .set_volume(volume)
-                .await
-                .map_err(|e| anyhow!("volume failed: {}", e))?;
-        }
+            session.set_volume(volume).await.map_err(|e| anyhow!("volume failed: {}", e))?;
+        },
         ClientCommand::Subtitle { lang } => {
             // Subtitle support deferred to v0.4.0.
             tracing::warn!(lang = %lang, "subtitle selection not yet implemented");
-        }
+        },
     }
     Ok(())
 }
@@ -297,7 +276,9 @@ async fn handle_command(session: &SessionManager, cmd: ClientCommand) -> Result<
 /// Map a session event to a WebSocket server event.
 fn map_session_event(event: &SessionEvent) -> Option<ServerEvent> {
     match event {
-        SessionEvent::Playing { .. } | SessionEvent::Paused { .. } | SessionEvent::Stopped { .. } => {
+        SessionEvent::Playing { .. }
+        | SessionEvent::Paused { .. }
+        | SessionEvent::Stopped { .. } => {
             // For state-change events, the client can query /api/status
             // for full details. We send a lightweight status update.
             Some(ServerEvent::MediaStatus {
@@ -314,29 +295,29 @@ fn map_session_event(event: &SessionEvent) -> Option<ServerEvent> {
                 source_url: None,
                 title: None,
             })
-        }
-        SessionEvent::Buffering { percent, .. } => Some(ServerEvent::ResolveProgress {
-            percent: *percent,
-        }),
-        SessionEvent::Error { message, .. } => Some(ServerEvent::Error {
-            message: message.clone(),
-        }),
-        SessionEvent::Created { .. } | SessionEvent::Resolving { .. } | SessionEvent::Resolved { .. } => {
+        },
+        SessionEvent::Buffering { percent, .. } => {
+            Some(ServerEvent::ResolveProgress { percent: *percent })
+        },
+        SessionEvent::Error { message, .. } => {
+            Some(ServerEvent::Error { message: message.clone() })
+        },
+        SessionEvent::Created { .. }
+        | SessionEvent::Resolving { .. }
+        | SessionEvent::Resolved { .. } => {
             // Forward as resolve progress.
             Some(ServerEvent::ResolveProgress { percent: 0 })
-        }
-        SessionEvent::PositionUpdate {
-            position_ms,
-            duration_ms,
-            ..
-        } => Some(ServerEvent::MediaStatus {
-            state: "playing".into(),
-            position_ms: *position_ms,
-            duration_ms: *duration_ms,
-            volume: 100,
-            source_url: None,
-            title: None,
-        }),
+        },
+        SessionEvent::PositionUpdate { position_ms, duration_ms, .. } => {
+            Some(ServerEvent::MediaStatus {
+                state: "playing".into(),
+                position_ms: *position_ms,
+                duration_ms: *duration_ms,
+                volume: 100,
+                source_url: None,
+                title: None,
+            })
+        },
         SessionEvent::VolumeChanged { volume, .. } => Some(ServerEvent::MediaStatus {
             state: "playing".into(),
             position_ms: 0,
@@ -421,9 +402,7 @@ mod tests {
 
     #[test]
     fn server_event_error() {
-        let event = ServerEvent::Error {
-            message: "resolution failed".into(),
-        };
+        let event = ServerEvent::Error { message: "resolution failed".into() };
         let json = serde_json::to_string(&event).unwrap();
         assert!(json.contains("ERROR"));
         assert!(json.contains("resolution failed"));

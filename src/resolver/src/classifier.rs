@@ -72,7 +72,7 @@ const WEB_PAGE_DOMAINS: &[&str] = &[
 const DIRECT_MEDIA_EXTENSIONS: &[&str] = &[
     "mp4", "mkv", "webm", "avi", "mov", "flv", "wmv", "m4v", // video
     "mp3", "flac", "ogg", "opus", "wav", "aac", "m4a", "wma", // audio
-    "ts", // MPEG-TS segment
+    "ts",  // MPEG-TS segment
 ];
 
 /// Classify a parsed URL into a [`UrlCategory`].
@@ -151,54 +151,33 @@ mod tests {
 
     #[test]
     fn magnet_link() {
-        assert_eq!(
-            classify("magnet:?xt=urn:btih:abc123&dn=test"),
-            UrlCategory::Magnet
-        );
+        assert_eq!(classify("magnet:?xt=urn:btih:abc123&dn=test"), UrlCategory::Magnet);
     }
 
     #[test]
     fn youtube_webpage() {
-        assert_eq!(
-            classify("https://www.youtube.com/watch?v=dQw4w9WgXcQ"),
-            UrlCategory::WebPage
-        );
-        assert_eq!(
-            classify("https://youtu.be/dQw4w9WgXcQ"),
-            UrlCategory::WebPage
-        );
+        assert_eq!(classify("https://www.youtube.com/watch?v=dQw4w9WgXcQ"), UrlCategory::WebPage);
+        assert_eq!(classify("https://youtu.be/dQw4w9WgXcQ"), UrlCategory::WebPage);
     }
 
     #[test]
     fn vimeo_webpage() {
-        assert_eq!(
-            classify("https://vimeo.com/123456789"),
-            UrlCategory::WebPage
-        );
+        assert_eq!(classify("https://vimeo.com/123456789"), UrlCategory::WebPage);
     }
 
     #[test]
     fn twitch_webpage() {
-        assert_eq!(
-            classify("https://www.twitch.tv/videos/12345"),
-            UrlCategory::WebPage
-        );
+        assert_eq!(classify("https://www.twitch.tv/videos/12345"), UrlCategory::WebPage);
     }
 
     #[test]
     fn hls_manifest() {
-        assert_eq!(
-            classify("https://cdn.example.com/live/stream.m3u8"),
-            UrlCategory::HlsManifest
-        );
+        assert_eq!(classify("https://cdn.example.com/live/stream.m3u8"), UrlCategory::HlsManifest);
     }
 
     #[test]
     fn dash_manifest() {
-        assert_eq!(
-            classify("https://cdn.example.com/vod/stream.mpd"),
-            UrlCategory::DashManifest
-        );
+        assert_eq!(classify("https://cdn.example.com/vod/stream.mpd"), UrlCategory::DashManifest);
     }
 
     #[test]
@@ -227,18 +206,12 @@ mod tests {
 
     #[test]
     fn direct_media_ts_segment() {
-        assert_eq!(
-            classify("https://cdn.example.com/segment0.ts"),
-            UrlCategory::DirectMedia
-        );
+        assert_eq!(classify("https://cdn.example.com/segment0.ts"), UrlCategory::DirectMedia);
     }
 
     #[test]
     fn unknown_domain_defaults_to_webpage() {
-        assert_eq!(
-            classify("https://some-random-site.com/page"),
-            UrlCategory::WebPage
-        );
+        assert_eq!(classify("https://some-random-site.com/page"), UrlCategory::WebPage);
     }
 
     #[test]
@@ -266,21 +239,12 @@ mod tests {
 
     #[test]
     fn case_insensitive_host() {
-        assert_eq!(
-            classify("https://WWW.YOUTUBE.COM/watch?v=abc"),
-            UrlCategory::WebPage
-        );
+        assert_eq!(classify("https://WWW.YOUTUBE.COM/watch?v=abc"), UrlCategory::WebPage);
     }
 
     #[test]
     fn case_insensitive_extension() {
-        assert_eq!(
-            classify("https://example.com/video.MP4"),
-            UrlCategory::DirectMedia
-        );
-        assert_eq!(
-            classify("https://cdn.example.com/STREAM.M3U8"),
-            UrlCategory::HlsManifest
-        );
+        assert_eq!(classify("https://example.com/video.MP4"), UrlCategory::DirectMedia);
+        assert_eq!(classify("https://cdn.example.com/STREAM.M3U8"), UrlCategory::HlsManifest);
     }
 }

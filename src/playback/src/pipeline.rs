@@ -27,7 +27,7 @@
 //! souphttpsrc → queue2 → parsebin → avdec_h264 → videoconvert → kmssink
 //! ```
 
-use crate::{BufferHealth, PlaybackError, PipelineConfig};
+use crate::{BufferHealth, PipelineConfig, PlaybackError};
 use gstreamer::prelude::*;
 use gstreamer::{Element, ElementFactory, Pipeline, State};
 use std::sync::Once;
@@ -149,11 +149,9 @@ impl GstPipeline {
             .build()
             .map_err(|e| PlaybackError::PipelineCreation(format!("volume: {}", e)))?;
 
-        let audiosink = ElementFactory::make(&config.audio_sink)
-            .build()
-            .map_err(|e| {
-                PlaybackError::PipelineCreation(format!("{}: {}", config.audio_sink, e))
-            })?;
+        let audiosink = ElementFactory::make(&config.audio_sink).build().map_err(|e| {
+            PlaybackError::PipelineCreation(format!("{}: {}", config.audio_sink, e))
+        })?;
 
         // ── Assemble pipeline ───────────────────────────────────────
         pipeline
@@ -161,8 +159,9 @@ impl GstPipeline {
             .map_err(|e| PlaybackError::PipelineCreation(format!("add elements: {}", e)))?;
 
         // Link: src → queue2 → parsebin
-        Element::link_many([&src, &queue2, &parsebin])
-            .map_err(|e| PlaybackError::PipelineCreation(format!("link src→queue2→parsebin: {}", e)))?;
+        Element::link_many([&src, &queue2, &parsebin]).map_err(|e| {
+            PlaybackError::PipelineCreation(format!("link src→queue2→parsebin: {}", e))
+        })?;
 
         // Link audio: audioconvert → volume → audiosink
         Element::link_many([&audioconvert, &volume, &audiosink])
@@ -175,24 +174,16 @@ impl GstPipeline {
 
         parsebin.connect_pad_added(move |_parsebin, pad| {
             let caps = pad.current_caps();
-            let media_type = caps
-                .and_then(|c| c.structure(0).map(|s| s.name().to_string()));
+            let media_type = caps.and_then(|c| c.structure(0).map(|s| s.name().to_string()));
 
-            let is_video = media_type
-                .as_ref()
-                .map(|t| t.starts_with("video/"))
-                .unwrap_or(false);
+            let is_video = media_type.as_ref().map(|t| t.starts_with("video/")).unwrap_or(false);
 
-            let is_audio = media_type
-                .as_ref()
-                .map(|t| t.starts_with("audio/"))
-                .unwrap_or(false);
+            let is_audio = media_type.as_ref().map(|t| t.starts_with("audio/")).unwrap_or(false);
 
             if is_video {
                 if let Some(vbin) = video_bin_weak.upgrade() {
-                    let sink_pad = vbin
-                        .static_pad("sink")
-                        .expect("video bin should have a sink pad");
+                    let sink_pad =
+                        vbin.static_pad("sink").expect("video bin should have a sink pad");
                     if sink_pad.is_linked() {
                         tracing::debug!("video pad already linked, skipping");
                         return;
@@ -205,9 +196,8 @@ impl GstPipeline {
                 }
             } else if is_audio {
                 if let Some(aconv) = audioconvert_weak.upgrade() {
-                    let sink_pad = aconv
-                        .static_pad("sink")
-                        .expect("audioconvert should have a sink pad");
+                    let sink_pad =
+                        aconv.static_pad("sink").expect("audioconvert should have a sink pad");
                     if sink_pad.is_linked() {
                         tracing::debug!("audio pad already linked, skipping");
                         return;
@@ -221,12 +211,7 @@ impl GstPipeline {
             }
         });
 
-        Ok(Self {
-            pipeline,
-            video_sink,
-            volume,
-            state: PipelineState::Ready,
-        })
+        Ok(Self { pipeline, video_sink, volume, state: PipelineState::Ready })
     }
 
     /// Build the hardware-accelerated video branch:
@@ -253,25 +238,21 @@ impl GstPipeline {
             })?;
 
         let bin = gstreamer::Bin::new(Some("video-bin"));
-        bin.add_many([&v4l2dec, &kmssink])
-            .map_err(|e| PlaybackError::PipelineCreation(format!("add video elements to bin: {}", e)))?;
+        bin.add_many([&v4l2dec, &kmssink]).map_err(|e| {
+            PlaybackError::PipelineCreation(format!("add video elements to bin: {}", e))
+        })?;
 
-        Element::link_many([&v4l2dec, &kmssink])
-            .map_err(|e| PlaybackError::PipelineCreation(format!("link v4l2h264dec→kmssink: {}", e)))?;
+        Element::link_many([&v4l2dec, &kmssink]).map_err(|e| {
+            PlaybackError::PipelineCreation(format!("link v4l2h264dec→kmssink: {}", e))
+        })?;
 
         // Create ghost pads for the bin.
-        let sink_pad = v4l2dec
-            .static_pad("sink")
-            .expect("v4l2h264dec should have a sink pad");
-        bin.add_pad(
-            &gstreamer::GhostPad::with_target(&sink_pad)
-                .expect("create video ghost pad"),
-        )
-        .map_err(|e| PlaybackError::PipelineCreation(format!("video ghost pad: {}", e)))?;
+        let sink_pad = v4l2dec.static_pad("sink").expect("v4l2h264dec should have a sink pad");
+        bin.add_pad(&gstreamer::GhostPad::with_target(&sink_pad).expect("create video ghost pad"))
+            .map_err(|e| PlaybackError::PipelineCreation(format!("video ghost pad: {}", e)))?;
 
-        let bin_element: Element = bin
-            .dynamic_cast::<Element>()
-            .expect("bin to element cast should succeed");
+        let bin_element: Element =
+            bin.dynamic_cast::<Element>().expect("bin to element cast should succeed");
 
         Ok((bin_element, kmssink))
     }
@@ -296,24 +277,21 @@ impl GstPipeline {
             })?;
 
         let bin = gstreamer::Bin::new(Some("sw-video-bin"));
-        bin.add_many([&avdec, &vconv, &kmssink])
-            .map_err(|e| PlaybackError::PipelineCreation(format!("add sw video elements: {}", e)))?;
+        bin.add_many([&avdec, &vconv, &kmssink]).map_err(|e| {
+            PlaybackError::PipelineCreation(format!("add sw video elements: {}", e))
+        })?;
 
         Element::link_many([&avdec, &vconv, &kmssink])
             .map_err(|e| PlaybackError::PipelineCreation(format!("link sw video chain: {}", e)))?;
 
-        let sink_pad = avdec
-            .static_pad("sink")
-            .expect("avdec_h264 should have a sink pad");
+        let sink_pad = avdec.static_pad("sink").expect("avdec_h264 should have a sink pad");
         bin.add_pad(
-            &gstreamer::GhostPad::with_target(&sink_pad)
-                .expect("create sw video ghost pad"),
+            &gstreamer::GhostPad::with_target(&sink_pad).expect("create sw video ghost pad"),
         )
         .map_err(|e| PlaybackError::PipelineCreation(format!("sw video ghost pad: {}", e)))?;
 
-        let bin_element: Element = bin
-            .dynamic_cast::<Element>()
-            .expect("bin to element cast should succeed");
+        let bin_element: Element =
+            bin.dynamic_cast::<Element>().expect("bin to element cast should succeed");
 
         Ok((bin_element, kmssink))
     }
@@ -366,10 +344,7 @@ impl GstPipeline {
     pub fn seek(&mut self, position_ms: u64) -> Result<(), PlaybackError> {
         let position = gstreamer::ClockTime::from_mseconds(position_ms);
         self.pipeline
-            .seek_simple(
-                gstreamer::SeekFlags::FLUSH | gstreamer::SeekFlags::KEY_UNIT,
-                position,
-            )
+            .seek_simple(gstreamer::SeekFlags::FLUSH | gstreamer::SeekFlags::KEY_UNIT, position)
             .map_err(|e| PlaybackError::SeekFailed(format!("seek to {}ms: {}", position_ms, e)))?;
         tracing::debug!(position_ms = position_ms, "seek completed");
         Ok(())
@@ -395,10 +370,7 @@ impl GstPipeline {
 
     /// Return the total duration in milliseconds.
     pub fn duration_ms(&self) -> Result<Option<u64>, PlaybackError> {
-        let duration = self
-            .pipeline
-            .query_duration::<gstreamer::ClockTime>()
-            .map(|d| d.mseconds());
+        let duration = self.pipeline.query_duration::<gstreamer::ClockTime>().map(|d| d.mseconds());
         Ok(duration)
     }
 

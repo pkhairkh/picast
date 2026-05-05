@@ -60,7 +60,8 @@ pub trait PlaybackTrait: Send + Sync {
     async fn seek(&self, position_ms: u64) -> Result<(), Box<dyn std::error::Error + Send + Sync>>;
 
     /// Set volume to a value between 0.0 and 1.0.
-    async fn set_volume(&self, volume: f64) -> Result<(), Box<dyn std::error::Error + Send + Sync>>;
+    async fn set_volume(&self, volume: f64)
+        -> Result<(), Box<dyn std::error::Error + Send + Sync>>;
 
     /// Return the current playback position in milliseconds.
     async fn position_ms(&self) -> Result<u64, Box<dyn std::error::Error + Send + Sync>>;

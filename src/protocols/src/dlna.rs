@@ -17,7 +17,7 @@
 //! PiCast's pipeline (with SOCKS5 proxy support), and PiCast's
 //! session manager synchronises state with gmediarender.
 
-use anyhow::{Result, anyhow};
+use anyhow::{anyhow, Result};
 use std::sync::Arc;
 use tokio::process::{Child, Command};
 use tokio::sync::Mutex;
@@ -72,7 +72,7 @@ impl DlnaRenderer {
         } else {
             &format!(
                 "souphttpsrc location=%s socks5-proxy-ip=127.0.0.1 socks5-proxy-port={} ! queue2 max-size-bytes=52428800 use-buffering=true ! parsebin ! v4l2h264dec capture-io-mode=dmabuf ! kmssink driver-name=vc4 plane-id=0 can-scale=true force-modesetting=true",
-                self.socks_addr.split(':').last().unwrap_or("9050")
+                self.socks_addr.split(':').next_back().unwrap_or("9050")
             )
         };
 
@@ -93,7 +93,9 @@ impl DlnaRenderer {
             .spawn()
             .map_err(|e| {
                 if e.kind() == std::io::ErrorKind::NotFound {
-                    anyhow!("gmediarender binary not found — install with: apt install gmediarender")
+                    anyhow!(
+                        "gmediarender binary not found — install with: apt install gmediarender"
+                    )
                 } else {
                     anyhow!("failed to spawn gmediarender: {}", e)
                 }
@@ -122,19 +124,14 @@ impl DlnaRenderer {
             }
 
             // Wait up to 3 seconds for the process to exit.
-            match tokio::time::timeout(
-                std::time::Duration::from_secs(3),
-                child.wait(),
-            )
-            .await
-            {
+            match tokio::time::timeout(std::time::Duration::from_secs(3), child.wait()).await {
                 Ok(Ok(status)) => {
                     tracing::info!(exit_code = ?status.code(), "gmediarender exited");
-                }
+                },
                 _ => {
                     tracing::warn!("killing gmediarender process");
                     let _ = child.kill().await;
-                }
+                },
             }
 
             *guard = None;

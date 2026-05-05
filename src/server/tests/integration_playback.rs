@@ -5,7 +5,7 @@
 
 mod common;
 
-use picast_playback::{BufferHealth, PlaybackError, PipelineConfig};
+use picast_playback::{BufferHealth, PipelineConfig, PlaybackError};
 
 /// Verify that [`PipelineConfig::default`] returns the expected
 /// Raspberry Pi–oriented defaults.

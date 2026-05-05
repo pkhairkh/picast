@@ -36,20 +36,12 @@ pub struct ResolveCache {
 impl ResolveCache {
     /// Create a new cache with default TTL (10 minutes).
     pub fn new() -> Self {
-        Self {
-            entries: HashMap::new(),
-            ttl: DEFAULT_TTL,
-            max_entries: MAX_ENTRIES,
-        }
+        Self { entries: HashMap::new(), ttl: DEFAULT_TTL, max_entries: MAX_ENTRIES }
     }
 
     /// Create a new cache with a custom TTL.
     pub fn with_ttl(ttl: Duration) -> Self {
-        Self {
-            entries: HashMap::new(),
-            ttl,
-            max_entries: MAX_ENTRIES,
-        }
+        Self { entries: HashMap::new(), ttl, max_entries: MAX_ENTRIES }
     }
 
     /// Insert a resolution result into the cache.
@@ -64,23 +56,14 @@ impl ResolveCache {
 
         // If still at capacity, remove the oldest entry.
         if self.entries.len() >= self.max_entries {
-            if let Some(oldest_key) = self
-                .entries
-                .iter()
-                .min_by_key(|(_, v)| v.inserted_at)
-                .map(|(k, _)| k.clone())
+            if let Some(oldest_key) =
+                self.entries.iter().min_by_key(|(_, v)| v.inserted_at).map(|(k, _)| k.clone())
             {
                 self.entries.remove(&oldest_key);
             }
         }
 
-        self.entries.insert(
-            url.to_owned(),
-            CacheEntry {
-                result,
-                inserted_at: Instant::now(),
-            },
-        );
+        self.entries.insert(url.to_owned(), CacheEntry { result, inserted_at: Instant::now() });
     }
 
     /// Look up a URL in the cache.
@@ -91,9 +74,10 @@ impl ResolveCache {
         let now = Instant::now();
 
         // Check if the entry exists and is still valid.
-        let is_valid = self.entries.get(url).map_or(false, |entry| {
-            now.duration_since(entry.inserted_at) < self.ttl
-        });
+        let is_valid = self
+            .entries
+            .get(url)
+            .is_some_and(|entry| now.duration_since(entry.inserted_at) < self.ttl);
 
         if !is_valid {
             // Remove expired entry if it exists.

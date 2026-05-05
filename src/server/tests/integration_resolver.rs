@@ -34,13 +34,13 @@ async fn test_classify_youtube_url_as_webpage() {
         Ok(resolved) => {
             // If yt-dlp is installed and works, verify category.
             assert_eq!(resolved.category, UrlCategory::WebPage);
-        }
+        },
         Err(ResolveError::TorUnavailable(msg)) => {
             assert!(msg.contains("yt-dlp"), "error should mention yt-dlp: {}", msg);
-        }
+        },
         Err(ResolveError::Network(_)) | Err(ResolveError::NoMediaFound(_)) => {
             // Acceptable without a running Tor daemon or for geo-blocked content.
-        }
+        },
         Err(e) => panic!("unexpected error: {:?}", e),
     }
 }
@@ -93,13 +93,13 @@ async fn test_classify_onion_url() {
         Ok(resolved) => {
             assert_eq!(resolved.category, UrlCategory::Onion);
             assert!(resolved.used_tor);
-        }
+        },
         Err(ResolveError::TorUnavailable(msg)) => {
             assert!(msg.contains("yt-dlp"), "error should mention yt-dlp: {}", msg);
-        }
+        },
         Err(ResolveError::Network(_)) | Err(ResolveError::NoMediaFound(_)) => {
             // Acceptable without a running Tor daemon.
-        }
+        },
         Err(e) => panic!("unexpected error: {:?}", e),
     }
 }

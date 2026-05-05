@@ -145,18 +145,12 @@ pub struct Resolver {
 impl Resolver {
     /// Create a new resolver with the given Tor manager.
     pub fn new(tor: Arc<picast_tor::TorManager>) -> Self {
-        Self {
-            tor,
-            cache: Arc::new(Mutex::new(ResolveCache::new())),
-        }
+        Self { tor, cache: Arc::new(Mutex::new(ResolveCache::new())) }
     }
 
     /// Create a new resolver with a custom cache TTL.
     pub fn with_cache_ttl(tor: Arc<picast_tor::TorManager>, ttl: std::time::Duration) -> Self {
-        Self {
-            tor,
-            cache: Arc::new(Mutex::new(ResolveCache::with_ttl(ttl))),
-        }
+        Self { tor, cache: Arc::new(Mutex::new(ResolveCache::with_ttl(ttl))) }
     }
 
     /// Resolve `url` into a [`ResolveResult`].
@@ -235,17 +229,17 @@ impl Resolver {
                 let mut result = self.resolve_onion(url).await?;
                 result.category = UrlCategory::Onion;
                 result
-            }
+            },
             UrlCategory::WebPage => {
                 // Web page URLs require yt-dlp to extract the direct media URL.
                 // Route through Tor SOCKS proxy for circuit isolation.
                 let mut result = self.resolve_webpage(url).await?;
                 result.category = UrlCategory::WebPage;
                 result
-            }
+            },
             UrlCategory::Magnet => {
                 return Err(ResolveError::NoMediaFound(url.to_owned()));
-            }
+            },
         };
 
         // Cache the result.
@@ -541,19 +535,20 @@ mod tests {
                 // a result with used_tor = true.
                 assert_eq!(res.category, UrlCategory::Onion);
                 assert!(res.used_tor);
-            }
+            },
             Err(ResolveError::TorUnavailable(msg)) => {
                 // Expected when yt-dlp is not installed in test env.
                 assert!(msg.contains("yt-dlp"), "error should mention yt-dlp: {}", msg);
-            }
+            },
             Err(e) => {
                 // Other errors (network, no media found) are acceptable
                 // without a running Tor daemon.
                 assert!(
                     matches!(e, ResolveError::Network(_) | ResolveError::NoMediaFound(_)),
-                    "unexpected error type: {:?}", e
+                    "unexpected error type: {:?}",
+                    e
                 );
-            }
+            },
         }
     }
 
@@ -566,16 +561,17 @@ mod tests {
         match result {
             Ok(res) => {
                 assert_eq!(res.category, UrlCategory::WebPage);
-            }
+            },
             Err(ResolveError::TorUnavailable(msg)) => {
                 assert!(msg.contains("yt-dlp"), "error should mention yt-dlp: {}", msg);
-            }
+            },
             Err(e) => {
                 assert!(
                     matches!(e, ResolveError::Network(_) | ResolveError::NoMediaFound(_)),
-                    "unexpected error type: {:?}", e
+                    "unexpected error type: {:?}",
+                    e
                 );
-            }
+            },
         }
     }
 
@@ -683,10 +679,22 @@ mod tests {
     #[test]
     fn guess_mime_type() {
         assert_eq!(Resolver::guess_mime_from_url("https://x.com/v.mp4"), Some("video/mp4".into()));
-        assert_eq!(Resolver::guess_mime_from_url("https://x.com/v.mkv"), Some("video/x-matroska".into()));
-        assert_eq!(Resolver::guess_mime_from_url("https://x.com/v.webm"), Some("video/webm".into()));
-        assert_eq!(Resolver::guess_mime_from_url("https://x.com/s.m3u8"), Some("application/vnd.apple.mpegurl".into()));
-        assert_eq!(Resolver::guess_mime_from_url("https://x.com/s.mpd"), Some("application/dash+xml".into()));
+        assert_eq!(
+            Resolver::guess_mime_from_url("https://x.com/v.mkv"),
+            Some("video/x-matroska".into())
+        );
+        assert_eq!(
+            Resolver::guess_mime_from_url("https://x.com/v.webm"),
+            Some("video/webm".into())
+        );
+        assert_eq!(
+            Resolver::guess_mime_from_url("https://x.com/s.m3u8"),
+            Some("application/vnd.apple.mpegurl".into())
+        );
+        assert_eq!(
+            Resolver::guess_mime_from_url("https://x.com/s.mpd"),
+            Some("application/dash+xml".into())
+        );
         assert_eq!(Resolver::guess_mime_from_url("https://x.com/a.mp3"), Some("audio/mpeg".into()));
     }
 

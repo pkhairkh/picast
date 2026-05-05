@@ -72,17 +72,13 @@ mod tests {
                 debug: Some("v4l2h264dec: negotiation failed".into()),
             },
             PlaybackEvent::Buffering { percent: 50 },
-            PlaybackEvent::PositionUpdate {
-                position_ms: 5000,
-                duration_ms: Some(300000),
-            },
+            PlaybackEvent::PositionUpdate { position_ms: 5000, duration_ms: Some(300000) },
             PlaybackEvent::Latency { latency_ms: 42 },
         ];
 
         for event in events {
             let json = serde_json::to_string(&event).expect("serialize");
-            let decoded: PlaybackEvent =
-                serde_json::from_str(&json).expect("deserialize");
+            let decoded: PlaybackEvent = serde_json::from_str(&json).expect("deserialize");
             let re_encoded = serde_json::to_string(&decoded).expect("re-serialize");
             assert_eq!(json, re_encoded, "round-trip failed for {:?}", event);
         }

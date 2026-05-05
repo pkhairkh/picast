@@ -122,13 +122,16 @@ impl PlayerState {
             PlayerState::Idle => matches!(target, PlayerState::Resolving | PlayerState::Error),
             PlayerState::Resolving => {
                 matches!(target, PlayerState::Buffering | PlayerState::Error | PlayerState::Idle)
-            }
+            },
             PlayerState::Buffering => {
                 matches!(
                     target,
-                    PlayerState::Playing | PlayerState::Paused | PlayerState::Error | PlayerState::Idle
+                    PlayerState::Playing
+                        | PlayerState::Paused
+                        | PlayerState::Error
+                        | PlayerState::Idle
                 )
-            }
+            },
             PlayerState::Playing => {
                 matches!(
                     target,
@@ -138,16 +141,19 @@ impl PlayerState {
                         | PlayerState::Error
                         | PlayerState::Idle
                 )
-            }
+            },
             PlayerState::Paused => {
                 matches!(
                     target,
-                    PlayerState::Playing | PlayerState::Seeking | PlayerState::Error | PlayerState::Idle
+                    PlayerState::Playing
+                        | PlayerState::Seeking
+                        | PlayerState::Error
+                        | PlayerState::Idle
                 )
-            }
+            },
             PlayerState::Seeking => {
                 matches!(target, PlayerState::Playing | PlayerState::Error | PlayerState::Idle)
-            }
+            },
             PlayerState::Error => matches!(target, PlayerState::Idle),
         }
     }
@@ -158,10 +164,7 @@ impl PlayerState {
         if self.can_transition_to(target) {
             Ok(target)
         } else {
-            Err(SessionError::InvalidTransition {
-                from: *self,
-                to: target,
-            })
+            Err(SessionError::InvalidTransition { from: *self, to: target })
         }
     }
 }
@@ -206,11 +209,7 @@ pub enum SessionEvent {
     /// URL resolution is in progress.
     Resolving { id: Uuid },
     /// Resolution succeeded; playback is starting.
-    Resolved {
-        id: Uuid,
-        direct_url: String,
-        title: Option<String>,
-    },
+    Resolved { id: Uuid, direct_url: String, title: Option<String> },
     /// Playback has begun.
     Playing { id: Uuid },
     /// Playback is paused.
@@ -222,11 +221,7 @@ pub enum SessionEvent {
     /// Buffering progress.
     Buffering { id: Uuid, percent: u8 },
     /// Position update.
-    PositionUpdate {
-        id: Uuid,
-        position_ms: u64,
-        duration_ms: Option<u64>,
-    },
+    PositionUpdate { id: Uuid, position_ms: u64, duration_ms: Option<u64> },
     /// Volume changed.
     VolumeChanged { id: Uuid, volume: u8 },
     /// A seek operation is in progress.
@@ -394,9 +389,10 @@ impl SessionManager {
         session_id: Uuid,
         target: PlayerState,
     ) -> Result<PlayerState, SessionError> {
-        let db = self.db.lock().map_err(|e| {
-            SessionError::Subsystem(format!("db lock poisoned: {}", e))
-        })?;
+        let db = self
+            .db
+            .lock()
+            .map_err(|e| SessionError::Subsystem(format!("db lock poisoned: {}", e)))?;
 
         // Read current state from SQLite.
         let current_state_str: String = db
@@ -416,10 +412,7 @@ impl SessionManager {
 
         // Validate transition.
         if !current_state.can_transition_to(target) {
-            return Err(SessionError::InvalidTransition {
-                from: current_state,
-                to: target,
-            });
+            return Err(SessionError::InvalidTransition { from: current_state, to: target });
         }
 
         // Update SQLite with new state.
@@ -435,9 +428,8 @@ impl SessionManager {
             PlayerState::Playing => SessionEvent::Playing { id: session_id },
             PlayerState::Paused => SessionEvent::Paused { id: session_id },
             PlayerState::Idle => SessionEvent::Stopped { id: session_id },
-            PlayerState::Error => SessionEvent::Error {
-                id: session_id,
-                message: "entered error state".into(),
+            PlayerState::Error => {
+                SessionEvent::Error { id: session_id, message: "entered error state".into() }
             },
             _ => return Ok(target), // No broadcast for Buffering/Seeking here
         };
@@ -448,9 +440,10 @@ impl SessionManager {
 
     /// Insert a session into the database.
     pub fn insert_session(&self, session: &MediaSession) -> Result<(), SessionError> {
-        let db = self.db.lock().map_err(|e| {
-            SessionError::Subsystem(format!("db lock poisoned: {}", e))
-        })?;
+        let db = self
+            .db
+            .lock()
+            .map_err(|e| SessionError::Subsystem(format!("db lock poisoned: {}", e)))?;
         db.execute(
             "INSERT OR REPLACE INTO sessions
              (id, source_url, resolved_url, state, position_ms, duration_ms, volume, title, created_at, updated_at)
@@ -481,9 +474,10 @@ impl SessionManager {
         field: &str,
         value: &dyn rusqlite::types::ToSql,
     ) -> Result<(), SessionError> {
-        let db = self.db.lock().map_err(|e| {
-            SessionError::Subsystem(format!("db lock poisoned: {}", e))
-        })?;
+        let db = self
+            .db
+            .lock()
+            .map_err(|e| SessionError::Subsystem(format!("db lock poisoned: {}", e)))?;
         let now = Utc::now().to_rfc3339();
         let sql = format!("UPDATE sessions SET {} = ?, updated_at = ? WHERE id = ?", field);
         db.execute(&sql, rusqlite::params![value, now, session_id.to_string()])?;
@@ -492,44 +486,47 @@ impl SessionManager {
 
     /// Load a session from the database by ID.
     pub fn load_session(&self, id: Uuid) -> Result<MediaSession, SessionError> {
-        let db = self.db.lock().map_err(|e| {
-            SessionError::Subsystem(format!("db lock poisoned: {}", e))
-        })?;
+        let db = self
+            .db
+            .lock()
+            .map_err(|e| SessionError::Subsystem(format!("db lock poisoned: {}", e)))?;
 
-        let session = db.query_row(
-            "SELECT id, source_url, resolved_url, state, position_ms, duration_ms,
+        let session = db
+            .query_row(
+                "SELECT id, source_url, resolved_url, state, position_ms, duration_ms,
                     volume, title, created_at, updated_at
              FROM sessions WHERE id = ?1",
-            rusqlite::params![id.to_string()],
-            |row| {
-                let id_str: String = row.get(0)?;
-                let source_url: String = row.get(1)?;
-                let resolved_url: Option<String> = row.get(2)?;
-                let state_str: String = row.get(3)?;
-                let position_ms: i64 = row.get(4)?;
-                let duration_ms: Option<i64> = row.get(5)?;
-                let volume: i32 = row.get(6)?;
-                let title: Option<String> = row.get(7)?;
-                let created_at_str: String = row.get(8)?;
-                let updated_at_str: String = row.get(9)?;
+                rusqlite::params![id.to_string()],
+                |row| {
+                    let id_str: String = row.get(0)?;
+                    let source_url: String = row.get(1)?;
+                    let resolved_url: Option<String> = row.get(2)?;
+                    let state_str: String = row.get(3)?;
+                    let position_ms: i64 = row.get(4)?;
+                    let duration_ms: Option<i64> = row.get(5)?;
+                    let volume: i32 = row.get(6)?;
+                    let title: Option<String> = row.get(7)?;
+                    let created_at_str: String = row.get(8)?;
+                    let updated_at_str: String = row.get(9)?;
 
-                Ok(MediaSession {
-                    id: Uuid::parse_str(&id_str).unwrap(),
-                    source_url,
-                    resolved_url,
-                    state: state_str.parse().unwrap(),
-                    position_ms: position_ms as u64,
-                    duration_ms: duration_ms.map(|d| d as u64),
-                    volume: volume as u8,
-                    title,
-                    created_at: created_at_str.parse().unwrap(),
-                    updated_at: updated_at_str.parse().unwrap(),
-                })
-            },
-        ).map_err(|e| match e {
-            rusqlite::Error::QueryReturnedNoRows => SessionError::NotFound(id),
-            other => SessionError::Database(other),
-        })?;
+                    Ok(MediaSession {
+                        id: Uuid::parse_str(&id_str).unwrap(),
+                        source_url,
+                        resolved_url,
+                        state: state_str.parse().unwrap(),
+                        position_ms: position_ms as u64,
+                        duration_ms: duration_ms.map(|d| d as u64),
+                        volume: volume as u8,
+                        title,
+                        created_at: created_at_str.parse().unwrap(),
+                        updated_at: updated_at_str.parse().unwrap(),
+                    })
+                },
+            )
+            .map_err(|e| match e {
+                rusqlite::Error::QueryReturnedNoRows => SessionError::NotFound(id),
+                other => SessionError::Database(other),
+            })?;
 
         Ok(session)
     }
@@ -544,7 +541,9 @@ impl SessionManager {
     /// Returns [`SessionError::NoActiveSession`] if no session is active.
     pub async fn current_status(&self) -> Result<MediaSession, SessionError> {
         let id = {
-            let guard = self.active_session_id.lock()
+            let guard = self
+                .active_session_id
+                .lock()
                 .map_err(|e| SessionError::Subsystem(format!("lock poisoned: {}", e)))?;
             guard.ok_or(SessionError::NoActiveSession)?
         };
@@ -593,7 +592,9 @@ impl SessionManager {
     pub async fn load(&self, url: &str) -> Result<Uuid, SessionError> {
         // Check if a session is already active.
         {
-            let guard = self.active_session_id.lock()
+            let guard = self
+                .active_session_id
+                .lock()
                 .map_err(|e| SessionError::Subsystem(format!("lock poisoned: {}", e)))?;
             if guard.is_some() {
                 return Err(SessionError::AlreadyActive);
@@ -607,7 +608,9 @@ impl SessionManager {
 
         // Mark as the active session.
         {
-            let mut guard = self.active_session_id.lock()
+            let mut guard = self
+                .active_session_id
+                .lock()
                 .map_err(|e| SessionError::Subsystem(format!("lock poisoned: {}", e)))?;
             *guard = Some(session.id);
         }
@@ -615,10 +618,7 @@ impl SessionManager {
         let id = session.id;
 
         // Broadcast: session created.
-        let _ = self.event_tx.send(SessionEvent::Created {
-            id,
-            url: url.to_owned(),
-        });
+        let _ = self.event_tx.send(SessionEvent::Created { id, url: url.to_owned() });
 
         // Transition: Idle → Resolving.
         self.try_transition(id, PlayerState::Resolving)?;
@@ -639,9 +639,10 @@ impl SessionManager {
         // Update the session with the resolved URL.
         let direct_url_sql: String = direct_url.clone();
         {
-            let db = self.db.lock().map_err(|e| {
-                SessionError::Subsystem(format!("db lock poisoned: {}", e))
-            })?;
+            let db = self
+                .db
+                .lock()
+                .map_err(|e| SessionError::Subsystem(format!("db lock poisoned: {}", e)))?;
             let now = Utc::now().to_rfc3339();
             db.execute(
                 "UPDATE sessions SET resolved_url = ?1, updated_at = ?2 WHERE id = ?3",
@@ -662,10 +663,18 @@ impl SessionManager {
         // Start playback via the playback subsystem.
         if let Some(ref playback) = self.playback {
             let socks_addr = self.tor.as_ref().map(|t| t.socks_addr()).unwrap_or_default();
-            let isolation_username = self.tor.as_ref()
-                .map(|t| t.isolation_username(
-                    url::Url::parse(url).ok().and_then(|u| u.host_str().map(|h| h.to_owned())).unwrap_or_default().as_str()
-                ))
+            let isolation_username = self
+                .tor
+                .as_ref()
+                .map(|t| {
+                    t.isolation_username(
+                        url::Url::parse(url)
+                            .ok()
+                            .and_then(|u| u.host_str().map(|h| h.to_owned()))
+                            .unwrap_or_default()
+                            .as_str(),
+                    )
+                })
                 .unwrap_or_default();
 
             playback.play(&direct_url, &socks_addr, &isolation_username).await.map_err(|e| {
@@ -696,9 +705,7 @@ impl SessionManager {
 
         // Delegate to playback subsystem.
         if let Some(ref playback) = self.playback {
-            playback.pause().await.map_err(|e| {
-                SessionError::PlaybackError(e.to_string())
-            })?;
+            playback.pause().await.map_err(|e| SessionError::PlaybackError(e.to_string()))?;
         }
 
         // Push latest state to watch channel.
@@ -720,9 +727,7 @@ impl SessionManager {
 
         // Delegate to playback subsystem.
         if let Some(ref playback) = self.playback {
-            playback.resume().await.map_err(|e| {
-                SessionError::PlaybackError(e.to_string())
-            })?;
+            playback.resume().await.map_err(|e| SessionError::PlaybackError(e.to_string()))?;
         }
 
         // Push latest state to watch channel.
@@ -744,7 +749,10 @@ impl SessionManager {
         let session = self.load_session(id)?;
 
         // If we're in Playing/Paused/Buffering, stop the pipeline first.
-        if matches!(session.state, PlayerState::Playing | PlayerState::Paused | PlayerState::Buffering) {
+        if matches!(
+            session.state,
+            PlayerState::Playing | PlayerState::Paused | PlayerState::Buffering
+        ) {
             if let Some(ref playback) = self.playback {
                 let _ = playback.stop().await;
             }
@@ -762,7 +770,9 @@ impl SessionManager {
 
         // Clear the active session.
         {
-            let mut guard = self.active_session_id.lock()
+            let mut guard = self
+                .active_session_id
+                .lock()
                 .map_err(|e| SessionError::Subsystem(format!("lock poisoned: {}", e)))?;
             *guard = None;
         }
@@ -791,16 +801,14 @@ impl SessionManager {
         self.try_transition(id, PlayerState::Seeking)?;
 
         // Broadcast seek event.
-        let _ = self.event_tx.send(SessionEvent::Seeking {
-            id,
-            position_ms,
-        });
+        let _ = self.event_tx.send(SessionEvent::Seeking { id, position_ms });
 
         // Delegate to playback subsystem.
         if let Some(ref playback) = self.playback {
-            playback.seek(position_ms).await.map_err(|e| {
-                SessionError::PlaybackError(e.to_string())
-            })?;
+            playback
+                .seek(position_ms)
+                .await
+                .map_err(|e| SessionError::PlaybackError(e.to_string()))?;
         }
 
         // Transition back to the previous state (Playing or Paused).
@@ -833,9 +841,10 @@ impl SessionManager {
 
         // Update the session in the database.
         {
-            let db = self.db.lock().map_err(|e| {
-                SessionError::Subsystem(format!("db lock poisoned: {}", e))
-            })?;
+            let db = self
+                .db
+                .lock()
+                .map_err(|e| SessionError::Subsystem(format!("db lock poisoned: {}", e)))?;
             let now = Utc::now().to_rfc3339();
             db.execute(
                 "UPDATE sessions SET volume = ?1, updated_at = ?2 WHERE id = ?3",
@@ -845,16 +854,14 @@ impl SessionManager {
 
         // Delegate to playback subsystem.
         if let Some(ref playback) = self.playback {
-            playback.set_volume(clamped as f64 / 100.0).await.map_err(|e| {
-                SessionError::PlaybackError(e.to_string())
-            })?;
+            playback
+                .set_volume(clamped as f64 / 100.0)
+                .await
+                .map_err(|e| SessionError::PlaybackError(e.to_string()))?;
         }
 
         // Broadcast volume change event.
-        let _ = self.event_tx.send(SessionEvent::VolumeChanged {
-            id,
-            volume: clamped,
-        });
+        let _ = self.event_tx.send(SessionEvent::VolumeChanged { id, volume: clamped });
 
         // Push latest state to watch channel.
         if let Ok(session) = self.load_session(id) {
@@ -868,20 +875,20 @@ impl SessionManager {
 
     /// Get the active session ID or return NoActiveSession.
     fn active_session_id(&self) -> Result<Uuid, SessionError> {
-        let guard = self.active_session_id.lock()
+        let guard = self
+            .active_session_id
+            .lock()
             .map_err(|e| SessionError::Subsystem(format!("lock poisoned: {}", e)))?;
         guard.ok_or(SessionError::NoActiveSession)
     }
 
     /// Delete a session from SQLite.
     fn delete_session(&self, id: Uuid) -> Result<(), SessionError> {
-        let db = self.db.lock().map_err(|e| {
-            SessionError::Subsystem(format!("db lock poisoned: {}", e))
-        })?;
-        db.execute(
-            "DELETE FROM sessions WHERE id = ?1",
-            rusqlite::params![id.to_string()],
-        )?;
+        let db = self
+            .db
+            .lock()
+            .map_err(|e| SessionError::Subsystem(format!("db lock poisoned: {}", e)))?;
+        db.execute("DELETE FROM sessions WHERE id = ?1", rusqlite::params![id.to_string()])?;
         Ok(())
     }
 
@@ -904,9 +911,10 @@ impl SessionManager {
     /// from growing unbounded. Stale sessions are those whose
     /// `updated_at` timestamp is more than 24 hours in the past.
     fn cleanup_stale_sessions(&self) -> Result<(), SessionError> {
-        let db = self.db.lock().map_err(|e| {
-            SessionError::Subsystem(format!("db lock poisoned: {}", e))
-        })?;
+        let db = self
+            .db
+            .lock()
+            .map_err(|e| SessionError::Subsystem(format!("db lock poisoned: {}", e)))?;
         let deleted = db.execute(
             "DELETE FROM sessions WHERE updated_at < strftime('%Y-%m-%dT%H:%M:%S+00:00', 'now', '-24 hours')",
             [],
@@ -924,18 +932,17 @@ impl SessionManager {
     /// the database row still exists. We reset all such sessions to
     /// `Idle` so they don't block new sessions from being created.
     fn recover_crashed_sessions(&self) -> Result<(), SessionError> {
-        let db = self.db.lock().map_err(|e| {
-            SessionError::Subsystem(format!("db lock poisoned: {}", e))
-        })?;
+        let db = self
+            .db
+            .lock()
+            .map_err(|e| SessionError::Subsystem(format!("db lock poisoned: {}", e)))?;
 
         // Find sessions in non-terminal states.
         let crashed: Vec<(String, String)> = {
-            let mut stmt = db.prepare(
-                "SELECT id, state FROM sessions WHERE state NOT IN ('idle', 'error')"
-            )?;
-            let rows = stmt.query_map([], |row| {
-                Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
-            })?;
+            let mut stmt =
+                db.prepare("SELECT id, state FROM sessions WHERE state NOT IN ('idle', 'error')")?;
+            let rows =
+                stmt.query_map([], |row| Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?)))?;
             rows.filter_map(|r| r.ok()).collect()
         };
 
@@ -982,7 +989,10 @@ mod tests {
 
     #[async_trait::async_trait]
     impl ResolverTrait for MockResolver {
-        async fn resolve(&self, url: &str) -> Result<String, Box<dyn std::error::Error + Send + Sync>> {
+        async fn resolve(
+            &self,
+            url: &str,
+        ) -> Result<String, Box<dyn std::error::Error + Send + Sync>> {
             if self.should_fail.load(AtomicOrdering::Relaxed) {
                 return Err("mock resolution failure".into());
             }
@@ -1021,7 +1031,12 @@ mod tests {
 
     #[async_trait::async_trait]
     impl PlaybackTrait for MockPlayback {
-        async fn play(&self, _url: &str, _socks_addr: &str, _isolation_username: &str) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+        async fn play(
+            &self,
+            _url: &str,
+            _socks_addr: &str,
+            _isolation_username: &str,
+        ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
             self.inc_call("play");
             self.is_playing.store(true, AtomicOrdering::Relaxed);
             self.is_paused.store(false, AtomicOrdering::Relaxed);
@@ -1045,12 +1060,18 @@ mod tests {
             self.is_paused.store(false, AtomicOrdering::Relaxed);
             Ok(())
         }
-        async fn seek(&self, position_ms: u64) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+        async fn seek(
+            &self,
+            position_ms: u64,
+        ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
             self.inc_call("seek");
             *self.last_seek_ms.lock().unwrap() = position_ms;
             Ok(())
         }
-        async fn set_volume(&self, volume: f64) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+        async fn set_volume(
+            &self,
+            volume: f64,
+        ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
             self.inc_call("set_volume");
             *self.volume.lock().unwrap() = volume;
             Ok(())
@@ -1058,7 +1079,9 @@ mod tests {
         async fn position_ms(&self) -> Result<u64, Box<dyn std::error::Error + Send + Sync>> {
             Ok(0)
         }
-        async fn duration_ms(&self) -> Result<Option<u64>, Box<dyn std::error::Error + Send + Sync>> {
+        async fn duration_ms(
+            &self,
+        ) -> Result<Option<u64>, Box<dyn std::error::Error + Send + Sync>> {
             Ok(Some(300000))
         }
     }
@@ -1123,13 +1146,7 @@ mod tests {
         let display = Arc::new(MockDisplay::new());
         let tor = Arc::new(MockTor::new());
 
-        SessionManager::with_subsystems(
-            ":memory:",
-            resolver,
-            playback,
-            display,
-            tor,
-        ).unwrap()
+        SessionManager::with_subsystems(":memory:", resolver, playback, display, tor).unwrap()
     }
 
     /// Helper: create a SessionManager without subsystems.
@@ -1235,7 +1252,7 @@ mod tests {
             SessionError::InvalidTransition { from, to } => {
                 assert_eq!(from, PlayerState::Idle);
                 assert_eq!(to, PlayerState::Playing);
-            }
+            },
             other => panic!("Expected InvalidTransition, got {:?}", other),
         }
     }
@@ -1545,10 +1562,22 @@ mod tests {
             received.push(event);
         }
 
-        assert!(received.iter().any(|e| matches!(e, SessionEvent::Created { .. })), "should have Created event");
-        assert!(received.iter().any(|e| matches!(e, SessionEvent::Resolving { .. })), "should have Resolving event");
-        assert!(received.iter().any(|e| matches!(e, SessionEvent::Resolved { .. })), "should have Resolved event");
-        assert!(received.iter().any(|e| matches!(e, SessionEvent::Playing { .. })), "should have Playing event");
+        assert!(
+            received.iter().any(|e| matches!(e, SessionEvent::Created { .. })),
+            "should have Created event"
+        );
+        assert!(
+            received.iter().any(|e| matches!(e, SessionEvent::Resolving { .. })),
+            "should have Resolving event"
+        );
+        assert!(
+            received.iter().any(|e| matches!(e, SessionEvent::Resolved { .. })),
+            "should have Resolved event"
+        );
+        assert!(
+            received.iter().any(|e| matches!(e, SessionEvent::Playing { .. })),
+            "should have Playing event"
+        );
     }
 
     #[tokio::test]
@@ -1611,20 +1640,15 @@ mod tests {
         let display = Arc::new(MockDisplay::new());
         let tor = Arc::new(MockTor::new());
 
-        let mgr = SessionManager::with_subsystems(
-            ":memory:",
-            resolver,
-            playback,
-            display,
-            tor,
-        ).unwrap();
+        let mgr =
+            SessionManager::with_subsystems(":memory:", resolver, playback, display, tor).unwrap();
 
         let result = mgr.load("https://example.com/broken.mp4").await;
         assert!(result.is_err());
         match result.unwrap_err() {
             SessionError::ResolutionFailed(msg) => {
                 assert!(msg.contains("mock resolution failure"));
-            }
+            },
             other => panic!("Expected ResolutionFailed, got {:?}", other),
         }
     }
@@ -1814,11 +1838,8 @@ mod tests {
     fn test_wal_mode_enabled() {
         let mgr = session_manager_bare();
         let db = mgr.db.lock().unwrap();
-        let journal_mode: String = db.query_row(
-            "PRAGMA journal_mode",
-            [],
-            |row| row.get(0),
-        ).unwrap();
+        let journal_mode: String =
+            db.query_row("PRAGMA journal_mode", [], |row| row.get(0)).unwrap();
         // In-memory databases use "memory" mode; file databases use "wal".
         // For :memory: we just check that the PRAGMA doesn't error.
         assert!(journal_mode == "wal" || journal_mode == "memory");
@@ -1850,9 +1871,8 @@ mod tests {
 
         // Start a load.
         let mgr1 = mgr.clone();
-        let handle1 = tokio::spawn(async move {
-            mgr1.load("https://example.com/video1.mp4").await
-        });
+        let handle1 =
+            tokio::spawn(async move { mgr1.load("https://example.com/video1.mp4").await });
 
         // Allow first load to complete.
         tokio::time::sleep(std::time::Duration::from_millis(50)).await;
@@ -1877,12 +1897,8 @@ mod tests {
         let mgr1 = mgr.clone();
         let mgr2 = mgr.clone();
 
-        let handle1 = tokio::spawn(async move {
-            mgr1.pause().await
-        });
-        let handle2 = tokio::spawn(async move {
-            mgr2.resume().await
-        });
+        let handle1 = tokio::spawn(async move { mgr1.pause().await });
+        let handle2 = tokio::spawn(async move { mgr2.resume().await });
 
         // At least one should succeed (pause after load is valid).
         let r1 = handle1.await.unwrap();
@@ -1900,7 +1916,7 @@ mod tests {
 
         // First load.
         let id1 = mgr.load("https://example.com/video1.mp4").await.unwrap();
-        
+
         // Stop.
         mgr.stop().await.unwrap();
 
@@ -1918,9 +1934,7 @@ mod tests {
         let mut handles = Vec::new();
         for i in 0..10u8 {
             let m = mgr.clone();
-            handles.push(tokio::spawn(async move {
-                m.set_volume(i * 10).await
-            }));
+            handles.push(tokio::spawn(async move { m.set_volume(i * 10).await }));
         }
 
         // All should succeed (set_volume doesn't change state).
@@ -1942,9 +1956,7 @@ mod tests {
         let mut handles = Vec::new();
         for _ in 0..20 {
             let m = mgr.clone();
-            handles.push(tokio::spawn(async move {
-                m.current_status().await
-            }));
+            handles.push(tokio::spawn(async move { m.current_status().await }));
         }
 
         // All should succeed without data races.

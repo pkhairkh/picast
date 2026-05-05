@@ -111,7 +111,10 @@ impl picast_session::interfaces::PlaybackTrait for PlaybackAdapter {
         Ok(())
     }
 
-    async fn set_volume(&self, volume: f64) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+    async fn set_volume(
+        &self,
+        volume: f64,
+    ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
         self.0.set_volume(volume).await?;
         Ok(())
     }
@@ -158,16 +161,12 @@ impl AppConfig {
     /// Load configuration from environment variables with sensible defaults.
     fn from_env() -> Self {
         Self {
-            http_addr: std::env::var("PICAST_HTTP_ADDR")
-                .unwrap_or_else(|_| "0.0.0.0:8585".into()),
-            ws_addr: std::env::var("PICAST_WS_ADDR")
-                .unwrap_or_else(|_| "0.0.0.0:8586".into()),
-            dlna_name: std::env::var("PICAST_DLNA_NAME")
-                .unwrap_or_else(|_| "PiCast".into()),
+            http_addr: std::env::var("PICAST_HTTP_ADDR").unwrap_or_else(|_| "0.0.0.0:8585".into()),
+            ws_addr: std::env::var("PICAST_WS_ADDR").unwrap_or_else(|_| "0.0.0.0:8586".into()),
+            dlna_name: std::env::var("PICAST_DLNA_NAME").unwrap_or_else(|_| "PiCast".into()),
             tor_socks: std::env::var("PICAST_TOR_SOCKS")
                 .unwrap_or_else(|_| "127.0.0.1:9050".into()),
-            drm_device: std::env::var("PICAST_DRM_DEVICE")
-                .unwrap_or_else(|_| "".into()), // auto-detect
+            drm_device: std::env::var("PICAST_DRM_DEVICE").unwrap_or_else(|_| "".into()), // auto-detect
             db_path: std::env::var("PICAST_DB_PATH")
                 .unwrap_or_else(|_| "/var/lib/picast/sessions.db".into()),
         }
@@ -178,10 +177,7 @@ impl AppConfig {
 fn init_tracing() {
     use tracing_subscriber::EnvFilter;
     tracing_subscriber::fmt()
-        .with_env_filter(
-            EnvFilter::from_default_env()
-                .add_directive("info".parse().unwrap()),
-        )
+        .with_env_filter(EnvFilter::from_default_env().add_directive("info".parse().unwrap()))
         .with_thread_ids(true)
         .with_file(true)
         .with_line_number(true)
@@ -239,16 +235,12 @@ async fn main() -> Result<()> {
     // 4c. Playback
     #[cfg(feature = "hw")]
     let playback_engine: Arc<picast_playback::PlaybackEngine> = {
-        Arc::new(picast_playback::PlaybackEngine::new(
-            picast_playback::PipelineConfig::default(),
-        )?)
+        Arc::new(picast_playback::PlaybackEngine::new(picast_playback::PipelineConfig::default())?)
     };
     #[cfg(not(feature = "hw"))]
     let playback_engine: Arc<picast_playback::PlaybackEngine> = {
         info!("hw feature disabled — playback engine running in mock mode");
-        Arc::new(picast_playback::PlaybackEngine::new(
-            picast_playback::PipelineConfig::default(),
-        )?)
+        Arc::new(picast_playback::PlaybackEngine::new(picast_playback::PipelineConfig::default())?)
     };
     info!("Playback engine created");
 
@@ -269,30 +261,19 @@ async fn main() -> Result<()> {
     let resolver_trait: Arc<dyn picast_session::interfaces::ResolverTrait> =
         Arc::new(ResolverAdapter(resolver.clone()));
 
-    let session = Arc::new(
-        picast_session::SessionManager::with_subsystems(
-            &config.db_path,
-            resolver_trait,
-            playback_trait,
-            display_trait,
-            tor_trait,
-        )?,
-    );
+    let session = Arc::new(picast_session::SessionManager::with_subsystems(
+        &config.db_path,
+        resolver_trait,
+        playback_trait,
+        display_trait,
+        tor_trait,
+    )?);
     info!(db = %config.db_path, "Session manager created (subsystems wired)");
 
     // ── 6. Protocol servers ───────────────────────────────────────────
-    let http_server = picast_protocols::HttpApiServer::new(
-        &config.http_addr,
-        session.clone(),
-    );
-    let ws_server = picast_protocols::WebSocketServer::new(
-        &config.ws_addr,
-        session.clone(),
-    );
-    let dlna_renderer = picast_protocols::DlnaRenderer::new(
-        &config.dlna_name,
-        &config.tor_socks,
-    );
+    let http_server = picast_protocols::HttpApiServer::new(&config.http_addr, session.clone());
+    let ws_server = picast_protocols::WebSocketServer::new(&config.ws_addr, session.clone());
+    let dlna_renderer = picast_protocols::DlnaRenderer::new(&config.dlna_name, &config.tor_socks);
 
     info!("all components initialised");
 
@@ -301,19 +282,25 @@ async fn main() -> Result<()> {
     let shutdown_ws = shutdown_tx.subscribe();
 
     let http_handle = tokio::spawn(async move {
-        if let Err(e) = http_server.start(async {
-            let mut rx = shutdown_http;
-            let _ = rx.recv().await;
-        }).await {
+        if let Err(e) = http_server
+            .start(async {
+                let mut rx = shutdown_http;
+                let _ = rx.recv().await;
+            })
+            .await
+        {
             error!(error = %e, "HTTP server error");
         }
     });
 
     let ws_handle = tokio::spawn(async move {
-        if let Err(e) = ws_server.start(async {
-            let mut rx = shutdown_ws;
-            let _ = rx.recv().await;
-        }).await {
+        if let Err(e) = ws_server
+            .start(async {
+                let mut rx = shutdown_ws;
+                let _ = rx.recv().await;
+            })
+            .await
+        {
             error!(error = %e, "WebSocket server error");
         }
     });
@@ -333,14 +320,11 @@ async fn main() -> Result<()> {
     info!("shutdown signal broadcast — waiting for tasks to finish …");
 
     // Wait for servers to stop (with timeout).
-    let _ = tokio::time::timeout(
-        std::time::Duration::from_secs(5),
-        async {
-            let _ = http_handle.await;
-            let _ = ws_handle.await;
-            let _ = dlna_handle.await;
-        },
-    )
+    let _ = tokio::time::timeout(std::time::Duration::from_secs(5), async {
+        let _ = http_handle.await;
+        let _ = ws_handle.await;
+        let _ = dlna_handle.await;
+    })
     .await;
 
     // Shutdown Tor if we own it.

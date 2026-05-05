@@ -89,10 +89,7 @@ pub async fn resolve_with_ytdlp(
     socks_addr: &str,
     isolation_username: &str,
 ) -> Result<ResolveResult, ResolveError> {
-    let proxy_url = format!(
-        "socks5h://{}@{}",
-        isolation_username, socks_addr
-    );
+    let proxy_url = format!("socks5h://{}@{}", isolation_username, socks_addr);
 
     tracing::info!(
         url = url,
@@ -116,12 +113,7 @@ pub async fn resolve_with_ytdlp(
             .output(),
     )
     .await
-    .map_err(|_| {
-        ResolveError::Network(format!(
-            "yt-dlp timed out after {}s",
-            YTDLP_TIMEOUT_SECS
-        ))
-    })?
+    .map_err(|_| ResolveError::Network(format!("yt-dlp timed out after {}s", YTDLP_TIMEOUT_SECS)))?
     .map_err(|e| {
         if e.kind() == std::io::ErrorKind::NotFound {
             ResolveError::TorUnavailable(
@@ -143,10 +135,8 @@ pub async fn resolve_with_ytdlp(
     }
 
     // Parse the JSON output.
-    let ytdlp: YtdlpOutput =
-        serde_json::from_slice(&output.stdout).map_err(|e| {
-            ResolveError::NoMediaFound(format!("failed to parse yt-dlp JSON: {}", e))
-        })?;
+    let ytdlp: YtdlpOutput = serde_json::from_slice(&output.stdout)
+        .map_err(|e| ResolveError::NoMediaFound(format!("failed to parse yt-dlp JSON: {}", e)))?;
 
     tracing::info!(
         title = ?ytdlp.title,
@@ -196,8 +186,8 @@ fn determine_category(ytdlp: &YtdlpOutput) -> UrlCategory {
 
 /// Determine the MIME type from codec information.
 fn determine_mime_type(ytdlp: &YtdlpOutput) -> Option<String> {
-    let has_video = ytdlp.vcodec.as_ref().map_or(false, |c| c != "none");
-    let has_audio = ytdlp.acodec.as_ref().map_or(false, |c| c != "none");
+    let has_video = ytdlp.vcodec.as_ref().is_some_and(|c| c != "none");
+    let has_audio = ytdlp.acodec.as_ref().is_some_and(|c| c != "none");
 
     match (has_video, has_audio) {
         (true, true) => Some("video/mp4".to_owned()),
