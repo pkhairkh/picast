@@ -257,23 +257,28 @@ async fn main() -> Result<()> {
     info!("Resolver created");
 
     // ── 5. Session manager ────────────────────────────────────────────
-    // Wrap concrete types in trait adapters.
-    // Note: subsystem trait adapters are created here but not yet wired into
-    // the SessionManager (subsystem integration is deferred). They are kept
-    // so the adapter code stays compile-tested.
-    let _tor_trait: Arc<dyn picast_session::interfaces::TorTrait> =
+    // Wrap concrete types in trait adapters and wire them into the
+    // SessionManager so it can drive each subsystem through its trait
+    // interface.
+    let tor_trait: Arc<dyn picast_session::interfaces::TorTrait> =
         Arc::new(TorAdapter(tor_manager.clone()));
-    let _display_trait: Arc<dyn picast_session::interfaces::DisplayTrait> =
+    let display_trait: Arc<dyn picast_session::interfaces::DisplayTrait> =
         Arc::new(DisplayAdapter(display_manager.clone()));
-    let _playback_trait: Arc<dyn picast_session::interfaces::PlaybackTrait> =
+    let playback_trait: Arc<dyn picast_session::interfaces::PlaybackTrait> =
         Arc::new(PlaybackAdapter(playback_engine.clone()));
-    let _resolver_trait: Arc<dyn picast_session::interfaces::ResolverTrait> =
+    let resolver_trait: Arc<dyn picast_session::interfaces::ResolverTrait> =
         Arc::new(ResolverAdapter(resolver.clone()));
 
     let session = Arc::new(
-        picast_session::SessionManager::new(&config.db_path)?,
+        picast_session::SessionManager::with_subsystems(
+            &config.db_path,
+            resolver_trait,
+            playback_trait,
+            display_trait,
+            tor_trait,
+        )?,
     );
-    info!(db = %config.db_path, "Session manager created");
+    info!(db = %config.db_path, "Session manager created (subsystems wired)");
 
     // ── 6. Protocol servers ───────────────────────────────────────────
     let http_server = picast_protocols::HttpApiServer::new(

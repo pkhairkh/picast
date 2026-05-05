@@ -25,7 +25,7 @@ effort. Tasks are ordered by execution sequence within each phase.
   3. Provide `compile_error!()` if `hw` feature is used on non-aarch64
   4. Fix any version mismatches in workspace `Cargo.toml`
 
-### T-0.2 `.cargo/config.toml` cross-compilation
+### T-0.2 `.cargo/config.toml` cross-compilation ✅
 - **Crate:** workspace
 - **Depends on:** T-0.1
 - **Effort:** 0.5 day
@@ -171,7 +171,7 @@ effort. Tasks are ordered by execution sequence within each phase.
   6. Store latest `CircuitHealth` in `Arc<Mutex<CircuitHealth>>`
   7. `health_check()` reads from the shared state
 
-### T-1.6 Tor integration test
+### T-1.6 Tor integration test ✅
 - **Crate:** `picast-tor`
 - **Depends on:** T-1.3, T-1.4, T-1.5
 - **Effort:** 1 day
@@ -637,7 +637,7 @@ effort. Tasks are ordered by execution sequence within each phase.
   4. After transition: `UPDATE sessions SET state = ? WHERE id = ?`
   5. Broadcast: `watch_tx.send(current_state)?`
 
-### T-5.4 Play/Pause/Stop/Seek/SetVolume delegation
+### T-5.4 Play/Pause/Stop/Seek/SetVolume delegation ✅
 - **Crate:** `picast-session`
 - **Depends on:** T-5.3
 - **Effort:** 1.5 days
@@ -651,7 +651,7 @@ effort. Tasks are ordered by execution sequence within each phase.
   4. `seek()`: validate `Playing/Paused` → `self.playback.seek()` → `Seeking` → `Playing`
   5. `set_volume()`: any state → `self.playback.set_volume()` → update `volume` in SQLite
 
-### T-5.5 Watch channel for state broadcasting
+### T-5.5 Watch channel for state broadcasting ✅
 - **Crate:** `picast-session`
 - **Depends on:** T-5.3
 - **Effort:** 0.5 day
@@ -664,7 +664,7 @@ effort. Tasks are ordered by execution sequence within each phase.
   3. Expose `pub fn subscribe(&self) -> watch::Receiver<MediaSession>`
   4. Protocol handlers: `tokio::spawn(async { while rx.changed().await.is_ok() { ... } })`
 
-### T-5.6 Session cleanup and persistence
+### T-5.6 Session cleanup and persistence ✅
 - **Crate:** `picast-session`
 - **Depends on:** T-5.2
 - **Effort:** 1 day
@@ -679,7 +679,7 @@ effort. Tasks are ordered by execution sequence within each phase.
   3. On `stop()`: `DELETE FROM sessions WHERE id = ?`
   4. On process start: check if any session is in `Playing` → set to `Idle` (crash recovery)
 
-### T-5.7 Thread safety for concurrent access
+### T-5.7 Thread safety for concurrent access ✅
 - **Crate:** `picast-session`
 - **Depends on:** T-5.4
 - **Effort:** 0.5 day

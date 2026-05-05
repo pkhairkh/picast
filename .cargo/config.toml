@@ -1,11 +1,41 @@
-# PiCast — Cargo Configuration
-# See: https://doc.rust-lang.org/cargo/reference/config.html
+# PiCast Cross-Compilation Configuration
+#
+# This file configures cross-compilation for the aarch64 (ARM64) target
+# used by the Raspberry Pi 4B+. The Pi 4 runs a 64-bit ARM OS (Raspberry Pi OS
+# Lite 64-bit or Ubuntu Server 64-bit).
+#
+# ## Setup
+#
+# 1. Install the cross-compilation toolchain:
+#    ```sh
+#    sudo apt install gcc-aarch64-linux-gnu
+#    ```
+#
+# 2. Add the Rust target:
+#    ```sh
+#    rustup target add aarch64-unknown-linux-gnu
+#    ```
+#
+# 3. Build:
+#    ```sh
+#    cargo build --target aarch64-unknown-linux-gnu --workspace
+#    cargo build --target aarch64-unknown-linux-gnu --workspace --features hw
+#    ```
+#
+# ## Sysroot
+#
+# For linking against Pi-specific libraries (libdrm, libgbm, gstreamer),
+# you need a sysroot with ARM64 versions of those libraries. Options:
+#
+# - Use `cross` (Docker-based): https://github.com/cross-rs/cross
+# - Mount the Pi's filesystem via SSH and point to it
+# - Use `debootstrap` to create an ARM64 chroot
+#
+# The simplest approach for CI is `cross`, which handles the sysroot
+# automatically.
 
 [target.aarch64-unknown-linux-gnu]
 linker = "aarch64-linux-gnu-gcc"
 
-[build]
-jobs = 4
-
-[net]
-retry = 5
+[target.aarch64-unknown-linux-musl]
+linker = "aarch64-linux-gnu-gcc"

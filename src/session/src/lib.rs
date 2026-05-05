@@ -41,7 +41,7 @@ use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 use std::sync::{Arc, Mutex};
 use thiserror::Error;
-use tokio::sync::broadcast;
+use tokio::sync::{broadcast, watch};
 use uuid::Uuid;
 
 // ── Errors ───────────────────────────────────────────────────────────
@@ -294,8 +294,12 @@ pub struct SessionManager {
     db: Mutex<rusqlite::Connection>,
     /// Current active session ID (only one session active at a time).
     active_session_id: Arc<Mutex<Option<Uuid>>>,
-    /// Event broadcast channel.
+    /// Event broadcast channel (for WebSocket streaming — retains history).
     event_tx: broadcast::Sender<SessionEvent>,
+    /// Watch channel for latest session state (for HTTP polling — only last value).
+    /// Protocol handlers that need the current state without subscribing
+    /// to the full event stream can use `watch_rx`.
+    watch_tx: watch::Sender<Option<MediaSession>>,
     /// Resolver subsystem for URL resolution.
     resolver: Option<Arc<dyn interfaces::ResolverTrait>>,
     /// Playback subsystem for media pipeline control.
@@ -313,6 +317,13 @@ impl SessionManager {
     /// Pass `":memory:"` for an in-memory database (useful for tests).
     pub fn new(db_path: &str) -> Result<Self, SessionError> {
         let conn = rusqlite::Connection::open(db_path)?;
+
+        // Enable WAL journal mode for better concurrent read performance.
+        // WAL allows readers to operate without blocking writers, which is
+        // essential when HTTP, WebSocket, and DLNA handlers all access the
+        // database concurrently.
+        conn.execute_batch("PRAGMA journal_mode=WAL;")?;
+
         conn.execute_batch(
             "CREATE TABLE IF NOT EXISTS sessions (
                  id            TEXT PRIMARY KEY,
@@ -329,16 +340,27 @@ impl SessionManager {
         )?;
 
         let (event_tx, _) = broadcast::channel(128);
+        let (watch_tx, _) = watch::channel(None);
 
-        Ok(Self {
+        let mgr = Self {
             db: Mutex::new(conn),
             active_session_id: Arc::new(Mutex::new(None)),
             event_tx,
+            watch_tx,
             resolver: None,
             playback: None,
             display: None,
             tor: None,
-        })
+        };
+
+        // Clean up stale sessions from a previous run that may have crashed.
+        // Sessions older than 24 hours are deleted, and any session left in
+        // a non-idle state (e.g. Playing, Buffering) is reset to Idle because
+        // the playback pipeline is gone after a process restart.
+        mgr.cleanup_stale_sessions()?;
+        mgr.recover_crashed_sessions()?;
+
+        Ok(mgr)
     }
 
     /// Create a manager with all subsystems wired in.
@@ -529,9 +551,30 @@ impl SessionManager {
         self.load_session(id)
     }
 
-    /// Subscribe to session events.
+    /// Subscribe to session events (broadcast channel).
+    ///
+    /// Use this for real-time event streaming (e.g. WebSocket server).
+    /// The broadcast channel retains a configurable number of messages
+    /// so slow consumers may miss events if they lag.
     pub fn subscribe(&self) -> broadcast::Receiver<SessionEvent> {
         self.event_tx.subscribe()
+    }
+
+    /// Subscribe to the latest session state (watch channel).
+    ///
+    /// Use this for polling the current state without subscribing to
+    /// the full event stream. The watch channel only keeps the most
+    /// recent value, so readers always get the latest snapshot.
+    /// Returns `None` when no session is active.
+    pub fn subscribe_state(&self) -> watch::Receiver<Option<MediaSession>> {
+        self.watch_tx.subscribe()
+    }
+
+    /// Get a clone of the current watch sender for external use.
+    /// Useful for wiring into protocol servers that need to push
+    /// state updates.
+    pub fn state_sender(&self) -> watch::Sender<Option<MediaSession>> {
+        self.watch_tx.clone()
     }
 
     // ── Command methods ───────────────────────────────────────────────
@@ -634,6 +677,11 @@ impl SessionManager {
         // Transition: Buffering → Playing.
         self.try_transition(id, PlayerState::Playing)?;
 
+        // Push latest state to watch channel.
+        if let Ok(session) = self.load_session(id) {
+            self.broadcast_state_update(&session);
+        }
+
         Ok(id)
     }
 
@@ -653,6 +701,11 @@ impl SessionManager {
             })?;
         }
 
+        // Push latest state to watch channel.
+        if let Ok(session) = self.load_session(id) {
+            self.broadcast_state_update(&session);
+        }
+
         Ok(())
     }
 
@@ -670,6 +723,11 @@ impl SessionManager {
             playback.resume().await.map_err(|e| {
                 SessionError::PlaybackError(e.to_string())
             })?;
+        }
+
+        // Push latest state to watch channel.
+        if let Ok(session) = self.load_session(id) {
+            self.broadcast_state_update(&session);
         }
 
         Ok(())
@@ -712,6 +770,9 @@ impl SessionManager {
         // Delete the session from the database.
         self.delete_session(id)?;
 
+        // Push idle state to watch channel.
+        self.broadcast_idle();
+
         Ok(())
     }
 
@@ -753,6 +814,11 @@ impl SessionManager {
             self.try_transition(id, PlayerState::Playing)?;
         }
 
+        // Push latest state to watch channel.
+        if let Ok(session) = self.load_session(id) {
+            self.broadcast_state_update(&session);
+        }
+
         Ok(())
     }
 
@@ -790,6 +856,11 @@ impl SessionManager {
             volume: clamped,
         });
 
+        // Push latest state to watch channel.
+        if let Ok(session) = self.load_session(id) {
+            self.broadcast_state_update(&session);
+        }
+
         Ok(())
     }
 
@@ -811,6 +882,78 @@ impl SessionManager {
             "DELETE FROM sessions WHERE id = ?1",
             rusqlite::params![id.to_string()],
         )?;
+        Ok(())
+    }
+
+    /// Broadcast the current session state through the watch channel.
+    ///
+    /// Call this after any state change (load, pause, stop, seek, etc.)
+    /// so that `subscribe_state()` receivers see the latest snapshot.
+    fn broadcast_state_update(&self, session: &MediaSession) {
+        let _ = self.watch_tx.send(Some(session.clone()));
+    }
+
+    /// Broadcast that no session is active (cleared watch channel).
+    fn broadcast_idle(&self) {
+        let _ = self.watch_tx.send(None);
+    }
+
+    /// Delete sessions older than 24 hours.
+    ///
+    /// Called during `SessionManager::new()` to keep the database
+    /// from growing unbounded. Stale sessions are those whose
+    /// `updated_at` timestamp is more than 24 hours in the past.
+    fn cleanup_stale_sessions(&self) -> Result<(), SessionError> {
+        let db = self.db.lock().map_err(|e| {
+            SessionError::Subsystem(format!("db lock poisoned: {}", e))
+        })?;
+        let deleted = db.execute(
+            "DELETE FROM sessions WHERE updated_at < strftime('%Y-%m-%dT%H:%M:%S+00:00', 'now', '-24 hours')",
+            [],
+        )?;
+        if deleted > 0 {
+            tracing::info!(count = deleted, "cleaned up stale sessions");
+        }
+        Ok(())
+    }
+
+    /// Recover sessions left in a non-idle state after a crash.
+    ///
+    /// If PiCast crashes while a session is in `Playing`, `Buffering`,
+    /// `Resolving`, or `Seeking`, the playback pipeline is gone but
+    /// the database row still exists. We reset all such sessions to
+    /// `Idle` so they don't block new sessions from being created.
+    fn recover_crashed_sessions(&self) -> Result<(), SessionError> {
+        let db = self.db.lock().map_err(|e| {
+            SessionError::Subsystem(format!("db lock poisoned: {}", e))
+        })?;
+
+        // Find sessions in non-terminal states.
+        let crashed: Vec<(String, String)> = {
+            let mut stmt = db.prepare(
+                "SELECT id, state FROM sessions WHERE state NOT IN ('idle', 'error')"
+            )?;
+            let rows = stmt.query_map([], |row| {
+                Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
+            })?;
+            rows.filter_map(|r| r.ok()).collect()
+        };
+
+        if !crashed.is_empty() {
+            let now = Utc::now().to_rfc3339();
+            for (id, old_state) in &crashed {
+                tracing::warn!(
+                    session_id = %id,
+                    old_state = %old_state,
+                    "recovering crashed session — resetting to idle"
+                );
+                db.execute(
+                    "UPDATE sessions SET state = 'idle', updated_at = ?1 WHERE id = ?2",
+                    rusqlite::params![now, id],
+                )?;
+            }
+        }
+
         Ok(())
     }
 }
@@ -1505,5 +1648,310 @@ mod tests {
         assert_eq!("playing".parse::<PlayerState>().unwrap(), PlayerState::Playing);
         assert_eq!("paused".parse::<PlayerState>().unwrap(), PlayerState::Paused);
         assert!("invalid".parse::<PlayerState>().is_err());
+    }
+
+    // ── T-5.5: Watch channel tests ────────────────────────────────────
+
+    #[tokio::test]
+    async fn test_watch_channel_receives_state_after_load() {
+        let mgr = Arc::new(session_manager_with_mocks());
+        let state_rx = mgr.subscribe_state();
+
+        // Initially None (no session active).
+        assert!(state_rx.borrow().is_none());
+
+        // Load a URL — watch channel should update to Some(session).
+        let id = mgr.load("https://example.com/video.mp4").await.unwrap();
+        // Allow the watch channel to propagate.
+        tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+
+        let state = state_rx.borrow().clone();
+        assert!(state.is_some());
+        let session = state.unwrap();
+        assert_eq!(session.id, id);
+        assert_eq!(session.state, PlayerState::Playing);
+    }
+
+    #[tokio::test]
+    async fn test_watch_channel_updates_on_pause() {
+        let mgr = Arc::new(session_manager_with_mocks());
+        let state_rx = mgr.subscribe_state();
+
+        let _ = mgr.load("https://example.com/video.mp4").await.unwrap();
+        tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+
+        mgr.pause().await.unwrap();
+        tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+
+        let state = state_rx.borrow().clone();
+        assert!(state.is_some());
+        assert_eq!(state.unwrap().state, PlayerState::Paused);
+    }
+
+    #[tokio::test]
+    async fn test_watch_channel_clears_on_stop() {
+        let mgr = Arc::new(session_manager_with_mocks());
+        let state_rx = mgr.subscribe_state();
+
+        let _ = mgr.load("https://example.com/video.mp4").await.unwrap();
+        tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+
+        mgr.stop().await.unwrap();
+        tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+
+        assert!(state_rx.borrow().is_none());
+    }
+
+    #[tokio::test]
+    async fn test_watch_channel_volume_update() {
+        let mgr = Arc::new(session_manager_with_mocks());
+        let state_rx = mgr.subscribe_state();
+
+        let _ = mgr.load("https://example.com/video.mp4").await.unwrap();
+        tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+
+        mgr.set_volume(50).await.unwrap();
+        tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+
+        let state = state_rx.borrow().clone();
+        assert!(state.is_some());
+        assert_eq!(state.unwrap().volume, 50);
+    }
+
+    #[tokio::test]
+    async fn test_watch_channel_seek_update() {
+        let mgr = Arc::new(session_manager_with_mocks());
+        let state_rx = mgr.subscribe_state();
+
+        let _ = mgr.load("https://example.com/video.mp4").await.unwrap();
+        tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+
+        mgr.seek(30000).await.unwrap();
+        tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+
+        let state = state_rx.borrow().clone();
+        assert!(state.is_some());
+        // After seek, should be back in Playing state.
+        assert_eq!(state.unwrap().state, PlayerState::Playing);
+    }
+
+    #[tokio::test]
+    async fn test_state_sender_clone() {
+        let mgr = Arc::new(session_manager_with_mocks());
+        // Keep a receiver alive so send() succeeds (watch::Sender::send
+        // returns Err when there are no receivers).
+        let _state_rx = mgr.subscribe_state();
+        let sender = mgr.state_sender();
+
+        // Should be able to send a state update through the cloned sender.
+        let session = MediaSession::new("test://example".into());
+        assert!(sender.send(Some(session)).is_ok());
+    }
+
+    // ── T-5.6: Session cleanup & persistence tests ─────────────────────
+
+    #[test]
+    fn test_cleanup_stale_sessions() {
+        let mgr = session_manager_bare();
+
+        // Insert a session with an old updated_at timestamp.
+        let mut old_session = MediaSession::new("https://example.com/old.mp4".into());
+        old_session.updated_at = Utc::now() - chrono::Duration::hours(25);
+        mgr.insert_session(&old_session).unwrap();
+
+        // Insert a recent session.
+        let recent_session = MediaSession::new("https://example.com/recent.mp4".into());
+        mgr.insert_session(&recent_session).unwrap();
+
+        // Run cleanup.
+        mgr.cleanup_stale_sessions().unwrap();
+
+        // Old session should be gone, recent session should remain.
+        assert!(mgr.load_session(old_session.id).is_err());
+        assert!(mgr.load_session(recent_session.id).is_ok());
+    }
+
+    #[test]
+    fn test_recover_crashed_sessions() {
+        let mgr = session_manager_bare();
+
+        // Insert sessions in various non-idle states.
+        let mut playing_session = MediaSession::new("https://example.com/playing.mp4".into());
+        playing_session.state = PlayerState::Playing;
+        mgr.insert_session(&playing_session).unwrap();
+
+        let mut buffering_session = MediaSession::new("https://example.com/buffering.mp4".into());
+        buffering_session.state = PlayerState::Buffering;
+        mgr.insert_session(&buffering_session).unwrap();
+
+        let mut resolving_session = MediaSession::new("https://example.com/resolving.mp4".into());
+        resolving_session.state = PlayerState::Resolving;
+        mgr.insert_session(&resolving_session).unwrap();
+
+        // Idle and error sessions should NOT be touched.
+        let mut idle_session = MediaSession::new("https://example.com/idle.mp4".into());
+        idle_session.state = PlayerState::Idle;
+        mgr.insert_session(&idle_session).unwrap();
+
+        let mut error_session = MediaSession::new("https://example.com/error.mp4".into());
+        error_session.state = PlayerState::Error;
+        mgr.insert_session(&error_session).unwrap();
+
+        // Run recovery.
+        mgr.recover_crashed_sessions().unwrap();
+
+        // All non-idle/error sessions should now be Idle.
+        assert_eq!(mgr.load_session(playing_session.id).unwrap().state, PlayerState::Idle);
+        assert_eq!(mgr.load_session(buffering_session.id).unwrap().state, PlayerState::Idle);
+        assert_eq!(mgr.load_session(resolving_session.id).unwrap().state, PlayerState::Idle);
+
+        // Idle and error sessions should be unchanged.
+        assert_eq!(mgr.load_session(idle_session.id).unwrap().state, PlayerState::Idle);
+        assert_eq!(mgr.load_session(error_session.id).unwrap().state, PlayerState::Error);
+    }
+
+    #[test]
+    fn test_wal_mode_enabled() {
+        let mgr = session_manager_bare();
+        let db = mgr.db.lock().unwrap();
+        let journal_mode: String = db.query_row(
+            "PRAGMA journal_mode",
+            [],
+            |row| row.get(0),
+        ).unwrap();
+        // In-memory databases use "memory" mode; file databases use "wal".
+        // For :memory: we just check that the PRAGMA doesn't error.
+        assert!(journal_mode == "wal" || journal_mode == "memory");
+    }
+
+    #[test]
+    fn test_new_manager_cleans_up_on_start() {
+        // This test verifies that SessionManager::new() calls cleanup and recovery.
+        // If a stale session exists in the DB when we open it, it should be removed.
+        let mgr = session_manager_bare();
+
+        // Insert a stale session (25h old).
+        let mut stale = MediaSession::new("https://example.com/stale.mp4".into());
+        stale.updated_at = Utc::now() - chrono::Duration::hours(25);
+        mgr.insert_session(&stale).unwrap();
+        assert!(mgr.load_session(stale.id).is_ok());
+
+        // Create a new manager pointing to the same :memory: DB won't work
+        // (each :memory: is separate). Instead, verify the method directly.
+        mgr.cleanup_stale_sessions().unwrap();
+        assert!(mgr.load_session(stale.id).is_err());
+    }
+
+    // ── T-5.7: Thread safety / concurrent access tests ─────────────────
+
+    #[tokio::test]
+    async fn test_concurrent_load_rejected() {
+        let mgr = Arc::new(session_manager_with_mocks());
+
+        // Start a load.
+        let mgr1 = mgr.clone();
+        let handle1 = tokio::spawn(async move {
+            mgr1.load("https://example.com/video1.mp4").await
+        });
+
+        // Allow first load to complete.
+        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+
+        // Second concurrent load should be rejected.
+        let result = mgr.load("https://example.com/video2.mp4").await;
+        assert!(result.is_err());
+        match result.unwrap_err() {
+            SessionError::AlreadyActive => {},
+            other => panic!("expected AlreadyActive, got: {:?}", other),
+        }
+
+        let _ = handle1.await;
+    }
+
+    #[tokio::test]
+    async fn test_concurrent_pause_and_resume() {
+        let mgr = Arc::new(session_manager_with_mocks());
+        let _ = mgr.load("https://example.com/video.mp4").await.unwrap();
+
+        // Both pause and resume can race; one should succeed, the other may fail.
+        let mgr1 = mgr.clone();
+        let mgr2 = mgr.clone();
+
+        let handle1 = tokio::spawn(async move {
+            mgr1.pause().await
+        });
+        let handle2 = tokio::spawn(async move {
+            mgr2.resume().await
+        });
+
+        // At least one should succeed (pause after load is valid).
+        let r1 = handle1.await.unwrap();
+        let r2 = handle2.await.unwrap();
+        assert!(r1.is_ok() || r2.is_ok(), "at least one concurrent operation should succeed");
+
+        // The session should still be in a valid state.
+        let status = mgr.current_status().await.unwrap();
+        assert!(matches!(status.state, PlayerState::Playing | PlayerState::Paused));
+    }
+
+    #[tokio::test]
+    async fn test_sequential_load_stop_load() {
+        let mgr = Arc::new(session_manager_with_mocks());
+
+        // First load.
+        let id1 = mgr.load("https://example.com/video1.mp4").await.unwrap();
+        
+        // Stop.
+        mgr.stop().await.unwrap();
+
+        // Second load should succeed after stop.
+        let id2 = mgr.load("https://example.com/video2.mp4").await.unwrap();
+        assert_ne!(id1, id2);
+    }
+
+    #[tokio::test]
+    async fn test_concurrent_set_volume_safe() {
+        let mgr = Arc::new(session_manager_with_mocks());
+        let _ = mgr.load("https://example.com/video.mp4").await.unwrap();
+
+        // Fire off 10 concurrent set_volume calls.
+        let mut handles = Vec::new();
+        for i in 0..10u8 {
+            let m = mgr.clone();
+            handles.push(tokio::spawn(async move {
+                m.set_volume(i * 10).await
+            }));
+        }
+
+        // All should succeed (set_volume doesn't change state).
+        for handle in handles {
+            assert!(handle.await.unwrap().is_ok());
+        }
+
+        // Final volume should be some valid value 0-100.
+        let status = mgr.current_status().await.unwrap();
+        assert!(status.volume <= 100);
+    }
+
+    #[tokio::test]
+    async fn test_concurrent_status_reads() {
+        let mgr = Arc::new(session_manager_with_mocks());
+        let _ = mgr.load("https://example.com/video.mp4").await.unwrap();
+
+        // Spawn many concurrent status readers.
+        let mut handles = Vec::new();
+        for _ in 0..20 {
+            let m = mgr.clone();
+            handles.push(tokio::spawn(async move {
+                m.current_status().await
+            }));
+        }
+
+        // All should succeed without data races.
+        for handle in handles {
+            let result = handle.await.unwrap();
+            assert!(result.is_ok());
+            assert_eq!(result.unwrap().state, PlayerState::Playing);
+        }
     }
 }

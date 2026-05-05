@@ -14,5 +14,9 @@ hex = { workspace = true }
 url = { workspace = true }
 libc = "0.2"
 
+[features]
+default = []
+tor-test = []
+
 [dev-dependencies]
 tokio = { workspace = true, features = ["rt-multi-thread", "macros", "time"] }
