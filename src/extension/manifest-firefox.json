@@ -1,7 +1,7 @@
 {
   "manifest_version": 3,
   "name": "__MSG_extensionName__",
-  "version": "0.1.0",
+  "version": "0.2.0",
   "description": "__MSG_extensionDescription__",
   "default_locale": "en",
 
@@ -22,26 +22,24 @@
   },
 
   "background": {
-    "scripts": ["background/service-worker.js"],
-    "type": "module"
+    "scripts": ["background/service-worker.js"]
   },
 
   "permissions": [
     "activeTab",
     "storage",
     "webRequest",
-    "dns"
-  ],
-
-  "optional_permissions": [
-    "declarativeNetRequest"
+    "tabs",
+    "alarms",
+    "notifications"
   ],
 
   "host_permissions": [
-    "http://picast.local:8585/*",
-    "http://picast.local:8586/*",
-    "http://*.local:8585/*",
-    "http://*.local:8586/*"
+    "http://*.local/*"
+  ],
+
+  "optional_host_permissions": [
+    "http://*/*"
   ],
 
   "content_scripts": [
@@ -54,15 +52,8 @@
 
   "options_ui": {
     "page": "options/options.html",
-    "open_in_tab": false
+    "open_in_tab": true
   },
-
-  "web_accessible_resources": [
-    {
-      "resources": ["icons/*"],
-      "matches": ["<all_urls>"]
-    }
-  ],
 
   "browser_specific_settings": {
     "gecko": {

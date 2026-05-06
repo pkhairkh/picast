@@ -22,7 +22,7 @@
       <div class="field">
         <label for="piHost">PiCast Receiver Address</label>
         <input type="text" id="piHost" placeholder="picast.local">
-        <p class="help">Hostname or IP address of your Raspberry Pi on the local network. Use <code>picast.local</code> for mDNS discovery.</p>
+        <p class="help">Hostname or IP address of your Raspberry Pi on the local network. Use <code>picast.local</code> for mDNS discovery, or enter an IP like <code>192.168.1.100</code>.</p>
       </div>
 
       <div class="field-row">
@@ -41,6 +41,26 @@
       <div class="field">
         <button class="btn-test" id="testBtn">Test Connection</button>
         <span id="testResult" class="test-result"></span>
+      </div>
+    </div>
+
+    <div class="card">
+      <h2 class="card-title">Playback</h2>
+
+      <div class="field">
+        <label for="quality">Default Quality</label>
+        <select id="quality">
+          <option value="360p">360p — Low bandwidth (Tor safe)</option>
+          <option value="480p">480p — Medium</option>
+          <option value="720p" selected>720p — Recommended for Tor</option>
+          <option value="1080p">1080p — High (may buffer over Tor)</option>
+          <option value="best">Best available</option>
+        </select>
+        <p class="help">
+          <strong>720p</strong> is recommended for Tor connections. Higher resolutions may buffer
+          due to Tor bandwidth constraints. The ABR controller will automatically downshift if
+          the buffer runs low.
+        </p>
       </div>
     </div>
 
@@ -68,9 +88,9 @@
       <div class="field">
         <label class="checkbox-label">
           <input type="checkbox" id="showNotifications">
-          Show browser notifications for state changes
+          Show browser notifications for errors
         </label>
-        <p class="help">Displays notifications when playback starts, stops, or encounters errors.</p>
+        <p class="help">Displays notifications when playback encounters errors or the connection drops.</p>
       </div>
 
       <div class="field">
@@ -78,7 +98,7 @@
           <input type="checkbox" id="autoCast">
           Auto-cast when media is detected on the page
         </label>
-        <p class="help">Automatically sends the page URL to PiCast when a video element is detected. Requires trust in the sites you visit.</p>
+        <p class="help">Automatically sends the page URL to PiCast when a video element is detected. Requires trust in the sites you visit. Only activates when no other session is playing.</p>
       </div>
     </div>
 

@@ -14,6 +14,7 @@ const DEFAULTS = {
   torMode: "full",
   showNotifications: true,
   autoCast: false,
+  quality: "720p",
 };
 
 // ─── DOM Elements ──────────────────────────────────────────────────
@@ -21,6 +22,7 @@ const DEFAULTS = {
 const piHost = document.getElementById("piHost");
 const httpPort = document.getElementById("httpPort");
 const wsPort = document.getElementById("wsPort");
+const quality = document.getElementById("quality");
 const torMode = document.getElementById("torMode");
 const showNotifications = document.getElementById("showNotifications");
 const autoCast = document.getElementById("autoCast");
@@ -37,6 +39,7 @@ function loadSettings() {
     piHost.value = settings.piHost;
     httpPort.value = settings.httpPort;
     wsPort.value = settings.wsPort;
+    quality.value = settings.quality;
     torMode.value = settings.torMode;
     showNotifications.checked = settings.showNotifications;
     autoCast.checked = settings.autoCast;
@@ -46,22 +49,66 @@ function loadSettings() {
 // ─── Save Settings ─────────────────────────────────────────────────
 
 function saveSettings() {
+  // Validate
+  const host = piHost.value.trim();
+  const http = parseInt(httpPort.value, 10);
+  const ws = parseInt(wsPort.value, 10);
+
+  // Strip scheme, port, and path if user pasted a full URL
+  let sanitizedHost = host;
+  try {
+    const u = new URL(host.startsWith("http") ? host : `http://${host}`);
+    sanitizedHost = u.hostname;
+  } catch {
+    // Not a URL, use as-is
+  }
+  if (!sanitizedHost) {
+    saveStatus.textContent = "Host address is required.";
+    saveStatus.style.color = "#f44336";
+    return;
+  }
+
+  if (isNaN(http) || http < 1 || http > 65535) {
+    saveStatus.textContent = "HTTP port must be between 1 and 65535.";
+    saveStatus.style.color = "#f44336";
+    return;
+  }
+
+  if (isNaN(ws) || ws < 1 || ws > 65535) {
+    saveStatus.textContent = "WebSocket port must be between 1 and 65535.";
+    saveStatus.style.color = "#f44336";
+    return;
+  }
+
+  if (http === ws) {
+    saveStatus.textContent = "HTTP and WebSocket ports must be different.";
+    saveStatus.style.color = "#f44336";
+    return;
+  }
+
   const settings = {
-    piHost: piHost.value.trim() || DEFAULTS.piHost,
-    httpPort: parseInt(httpPort.value, 10) || DEFAULTS.httpPort,
-    wsPort: parseInt(wsPort.value, 10) || DEFAULTS.wsPort,
+    piHost: sanitizedHost,
+    httpPort: http,
+    wsPort: ws,
+    quality: quality.value,
     torMode: torMode.value,
     showNotifications: showNotifications.checked,
     autoCast: autoCast.checked,
   };
 
   chrome.storage.local.set(settings, () => {
+    saveStatus.style.color = "#4caf50";
     saveStatus.textContent = "Settings saved!";
-    saveBtn.textContent = "Saved ✓";
+    saveBtn.textContent = "Saved \u2713";
     setTimeout(() => {
       saveStatus.textContent = "";
       saveBtn.textContent = "Save Settings";
     }, 2000);
+
+    // Ask background service worker to reconnect with new settings
+    try {
+      chrome.runtime.sendMessage({ type: "WS_RECONNECT" }).catch(() => {});
+    } catch {}
   });
 }
 
@@ -72,6 +119,7 @@ function resetSettings() {
 
   chrome.storage.local.set(DEFAULTS, () => {
     loadSettings();
+    saveStatus.style.color = "#4caf50";
     saveStatus.textContent = "Settings reset to defaults.";
     setTimeout(() => {
       saveStatus.textContent = "";
@@ -82,12 +130,20 @@ function resetSettings() {
 // ─── Test Connection ───────────────────────────────────────────────
 
 async function testConnection() {
-  const host = piHost.value.trim() || DEFAULTS.piHost;
+  const rawHost = piHost.value.trim() || DEFAULTS.piHost;
+  // Strip scheme, port, and path if user pasted a full URL
+  let host = rawHost;
+  try {
+    const u = new URL(rawHost.startsWith("http") ? rawHost : `http://${rawHost}`);
+    host = u.hostname;
+  } catch {
+    // Not a URL, use as-is
+  }
   const port = parseInt(httpPort.value, 10) || DEFAULTS.httpPort;
   const url = `http://${host}:${port}/api/health`;
 
   testBtn.disabled = true;
-  testBtn.textContent = "Testing…";
+  testBtn.textContent = "Testing\u2026";
   testResult.textContent = "";
   testResult.className = "test-result";
 
@@ -101,18 +157,21 @@ async function testConnection() {
     if (response.ok) {
       const data = await response.json();
       if (data.status === "ok") {
-        testResult.textContent = "✓ Connected successfully!";
+        testResult.textContent = "\u2713 Connected successfully!";
         testResult.className = "test-result success";
       } else {
-        testResult.textContent = `⚠ Unexpected response: ${JSON.stringify(data)}`;
+        testResult.textContent = `\u26A0 Unexpected response: ${JSON.stringify(data)}`;
         testResult.className = "test-result error";
       }
     } else {
-      testResult.textContent = `✗ HTTP ${response.status}`;
+      testResult.textContent = `\u2717 HTTP ${response.status}`;
       testResult.className = "test-result error";
     }
   } catch (err) {
-    testResult.textContent = `✗ Connection failed: ${err.message}`;
+    const msg = err.name === "AbortError"
+      ? "Connection timed out (5s)"
+      : err.message;
+    testResult.textContent = `\u2717 Connection failed: ${msg}`;
     testResult.className = "test-result error";
   } finally {
     testBtn.disabled = false;

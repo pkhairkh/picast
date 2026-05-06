@@ -19,7 +19,7 @@
 
     <!-- URL Input -->
     <div class="input-group">
-      <input type="url" id="urlInput" class="url-input" placeholder="Paste URL or use current tab">
+      <input type="text" inputmode="url" id="urlInput" class="url-input" placeholder="Paste URL or use current tab">
       <button id="tabBtn" class="btn-icon" title="Use current tab URL">
         <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
           <rect x="3" y="3" width="18" height="18" rx="2"/>
@@ -72,26 +72,41 @@
         <span id="volumeLabel" class="volume-label">100%</span>
       </div>
 
-      <!-- Progress -->
+      <!-- Progress (clickable seek bar) -->
       <div class="progress-row" id="progressRow" style="display:none">
         <span id="positionLabel">0:00</span>
-        <div class="progress-bar">
+        <div class="progress-bar" id="progressBar">
           <div class="progress-fill" id="progressFill" style="width:0%"></div>
         </div>
         <span id="durationLabel">0:00</span>
+      </div>
+
+      <!-- Title display -->
+      <div class="title-row" id="titleRow" style="display:none">
+        <span id="titleText" class="title-text"></span>
+      </div>
+
+      <!-- Subtitle selector -->
+      <div class="subtitle-row" id="subtitleRow" style="display:none">
+        <label for="subtitleSelect">CC:</label>
+        <select id="subtitleSelect" disabled>
+          <option value="none">Off</option>
+        </select>
       </div>
     </div>
 
     <!-- Status Box -->
     <div class="status-box" id="statusBox">
-      <span id="statusText">Connecting to PiCast…</span>
+      <span id="statusText">Connecting to PiCast\u2026</span>
     </div>
 
     <!-- Footer -->
     <footer class="footer">
       <button class="btn-link" id="settingsBtn">Settings</button>
-      <span class="footer-sep">·</span>
-      <span class="footer-version">v0.1.0</span>
+      <span class="footer-sep">\u00B7</span>
+      <button class="btn-link" id="reconnectBtn">Reconnect</button>
+      <span class="footer-sep">\u00B7</span>
+      <span class="footer-version">v0.2.0</span>
     </footer>
   </div>
 

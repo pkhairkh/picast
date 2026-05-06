@@ -35,30 +35,40 @@ build_extension() {
   local browser="$1"
   local target_dir="${BUILD_DIR}/picast-${browser}"
 
-  echo "🏗  Building PiCast extension for ${browser}…"
+  echo "Building PiCast extension for ${browser}..."
 
   rm -rf "${target_dir}"
   mkdir -p "${target_dir}"
 
   # Copy manifest.
-  cp "${SCRIPT_DIR}/manifest-${browser}.json" "${target_dir}/manifest.json"
-  echo "  ✓ manifest.json (from manifest-${browser}.json)"
+  if [ -f "${SCRIPT_DIR}/manifest-${browser}.json" ]; then
+    cp "${SCRIPT_DIR}/manifest-${browser}.json" "${target_dir}/manifest.json"
+    echo "  manifest.json (from manifest-${browser}.json)"
+  else
+    echo "  ERROR: manifest-${browser}.json not found!"
+    exit 1
+  fi
 
   # Copy shared files.
   for file in "${SHARED_FILES[@]}"; do
     local dir
     dir="$(dirname "${target_dir}/${file}")"
     mkdir -p "${dir}"
-    cp "${SCRIPT_DIR}/${file}" "${target_dir}/${file}"
+    if [ -f "${SCRIPT_DIR}/${file}" ]; then
+      cp "${SCRIPT_DIR}/${file}" "${target_dir}/${file}"
+    else
+      echo "  ERROR: Required file ${file} not found!"
+      exit 1
+    fi
   done
-  echo "  ✓ ${#SHARED_FILES[@]} shared files"
+  echo "  ${#SHARED_FILES[@]} shared files"
 
   # Create zip for distribution.
-  local zip_name="picast-${browser}-v0.1.0.zip"
+  local zip_name="picast-${browser}-v0.2.0.zip"
   (cd "${target_dir}" && zip -q -r "${BUILD_DIR}/${zip_name}" .)
-  echo "  ✓ ${zip_name}"
+  echo "  ${zip_name}"
 
-  echo "✅ ${browser} build complete: ${target_dir}"
+  echo "  ${browser} build complete: ${target_dir}"
 }
 
 # ─── Main ──────────────────────────────────────────────────────────
@@ -79,4 +89,4 @@ case "${1:-both}" in
 esac
 
 echo ""
-echo "📦 Build artifacts in: ${BUILD_DIR}/"
+echo "Build artifacts in: ${BUILD_DIR}/"

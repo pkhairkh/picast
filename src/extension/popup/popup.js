@@ -36,12 +36,18 @@ const seekFwdBtn = $("seekFwdBtn");
 const volumeSlider = $("volumeSlider");
 const volumeLabel = $("volumeLabel");
 const progressRow = $("progressRow");
+const progressBar = $("progressBar");
 const progressFill = $("progressFill");
 const positionLabel = $("positionLabel");
 const durationLabel = $("durationLabel");
+const titleRow = $("titleRow");
+const titleText = $("titleText");
+const subtitleRow = $("subtitleRow");
+const subtitleSelect = $("subtitleSelect");
 const statusBox = $("statusBox");
 const statusText = $("statusText");
 const settingsBtn = $("settingsBtn");
+const reconnectBtn = $("reconnectBtn");
 
 // ─── State ─────────────────────────────────────────────────────────
 
@@ -56,8 +62,12 @@ let pollingTimer = null;
 function formatTime(ms) {
   if (!ms || ms < 0) return "0:00";
   const totalSec = Math.floor(ms / 1000);
-  const m = Math.floor(totalSec / 60);
+  const h = Math.floor(totalSec / 3600);
+  const m = Math.floor((totalSec % 3600) / 60);
   const s = totalSec % 60;
+  if (h > 0) {
+    return `${h}:${m.toString().padStart(2, "0")}:${s.toString().padStart(2, "0")}`;
+  }
   return `${m}:${s.toString().padStart(2, "0")}`;
 }
 
@@ -72,32 +82,64 @@ function setControlsEnabled(enabled) {
   );
 }
 
-function updatePlaybackUI(state, positionMs, durationMs) {
+function updatePlaybackUI(state, positionMs, durationMs, volume, title) {
   currentState = state?.toLowerCase() || "idle";
   currentPosition = positionMs || 0;
   currentDuration = durationMs;
 
   // Status dot.
-  statusDot.className = `status-dot ${currentState === "playing" ? "playing" : currentState === "paused" ? "paused" : currentState === "buffering" || currentState === "resolving" ? "buffering" : wsConnected ? "connected" : "disconnected"}`;
+  statusDot.className = `status-dot ${
+    currentState === "playing" ? "playing" :
+    currentState === "paused" ? "paused" :
+    currentState === "buffering" || currentState === "resolving" || currentState === "seeking" ? "buffering" :
+    wsConnected ? "connected" : "disconnected"
+  }`;
   statusDot.title = currentState;
 
   // Controls.
   const isPlaying = currentState === "playing";
   const isPaused = currentState === "paused";
-  const isActive = isPlaying || isPaused;
+  const isSeeking = currentState === "seeking";
+  const isActive = isPlaying || isPaused || isSeeking;
   setControlsEnabled(isActive);
-  pauseBtn.disabled = !isPlaying;
+  pauseBtn.disabled = !isPlaying && !isSeeking;
   resumeBtn.disabled = !isPaused;
+  subtitleSelect.disabled = !isActive || !wsConnected;
 
   // Progress.
   if (isActive && currentDuration) {
     progressRow.style.display = "flex";
     positionLabel.textContent = formatTime(currentPosition);
-    durationLabel.textContent = formatTime(currentDuration);
+    durationLabel.textContent = currentDuration > 0 ? formatTime(currentDuration) : "--:--";
     const pct = Math.min((currentPosition / currentDuration) * 100, 100);
     progressFill.style.width = `${pct}%`;
   } else {
     progressRow.style.display = "none";
+  }
+
+  // Title.
+  if (title && isActive) {
+    titleRow.style.display = "block";
+    titleText.textContent = title;
+  } else {
+    titleRow.style.display = "none";
+  }
+
+  // Volume.
+  if (volume != null && volume >= 0) {
+    volumeSlider.value = volume;
+    volumeLabel.textContent = `${volume}%`;
+  }
+
+  // Subtitle row — show when playback is active.
+  if (!isActive) {
+    subtitleRow.style.display = "none";
+    // Clear stale subtitle options
+    while (subtitleSelect.options.length > 1) {
+      subtitleSelect.remove(1);
+    }
+  } else {
+    subtitleRow.style.display = "flex";
   }
 
   // Status text.
@@ -107,7 +149,9 @@ function updatePlaybackUI(state, positionMs, durationMs) {
     buffering: "Buffering\u2026",
     playing: "Playing",
     paused: "Paused",
+    seeking: "Seeking\u2026",
     error: "Error",
+    disconnected: "Disconnected",
   };
   setStatus(stateLabels[currentState] || currentState);
 }
@@ -118,7 +162,12 @@ async function sendMessage(type, data = {}) {
   return new Promise((resolve, reject) => {
     chrome.runtime.sendMessage({ type, ...data }, (response) => {
       if (chrome.runtime.lastError) {
-        reject(new Error(chrome.runtime.lastError.message));
+        const msg = chrome.runtime.lastError.message;
+        if (msg.includes("Receiving end does not exist") || msg.includes("message port closed")) {
+          reject(new Error("Extension is restarting. Please try again."));
+        } else {
+          reject(new Error(msg));
+        }
         return;
       }
       if (response?.error) {
@@ -132,15 +181,11 @@ async function sendMessage(type, data = {}) {
 
 // ─── WebSocket Status Management ──────────────────────────────────
 
-/**
- * Check if the background service worker has an active WebSocket
- * connection and update the UI accordingly.
- */
 async function checkWsStatus() {
   try {
     const response = await sendMessage("WS_STATUS");
     wsConnected = response?.connected || false;
-    if (!wsConnected) {
+    if (!wsConnected && currentState === "idle") {
       statusDot.className = "status-dot disconnected";
     }
   } catch {
@@ -148,12 +193,11 @@ async function checkWsStatus() {
   }
 }
 
-/**
- * Request a WebSocket reconnection from the background worker.
- */
 async function requestReconnect() {
   try {
     await sendMessage("WS_RECONNECT");
+    setStatus("Reconnecting\u2026");
+    setTimeout(checkWsStatus, 2000);
   } catch {
     // Background worker may be restarting
   }
@@ -223,15 +267,12 @@ async function refreshStatus() {
     }
 
     updatePlaybackUI(
-      status.state,
-      status.position_ms || 0,
-      status.duration_ms
+      status.state || status.status,
+      status.position_ms || status.position_secs * 1000 || 0,
+      status.duration_ms || (status.duration_secs ? status.duration_secs * 1000 : null),
+      status.volume,
+      status.title || status.current_title
     );
-
-    if (status.volume != null) {
-      volumeSlider.value = status.volume;
-      volumeLabel.textContent = `${status.volume}%`;
-    }
   } catch {
     statusDot.className = "status-dot disconnected";
     setStatus("Cannot connect to PiCast. Check settings.", "error");
@@ -239,10 +280,6 @@ async function refreshStatus() {
   }
 }
 
-/**
- * Start HTTP polling as a fallback when WebSocket is not available.
- * The polling timer is cleared when the WebSocket connection is active.
- */
 function startPolling() {
   stopPolling();
   pollingTimer = setInterval(refreshStatus, 3000);
@@ -255,16 +292,9 @@ function stopPolling() {
   }
 }
 
-/**
- * Adjust the update strategy based on WebSocket connection state.
- *
- * When WebSocket is connected, rely on push events and stop polling.
- * When disconnected, fall back to HTTP polling every 3 seconds.
- */
 function updateConnectionStrategy() {
   if (wsConnected) {
     stopPolling();
-    // Do a single refresh to ensure we're in sync
     refreshStatus();
   } else {
     startPolling();
@@ -274,10 +304,33 @@ function updateConnectionStrategy() {
 // ─── Event Handlers ────────────────────────────────────────────────
 
 // Cast button.
-castBtn.addEventListener("click", async () => {
+castBtn.addEventListener("click", doCast);
+
+// Enter key in URL input.
+urlInput.addEventListener("keydown", (e) => {
+  if (e.key === "Enter") {
+    e.preventDefault();
+    doCast();
+  }
+});
+
+async function doCast() {
+  if (castBtn.disabled) return;
   const url = urlInput.value.trim();
   if (!url) {
     setStatus("Please enter a URL", "error");
+    return;
+  }
+  try {
+    if (url.startsWith("magnet:")) {
+      // magnet links are valid
+    } else {
+      const parsed = new URL(url);
+      if (!["http:", "https:"].includes(parsed.protocol)) throw new Error();
+      if (!parsed.hostname) throw new Error();
+    }
+  } catch {
+    setStatus("Invalid URL. Use http://, https://, or magnet:", "error");
     return;
   }
 
@@ -288,8 +341,6 @@ castBtn.addEventListener("click", async () => {
   try {
     await sendMessage("CAST", { url });
     setStatus("Cast request sent!", "success");
-    // Don't need to poll — WebSocket will push status updates
-    // Fall back to a single refresh after 2s if WS is not connected
     if (!wsConnected) {
       setTimeout(refreshStatus, 2000);
     }
@@ -304,78 +355,140 @@ castBtn.addEventListener("click", async () => {
       </svg>
       Cast to PiCast`;
   }
-});
+}
 
 // Use current tab URL.
 tabBtn.addEventListener("click", loadCurrentTab);
 
-// Playback controls — use WebSocket commands through background worker.
+// Playback controls.
 pauseBtn.addEventListener("click", async () => {
-  try { await sendMessage("PAUSE"); } catch {}
+  try { await sendMessage("PAUSE"); }
+  catch (err) { setStatus(`Pause failed: ${err.message}`, "error"); }
   if (!wsConnected) setTimeout(refreshStatus, 500);
 });
 
 resumeBtn.addEventListener("click", async () => {
-  try { await sendMessage("RESUME"); } catch {}
+  try { await sendMessage("RESUME"); }
+  catch (err) { setStatus(`Resume failed: ${err.message}`, "error"); }
   if (!wsConnected) setTimeout(refreshStatus, 500);
 });
 
 stopBtn.addEventListener("click", async () => {
-  try { await sendMessage("STOP"); } catch {}
+  try { await sendMessage("STOP"); }
+  catch (err) { setStatus(`Stop failed: ${err.message}`, "error"); }
   if (!wsConnected) setTimeout(refreshStatus, 500);
 });
 
 seekBackBtn.addEventListener("click", async () => {
   const newPos = Math.max(0, currentPosition - 10000);
-  try { await sendMessage("SEEK", { position_ms: newPos }); } catch {}
+  try { await sendMessage("SEEK", { position_ms: newPos }); }
+  catch (err) { setStatus(`Seek failed: ${err.message}`, "error"); }
   if (!wsConnected) setTimeout(refreshStatus, 500);
 });
 
 seekFwdBtn.addEventListener("click", async () => {
-  const newPos = currentPosition + 10000;
+  const newPos = currentDuration
+    ? Math.min(currentPosition + 10000, currentDuration)
+    : currentPosition + 10000;
   try { await sendMessage("SEEK", { position_ms: newPos }); } catch {}
   if (!wsConnected) setTimeout(refreshStatus, 500);
 });
 
-// Volume.
-volumeSlider.addEventListener("input", async () => {
+// Clickable progress bar for seeking.
+progressBar.addEventListener("click", async (e) => {
+  if (!currentDuration) return;
+  const rect = progressBar.getBoundingClientRect();
+  const pct = Math.max(0, Math.min(1, (e.clientX - rect.left) / rect.width));
+  const seekMs = Math.round(pct * currentDuration);
+  try { await sendMessage("SEEK", { position_ms: seekMs }); } catch {}
+  if (!wsConnected) setTimeout(refreshStatus, 500);
+});
+
+let volumeDebounceTimer = null;
+volumeSlider.addEventListener("input", () => {
   const vol = parseInt(volumeSlider.value, 10);
   volumeLabel.textContent = `${vol}%`;
-  try { await sendMessage("VOLUME", { volume: vol }); } catch {}
+  clearTimeout(volumeDebounceTimer);
+  volumeDebounceTimer = setTimeout(() => {
+    sendMessage("VOLUME", { volume: vol }).catch(() => {});
+  }, 200);
 });
+
+// Subtitle selector.
+subtitleSelect.addEventListener("change", async () => {
+  const lang = subtitleSelect.value;
+  if (lang === "none") {
+    try {
+      await sendMessage("SUBTITLE", { lang: "none" });
+    } catch (err) {
+      setStatus(`Subtitles: ${err.message}`, "error");
+    }
+    return;
+  }
+  try {
+    await sendMessage("SUBTITLE", { lang });
+  } catch (err) {
+    setStatus(`Subtitles: ${err.message}`, "error");
+  }
+});
+
+/**
+ * Populate the subtitle dropdown with available languages.
+ * Expected format from server: { subtitles: [{ lang: "en", label: "English" }, ...] }
+ * Falls back to using lang code as label if no label provided.
+ */
+function updateSubtitleOptions(subtitles, currentLang) {
+  // Clear existing options except "Off".
+  while (subtitleSelect.options.length > 1) {
+    subtitleSelect.remove(1);
+  }
+
+  if (!subtitles || !Array.isArray(subtitles) || subtitles.length === 0) return;
+
+  subtitles.forEach((sub) => {
+    const option = document.createElement("option");
+    option.value = sub.lang || sub.code || sub.language || "";
+    option.textContent = sub.label || sub.name || sub.lang || sub.code || sub.language || "Unknown";
+    if (currentLang && option.value === currentLang) {
+      option.selected = true;
+    }
+    subtitleSelect.appendChild(option);
+  });
+}
 
 // Settings.
 settingsBtn.addEventListener("click", () => {
   chrome.runtime.openOptionsPage();
 });
 
+// Reconnect.
+reconnectBtn.addEventListener("click", requestReconnect);
+
 // ─── Listen for live status updates from background ────────────────
-//
-// The background service worker forwards WebSocket events from the
-// PiCast server. These arrive instantly via the persistent WS
-// connection, giving real-time UI updates without polling latency.
 
 chrome.runtime.onMessage.addListener((message) => {
   if (message.type === "STATUS_UPDATE") {
-    // WebSocket push — update UI immediately
     const s = message.status;
-    updatePlaybackUI(s.state, s.position_ms, s.duration_ms);
+    updatePlaybackUI(
+      s.state,
+      s.position_ms,
+      s.duration_ms,
+      s.volume,
+      s.title || s.source_url
+    );
 
-    if (s.volume != null) {
-      volumeSlider.value = s.volume;
-      volumeLabel.textContent = `${s.volume}%`;
+    // Populate subtitle options if provided.
+    if (s.subtitles || s.available_subtitles) {
+      updateSubtitleOptions(s.subtitles || s.available_subtitles, s.current_subtitle || s.subtitle_lang);
     }
   }
 
   if (message.type === "WS_STATUS") {
     const wasConnected = wsConnected;
     wsConnected = message.connected;
-
     if (wasConnected !== wsConnected) {
       updateConnectionStrategy();
     }
-
-    // Update the status dot to reflect connection state
     if (!wsConnected && currentState === "idle") {
       statusDot.className = "status-dot disconnected";
     }
@@ -397,4 +510,10 @@ loadDetectedMedia();
 checkWsStatus().then(() => {
   updateConnectionStrategy();
 });
-refreshStatus();
+
+// Periodically check WS status in case background didn't push an update
+setInterval(() => {
+  checkWsStatus().then(() => {
+    updateConnectionStrategy();
+  }).catch(() => {});
+}, 10000);
