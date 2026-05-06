@@ -21,6 +21,24 @@ use scraper::{Html, Selector};
 use std::time::Duration;
 use tokio::time::timeout;
 
+/// Browser-like User-Agent string sent by all custom resolver requests.
+const UA: &str = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36";
+
+/// Build a reqwest client with cookie jar and browser-like defaults.
+fn build_client() -> Result<reqwest::Client, ResolveError> {
+    reqwest::Client::builder()
+        .timeout(Duration::from_secs(CUSTOM_RESOLVER_TIMEOUT_SECS))
+        .user_agent(UA)
+        .cookie_store(true)
+        // Some sites redirect HTTP→HTTPS; follow all redirects.
+        .redirect(reqwest::redirect::Policy::limited(10))
+        // Accept gzip/br to look like a real browser.
+        .gzip(true)
+        .brotli(true)
+        .build()
+        .map_err(|e| ResolveError::Network(format!("failed to build HTTP client: {}", e)))
+}
+
 /// HTTP request timeout for custom resolvers (15 seconds).
 const CUSTOM_RESOLVER_TIMEOUT_SECS: u64 = 15;
 
@@ -94,19 +112,15 @@ pub fn is_doodstream_domain(host: &str) -> bool {
 /// 4. Try Method 6: decode the `a168c` Base64-encoded source.
 /// 5. Fallback: search for `var source = '...'` and direct `.mp4`/`.m3u8` URLs.
 pub async fn resolve_voe(url: &str) -> Result<ResolveResult, ResolveError> {
-    let client = reqwest::Client::builder()
-        .timeout(Duration::from_secs(CUSTOM_RESOLVER_TIMEOUT_SECS))
-        .user_agent("Mozilla/5.0 (X11; Linux aarch64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36")
-        .build()
-        .map_err(|e| ResolveError::Network(format!("failed to build HTTP client: {}", e)))?;
+    let client = build_client()?;
 
     // Follow the initial URL, then check for JS redirects.
-    let html_text = fetch_page(&client, url).await?;
+    let html_text = fetch_page(&client, url, None).await?;
     let resolved_url = follow_js_redirect(&html_text, url);
 
     // If we got redirected, fetch the new page.
     let (final_url, page_html) = if resolved_url != url {
-        let new_html = fetch_page(&client, &resolved_url).await?;
+        let new_html = fetch_page(&client, &resolved_url, Some(url)).await?;
         (resolved_url, new_html)
     } else {
         (url.to_owned(), html_text)
@@ -158,61 +172,111 @@ pub async fn resolve_voe(url: &str) -> Result<ResolveResult, ResolveError> {
 /// 2. Fetch the embed page and look for the `download` link.
 /// 3. Extract the direct media URL from the download page.
 pub async fn resolve_doodstream(url: &str) -> Result<ResolveResult, ResolveError> {
-    let client = reqwest::Client::builder()
-        .timeout(Duration::from_secs(CUSTOM_RESOLVER_TIMEOUT_SECS))
-        .user_agent("Mozilla/5.0 (X11; Linux aarch64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36")
-        .build()
-        .map_err(|e| ResolveError::Network(format!("failed to build HTTP client: {}", e)))?;
+    let client = build_client()?;
 
-    let html_text = fetch_page(&client, url).await?;
+    // DoodStream pages often sit behind Cloudflare.  The main /d/ page may
+    // return 403, but the /e/ (embed) page is usually less protected because
+    // it is designed to be loaded in cross-origin iframes.  We try the main
+    // page first; if it fails we fall through to the embed-URL heuristic
+    // below.
 
-    // Extract all data from the Html document up-front, then drop it.
-    // scraper::Html is !Send (contains Cell<usize>), so it must not
-    // survive across an .await point.
-    let (title, thumbnail, embed_url) = {
-        let document = Html::parse_document(&html_text);
-        let title = extract_meta_content(&document, "og:title")
-            .or_else(|| extract_meta_content(&document, "twitter:title"))
-            .or_else(|| extract_document_title(&document));
-        let thumbnail = extract_meta_content(&document, "og:image")
-            .or_else(|| extract_meta_content(&document, "twitter:image"));
-        let embed_url = find_embed_iframe(&document, url);
-        (title, thumbnail, embed_url)
-    }; // document dropped here – no !Send value crosses the await below
+    let mut title: Option<String> = None;
+    let mut thumbnail: Option<String> = None;
+    let mut embed_href: Option<String> = None;
 
-    if let Some(embed_href) = embed_url {
-        let full_embed = if embed_href.starts_with("http") {
-            embed_href
-        } else {
-            format!("{}://{}{}", 
-                url::Url::parse(url).ok().map(|u| u.scheme().to_string()).unwrap_or_else(|| "https".into()),
-                url::Url::parse(url).ok().and_then(|u| u.host_str().map(|h| h.to_string())).unwrap_or_else(|| "playmogo.com".into()),
-                embed_href
-            )
-        };
+    match fetch_page(&client, url, None).await {
+        Ok(html_text) => {
+            // Extract all data from the Html document up-front, then drop it.
+            // scraper::Html is !Send (contains Cell<usize>), so it must not
+            // survive across an .await point.
+            let (t, th, e) = {
+                let document = Html::parse_document(&html_text);
+                let t = extract_meta_content(&document, "og:title")
+                    .or_else(|| extract_meta_content(&document, "twitter:title"))
+                    .or_else(|| extract_document_title(&document));
+                let th = extract_meta_content(&document, "og:image")
+                    .or_else(|| extract_meta_content(&document, "twitter:image"));
+                let e = find_embed_iframe(&document, url);
+                (t, th, e)
+            };
+            title = t;
+            thumbnail = th;
+            embed_href = e;
 
-        tracing::info!(embed_url = %full_embed, "DoodStream: found embed iframe");
-
-        // Fetch the embed page
-        let embed_html = fetch_page(&client, &full_embed).await?;
-
-        // Try to find the direct media URL in the embed page
-        if let Some(media_url) = extract_doodstream_media(&embed_html, &full_embed) {
-            tracing::info!(url = %media_url, "DoodStream: resolved media URL");
-            return Ok(build_result(url, &media_url, &title, &thumbnail));
+            // If we already have a direct URL on the main page, return it.
+            if let Some(media_url) = try_fallback_urls(&html_text) {
+                tracing::info!(url = %media_url, method = "main-page-fallback", "DoodStream: resolved media URL");
+                return Ok(build_result(url, &media_url, &title, &thumbnail));
+            }
+        }
+        Err(e) => {
+            tracing::warn!(error = %e, "DoodStream: main page fetch failed, trying embed URL heuristic");
         }
     }
 
-    // Fallback: try to find direct URLs in the page
-    if let Some(media_url) = try_fallback_urls(&html_text) {
-        tracing::info!(url = %media_url, method = "fallback", "DoodStream: resolved media URL");
-        return Ok(build_result(url, &media_url, &title, &thumbnail));
+    // ── Embed-URL heuristic ──────────────────────────────────────────
+    // DoodStream /d/<id> → /e/<id>.  If the main page didn't yield an
+    // iframe src, or if it returned 403, derive the embed URL from the
+    // original URL path.
+    if embed_href.is_none() {
+        if let Some(derived) = derive_embed_url(url) {
+            tracing::info!(derived = %derived, "DoodStream: derived embed URL from /d/ → /e/");
+            embed_href = Some(derived);
+        }
+    }
+
+    if let Some(href) = embed_href {
+        let full_embed = if href.starts_with("http") {
+            href
+        } else {
+            format!(
+                "{}://{}{}",
+                url::Url::parse(url).ok().map(|u| u.scheme().to_string()).unwrap_or_else(|| "https".into()),
+                url::Url::parse(url).ok().and_then(|u| u.host_str().map(|h| h.to_string())).unwrap_or_else(|| "playmogo.com".into()),
+                href
+            )
+        };
+
+        tracing::info!(embed_url = %full_embed, "DoodStream: fetching embed page");
+
+        // Fetch the embed page (send Referer to appear browser-like)
+        match fetch_page(&client, &full_embed, Some(url)).await {
+            Ok(embed_html) => {
+                // Try to find the direct media URL in the embed page
+                if let Some(media_url) = extract_doodstream_media(&embed_html, &full_embed) {
+                    tracing::info!(url = %media_url, "DoodStream: resolved media URL via embed");
+                    return Ok(build_result(url, &media_url, &title, &thumbnail));
+                }
+                // Fallback: search the embed HTML for direct URLs
+                if let Some(media_url) = try_fallback_urls(&embed_html) {
+                    tracing::info!(url = %media_url, method = "embed-fallback", "DoodStream: resolved media URL");
+                    return Ok(build_result(url, &media_url, &title, &thumbnail));
+                }
+            }
+            Err(e) => {
+                tracing::warn!(error = %e, "DoodStream: embed page fetch also failed");
+            }
+        }
     }
 
     Err(ResolveError::NoMediaFound(format!(
         "DoodStream resolver: could not extract media URL from {}",
         url
     )))
+}
+
+/// Derive the DoodStream embed URL from a /d/ URL.
+///
+/// `https://playmogo.com/d/abc123` → `https://playmogo.com/e/abc123`
+fn derive_embed_url(url: &str) -> Option<String> {
+    let parsed = url::Url::parse(url).ok()?;
+    let path = parsed.path();
+    // Match /d/<id> pattern
+    let re = regex_lite::Regex::new(r#"^/d/([^/]+)$"#).ok()?;
+    let caps = re.captures(path)?;
+    let id = caps.get(1)?.as_str();
+    let base = format!("{}://{}", parsed.scheme(), parsed.host_str()?);
+    Some(format!("{}/e/{}", base, id))
 }
 
 // ── Method 8: Obfuscated JSON decode ───────────────────────────────
@@ -585,11 +649,31 @@ fn extract_media_url_from_text(text: &str) -> Option<String> {
     None
 }
 
-/// Fetch a page's HTML content via HTTP GET.
-async fn fetch_page(client: &reqwest::Client, url: &str) -> Result<String, ResolveError> {
+/// Fetch a page's HTML content via HTTP GET with browser-like headers.
+///
+/// `referer` is sent as the Referer header when provided (helps bypass
+/// hotlink-protection on embed pages).
+async fn fetch_page(
+    client: &reqwest::Client,
+    url: &str,
+    referer: Option<&str>,
+) -> Result<String, ResolveError> {
+    let mut req = client
+        .get(url)
+        .header("Accept", "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,*/*;q=0.8")
+        .header("Accept-Language", "en-US,en;q=0.5")
+        .header("Sec-Fetch-Dest", "document")
+        .header("Sec-Fetch-Mode", "navigate")
+        .header("Sec-Fetch-Site", if referer.is_some() { "same-origin" } else { "none" })
+        .header("Upgrade-Insecure-Requests", "1");
+
+    if let Some(ref_url) = referer {
+        req = req.header("Referer", ref_url);
+    }
+
     let result = timeout(
         Duration::from_secs(CUSTOM_RESOLVER_TIMEOUT_SECS),
-        client.get(url).send(),
+        req.send(),
     )
     .await
     .map_err(|_| ResolveError::Network("custom resolver: HTTP request timed out".into()))?
@@ -597,10 +681,15 @@ async fn fetch_page(client: &reqwest::Client, url: &str) -> Result<String, Resol
         ResolveError::Network(format!("custom resolver: HTTP request failed: {}", e))
     })?;
 
-    if !result.status().is_success() {
+    let status = result.status();
+    if !status.is_success() {
+        // Log response body for debugging (truncated).
+        let body = result.text().await.unwrap_or_default();
+        let snippet = if body.len() > 500 { &body[..500] } else { &body };
+        tracing::warn!(status = %status, url = url, body_snippet = snippet, "custom resolver: non-2xx response");
         return Err(ResolveError::Network(format!(
             "custom resolver: HTTP {} for {}",
-            result.status(),
+            status,
             url
         )));
     }
@@ -818,5 +907,18 @@ mod tests {
             result.mime_type,
             Some("application/vnd.apple.mpegurl".into())
         );
+    }
+
+    #[test]
+    fn test_derive_embed_url() {
+        let result = derive_embed_url("https://playmogo.com/d/rqhficu74ut4");
+        assert_eq!(result, Some("https://playmogo.com/e/rqhficu74ut4".to_string()));
+
+        let result = derive_embed_url("https://dood.to/d/abc123");
+        assert_eq!(result, Some("https://dood.to/e/abc123".to_string()));
+
+        // Non-/d/ URL should return None
+        let result = derive_embed_url("https://example.com/watch/abc");
+        assert!(result.is_none());
     }
 }
