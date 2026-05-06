@@ -110,11 +110,44 @@ impl GstPipeline {
         let pipeline = Pipeline::new();
 
         // ── Source element ──────────────────────────────────────────
+        //
+        // A browser-like User-Agent is critical: many video CDNs (Voe,
+        // DoodStream, Cloudflare-fronted hosts) reject requests with the
+        // default "GStreamer souphttpsrc" UA, returning 403 or closing the
+        // connection.  The same UA string is used by the custom resolvers
+        // in picast-resolver so the CDN sees a consistent identity across
+        // both the resolution and playback phases.
+        const BROWSER_UA: &str = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36";
+
         let src = ElementFactory::make("souphttpsrc")
             .property("location", url)
             .property("timeout", 30u32)
+            .property("user-agent", BROWSER_UA)
             .build()
             .map_err(|e| PlaybackError::PipelineCreation(format!("souphttpsrc: {}", e)))?;
+
+        // Set extra HTTP headers.  Many video CDNs require a Referer header
+        // for hotlink protection — they check that the request originates
+        // from the embedding page's domain.  We set the Referer to the
+        // URL's own origin so the CDN sees a "same-origin" request.
+        // Accept and Accept-Language headers make the request look more
+        // browser-like, which helps with CDNs that reject GStreamer's
+        // default headers.
+        if src.find_property("extra-headers").is_some() {
+            let mut headers = gstreamer::Structure::new("extra-headers");
+            headers.set("Accept", "video/webm,video/mp4,video/*;q=0.9,application/ogg,*/*;q=0.7");
+            headers.set("Accept-Language", "en-US,en;q=0.5");
+            // Derive Referer from the URL's origin (scheme://host).
+            if let Ok(parsed) = url::Url::parse(url) {
+                if let Some(host) = parsed.host_str() {
+                    let referer = format!("{}://{}", parsed.scheme(), host);
+                    headers.set("Referer", referer.as_str());
+                    tracing::debug!(referer = %referer, "souphttpsrc: Referer header set");
+                }
+            }
+            src.set_property("extra-headers", &headers);
+            tracing::debug!("souphttpsrc: extra-headers configured");
+        }
 
         // Configure SOCKS5h proxy if provided. The proxy is only used when:
         //   1. A proxy address is configured (Tor is available)
