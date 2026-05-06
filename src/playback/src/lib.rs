@@ -416,6 +416,7 @@ impl PlaybackEngine {
         let event_tx = self.event_tx.clone();
         let is_playing = self.is_playing.clone();
         let bus = pipeline.pipeline().bus().expect("pipeline should have a bus");
+        let pipeline_weak = pipeline.pipeline().downgrade();
 
         let bus_watch = bus.add_watch(move |_bus, msg| {
             use gstreamer::MessageView;
@@ -457,8 +458,22 @@ impl PlaybackEngine {
                 },
                 MessageView::Buffering(b) => {
                     let percent = b.percent() as u8;
-                    tracing::debug!(percent = percent, "buffering progress");
+                    tracing::info!(percent = percent, "buffering progress");
                     let _ = event_tx.send(PlaybackEvent::Buffering { percent });
+
+                    // Handle buffering for queue2 with use-buffering=true:
+                    // pause the pipeline when buffering is low, resume when
+                    // it reaches 100%.  With use-buffering=false (our default),
+                    // BUFFERING messages are not posted, so this is a no-op.
+                    if let Some(pipe) = pipeline_weak.upgrade() {
+                        if percent < 100 {
+                            tracing::info!(percent = percent, "buffering low — pausing pipeline");
+                            let _ = pipe.set_state(State::Paused);
+                        } else {
+                            tracing::info!("buffering complete — resuming pipeline");
+                            let _ = pipe.set_state(State::Playing);
+                        }
+                    }
                 },
                 MessageView::Latency(_l) => {
                     // Latency message — not forwarding in v1.
@@ -571,6 +586,7 @@ impl PlaybackEngine {
         let event_tx = self.event_tx.clone();
         let is_playing = self.is_playing.clone();
         let bus = pipeline.pipeline().bus().expect("pipeline should have a bus");
+        let pipeline_weak = pipeline.pipeline().downgrade();
 
         let bus_watch = bus.add_watch(move |_bus, msg| {
             use gstreamer::MessageView;
@@ -604,8 +620,18 @@ impl PlaybackEngine {
                 },
                 MessageView::Buffering(b) => {
                     let percent = b.percent() as u8;
-                    tracing::debug!(percent = percent, "buffering progress (SW decode)");
+                    tracing::info!(percent = percent, "buffering progress (SW decode)");
                     let _ = event_tx.send(PlaybackEvent::Buffering { percent });
+
+                    if let Some(pipe) = pipeline_weak.upgrade() {
+                        if percent < 100 {
+                            tracing::info!(percent = percent, "buffering low — pausing pipeline (SW)");
+                            let _ = pipe.set_state(State::Paused);
+                        } else {
+                            tracing::info!("buffering complete — resuming pipeline (SW)");
+                            let _ = pipe.set_state(State::Playing);
+                        }
+                    }
                 },
                 _ => {},
             }

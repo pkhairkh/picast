@@ -210,11 +210,27 @@ impl GstPipeline {
         }
 
         // ── Buffer element ──────────────────────────────────────────
+        //
+        // queue2 sits between souphttpsrc and parsebin and provides a
+        // download buffer for network resilience.  The key configuration
+        // decision is `use-buffering`:
+        //
+        // With `use-buffering=true`, queue2 blocks the pipeline from
+        // prerolling until the buffer reaches `high-percent`.  This
+        // requires the application to handle BUFFERING messages on the
+        // bus and pause/resume the pipeline accordingly.  Without proper
+        // handling, preroll blocks forever (the state change from Ready
+        // to Paused never completes), and video never starts playing.
+        //
+        // With `use-buffering=false` (our choice), queue2 acts as a
+        // simple data queue — preroll completes as soon as the first
+        // buffer arrives from souphttpsrc, and the pipeline starts
+        // playing immediately.  If the network is slower than the
+        // playback rate, the queue may run empty and cause brief stalls,
+        // but this is preferable to never starting at all.
         let queue2 = ElementFactory::make("queue2")
-            .property("max-size-bytes", 52_428_800u32) // 50 MB
-            .property("use-buffering", true)
-            .property_from_str("low-percent", "25")
-            .property_from_str("high-percent", "75")
+            .property("max-size-bytes", 10_485_760u32) // 10 MB
+            .property("use-buffering", false)
             .build()
             .map_err(|e| PlaybackError::PipelineCreation(format!("queue2: {}", e)))?;
 
