@@ -116,12 +116,27 @@ impl GstPipeline {
             .build()
             .map_err(|e| PlaybackError::PipelineCreation(format!("souphttpsrc: {}", e)))?;
 
-        // Configure SOCKS5h proxy if provided. Loopback media is used for
-        // local device tests and must stay local.
+        // Configure SOCKS5h proxy if provided. The proxy is only used when:
+        //   1. A proxy address is configured (Tor is available)
+        //   2. The URL is NOT a loopback address
+        //   3. The URL is an .onion address (requires Tor to reach)
+        //
+        // Clearnet CDN URLs are fetched DIRECTLY — routing multi-megabyte
+        // video downloads through Tor is extremely slow (often < 100 KB/s)
+        // and causes souphttpsrc to time out during preroll. The Tor proxy
+        // is needed for URL *resolution* (bypassing Cloudflare, accessing
+        // onion sites), but the resolved CDN media URL should be fetched
+        // directly for acceptable throughput.
         let is_loopback_url = url.starts_with("http://127.0.0.1:")
             || url.starts_with("http://localhost:")
             || url.starts_with("http://[::1]:");
-        if !socks_addr.is_empty() && !is_loopback_url {
+        let is_onion_url = url.contains(".onion/")
+            || url.contains(".onion:")
+            || url.ends_with(".onion");
+
+        let use_proxy = !socks_addr.is_empty() && !is_loopback_url && is_onion_url;
+
+        if use_proxy {
             let parts: Vec<&str> = socks_addr.split(':').collect();
             let (host, port) = if parts.len() == 2 {
                 (parts[0], parts[1].parse::<u32>().unwrap_or(9050))
@@ -133,20 +148,20 @@ impl GstPipeline {
             {
                 src.set_property("socks5-proxy-ip", host);
                 src.set_property("socks5-proxy-port", port);
-                tracing::debug!(
+                tracing::info!(
                     host = host,
                     port = port,
                     user = isolation_username,
-                    "SOCKS5h proxy configured on souphttpsrc"
+                    "SOCKS5h proxy configured on souphttpsrc (onion URL)"
                 );
             } else if src.find_property("proxy").is_some() {
                 let proxy = format!("socks5h://{}@{}:{}", isolation_username, host, port);
                 src.set_property("proxy", proxy);
-                tracing::debug!(
+                tracing::info!(
                     host = host,
                     port = port,
                     user = isolation_username,
-                    "SOCKS proxy URI configured on souphttpsrc"
+                    "SOCKS proxy URI configured on souphttpsrc (onion URL)"
                 );
             } else {
                 tracing::warn!(
@@ -155,6 +170,10 @@ impl GstPipeline {
             }
         } else if is_loopback_url {
             tracing::debug!("loopback media URL detected; skipping playback proxy");
+        } else if !is_onion_url && !socks_addr.is_empty() {
+            tracing::info!(
+                "clearnet media URL detected; fetching directly (not through Tor proxy) for performance"
+            );
         }
 
         // ── Buffer element ──────────────────────────────────────────
@@ -669,5 +688,19 @@ impl GstPipeline {
         self.play()?;
 
         Ok(())
+    }
+}
+
+impl Drop for GstPipeline {
+    fn drop(&mut self) {
+        // Ensure the pipeline is set to NULL before dropping.
+        // Without this, GStreamer prints "Trying to dispose element X,
+        // but it is in READY/PAUSED instead of the NULL state" warnings
+        // when a failed pipeline is dropped.
+        if self.state != PipelineState::Null {
+            // Drop the bus watch first to prevent callbacks during shutdown.
+            self.bus_watch = None;
+            let _ = self.pipeline.set_state(State::Null);
+        }
     }
 }
