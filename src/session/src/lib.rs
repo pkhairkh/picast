@@ -705,6 +705,19 @@ impl SessionManager {
         });
 
         // Acquire the display before starting playback.
+        //
+        // The DLNA sync stops gmediarender when the Resolving event fires
+        // (on a separate task), but the kernel may not have released DRM
+        // master yet by the time we reach here.  A brief pause gives the
+        // kernel time to clean up after gmediarender's exit so that
+        // DisplayManager::acquire() can obtain DRM master.
+        //
+        // This is a conservative safety net — the display manager already
+        // retries internally with exponential backoff, but the extra delay
+        // here ensures the race window is closed before we even start
+        // trying.
+        tokio::time::sleep(std::time::Duration::from_millis(300)).await;
+
         if let Some(ref display) = self.display {
             display.acquire().await.map_err(|e| {
                 tracing::error!(error = %e, "display acquire failed");

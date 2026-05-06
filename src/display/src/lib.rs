@@ -295,38 +295,61 @@ impl DisplayManager {
             .ok_or_else(|| DisplayError::DeviceOpen("DRM device not open".into()))?;
 
         // Try to acquire DRM master with retry — another process (console
-        // framebuffer, gmediarender) may still hold it.  We try up to 3 times
-        // with 200ms backoff to handle the case where gmediarender just exited
-        // and the kernel hasn't released the master status yet.
+        // framebuffer via fbcon, gmediarender) may still hold it.  We try
+        // up to 10 times with exponential backoff (200 ms → 400 → 800 → …
+        // capped at 2 s) to handle two distinct scenarios:
+        //
+        //   A) gmediarender just exited but the kernel hasn't released the
+        //      master lock yet (typically < 200 ms).
+        //   B) The kernel fbcon (framebuffer console) holds DRM master on
+        //      the vc4 device.  The ExecStartPre in picast.service unbinds
+        //      fbcon, but that may take a moment to propagate.
         //
         // If we cannot get master, we continue anyway — resource enumeration
         // works without it, and kmssink will try to get master itself during
-        // playback. This is important because PiCast runs as a non-root user
-        // (via systemd) and may not have CAP_SYS_ADMIN to revoke master from
-        // the console.
+        // playback. This is important because on Linux, drmSetMaster returns
+        // EBUSY when another process is master, even with CAP_SYS_ADMIN.
+        //
+        // NOTE: CAP_SYS_ADMIN does NOT allow stealing DRM master from
+        // another process in current Linux kernels (6.x). The only way to
+        // release master held by the console is to unbind fbcon from the
+        // DRM device, which the systemd unit's ExecStartPre handles.
         let mut has_master = false;
-        for attempt in 1..=3 {
+        let max_attempts: u32 = 10;
+        let mut backoff_ms: u64 = 200;
+        let mut total_waited_ms: u64 = 0;
+        for attempt in 1..=max_attempts {
             match fd.acquire_master_lock() {
                 Ok(()) => {
-                    tracing::info!(fd = fd.as_raw_fd(), "acquired DRM master (temporary)");
+                    tracing::info!(
+                        fd = fd.as_raw_fd(),
+                        attempt,
+                        total_waited_ms,
+                        "acquired DRM master (temporary)"
+                    );
                     has_master = true;
                     break;
                 },
                 Err(e) => {
-                    if attempt < 3 {
+                    if attempt < max_attempts {
                         tracing::warn!(
                             attempt = attempt,
+                            backoff_ms,
                             error = %e,
-                            "DRM master acquisition failed — retrying in 200ms"
+                            "DRM master busy — retrying"
                         );
-                        std::thread::sleep(std::time::Duration::from_millis(200));
+                        std::thread::sleep(std::time::Duration::from_millis(backoff_ms));
+                        total_waited_ms += backoff_ms;
+                        backoff_ms = (backoff_ms * 2).min(2000);
                     } else {
                         tracing::warn!(
+                            attempt = max_attempts,
+                            total_waited_ms,
                             error = %e,
-                            "DRM master acquisition failed after 3 attempts — \
+                            "DRM master acquisition failed after 10 attempts — \
                              proceeding without master (kmssink will try during playback). \
-                             If the console framebuffer holds master, add \
-                             AmbientCapabilities=CAP_SYS_ADMIN to the systemd unit"
+                             Hint: ensure the systemd unit's ExecStartPre unbinds fbcon \
+                             from the vc4 DRM device so the console releases DRM master."
                         );
                     }
                 },

@@ -9,9 +9,19 @@ User=picast
 Group=picast
 SupplementaryGroups=video render audio
 
-# CAP_SYS_ADMIN is needed to call drmSetMaster() when the console
-# framebuffer holds DRM master.  Without this, PiCast cannot acquire
-# DRM master and kmssink will fail to do modesetting.
+# Release the kernel framebuffer console (fbcon) from the vc4 DRM
+# device so that PiCast (and kmssink) can acquire DRM master.
+# On Raspberry Pi with vc4, fbcon binds to the DRM device and holds
+# DRM master, preventing other processes from acquiring it.  drmSetMaster
+# returns EBUSY even with CAP_SYS_ADMIN in current Linux kernels (6.x),
+# so the only way to release master is to unbind fbcon first.
+# The "-" prefix makes failure non-fatal (e.g. on vkms or systems
+# without fbcon).
+ExecStartPre=-/bin/sh -c 'for vt in /sys/class/vtconsole/vtcon*/bind; do [ -f "$vt" ] && echo 0 > "$vt" 2>/dev/null; done; true'
+
+# CAP_SYS_ADMIN is kept for potential future use (e.g. DRM auth
+# magic).  It does NOT allow stealing DRM master from the console —
+# that requires unbinding fbcon via ExecStartPre above.
 AmbientCapabilities=CAP_SYS_ADMIN
 CapabilityBoundingSet=CAP_SYS_ADMIN
 
