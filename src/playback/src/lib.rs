@@ -475,7 +475,6 @@ impl PlaybackEngine {
         let event_tx = self.event_tx.clone();
         let is_playing = self.is_playing.clone();
         let bus = pipeline.pipeline().bus().expect("pipeline should have a bus");
-        let pipeline_weak = pipeline.pipeline().downgrade();
 
         let bus_watch = bus.add_watch(move |_bus, msg| {
             use gstreamer::MessageView;
@@ -532,19 +531,20 @@ impl PlaybackEngine {
                     tracing::info!(percent = percent, "buffering progress");
                     let _ = event_tx.send(PlaybackEvent::Buffering { percent });
 
-                    // Handle buffering for queue2 with use-buffering=true:
-                    // pause the pipeline when buffering is low, resume when
-                    // it reaches 100%.  With use-buffering=false (our default),
-                    // BUFFERING messages are not posted, so this is a no-op.
-                    if let Some(pipe) = pipeline_weak.upgrade() {
-                        if percent < 100 {
-                            tracing::info!(percent = percent, "buffering low — pausing pipeline");
-                            let _ = pipe.set_state(State::Paused);
-                        } else {
-                            tracing::info!("buffering complete — resuming pipeline");
-                            let _ = pipe.set_state(State::Playing);
-                        }
-                    }
+                    // IMPORTANT: Do NOT pause/resume the pipeline from this
+                    // handler.  Even though our queue2 has use-buffering=false,
+                    // other elements (e.g. souphttpsrc) can still post
+                    // BUFFERING messages.  Calling set_state(Paused) here
+                    // cancels the pending Paused→Playing async transition,
+                    // leaving the pipeline stuck at Paused with no video.
+                    // This was the root cause of the "no video" bug: the
+                    // buffering handler was killing the state transition.
+                    //
+                    // If we switch to use-buffering=true in the future,
+                    // buffering control must be done by a dedicated
+                    // component that tracks whether the pipeline is still
+                    // prerolling and doesn't interrupt the initial
+                    // Ready→Paused→Playing sequence.
                 },
                 MessageView::Latency(_l) => {
                     // Latency message — not forwarding in v1.
@@ -747,7 +747,6 @@ impl PlaybackEngine {
         let event_tx = self.event_tx.clone();
         let is_playing = self.is_playing.clone();
         let bus = pipeline.pipeline().bus().expect("pipeline should have a bus");
-        let pipeline_weak = pipeline.pipeline().downgrade();
 
         let bus_watch = bus.add_watch(move |_bus, msg| {
             use gstreamer::MessageView;
@@ -806,15 +805,8 @@ impl PlaybackEngine {
                     tracing::info!(percent = percent, "buffering progress (SW decode)");
                     let _ = event_tx.send(PlaybackEvent::Buffering { percent });
 
-                    if let Some(pipe) = pipeline_weak.upgrade() {
-                        if percent < 100 {
-                            tracing::info!(percent = percent, "buffering low — pausing pipeline (SW)");
-                            let _ = pipe.set_state(State::Paused);
-                        } else {
-                            tracing::info!("buffering complete — resuming pipeline (SW)");
-                            let _ = pipe.set_state(State::Playing);
-                        }
-                    }
+                    // Do NOT pause/resume the pipeline — see the comment
+                    // in the primary bus watch above for the full explanation.
                 },
                 _ => {},
             }
