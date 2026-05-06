@@ -65,7 +65,9 @@ pub struct GstPipeline {
     /// The GStreamer pipeline element.
     pipeline: Pipeline,
     /// The video sink element (kmssink or fallback).
-    video_sink: Element,
+    /// Prefixed with `_` to suppress dead_code warning; retained for future
+    /// use (e.g. querying display resolution, DRM master status).
+    _video_sink: Element,
     /// The volume element for audio control.
     volume: Element,
     /// Current pipeline state.
@@ -259,7 +261,7 @@ impl GstPipeline {
             }
         });
 
-        Ok(Self { pipeline, video_sink, volume, state: PipelineState::Ready, bus_watch: None })
+        Ok(Self { pipeline, _video_sink: video_sink, volume, state: PipelineState::Ready, bus_watch: None })
     }
 
     /// Build the hardware-accelerated video branch:
