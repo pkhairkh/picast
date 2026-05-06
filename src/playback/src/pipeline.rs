@@ -584,12 +584,34 @@ impl GstPipeline {
                 let (state_result, current, pending) =
                     self.pipeline.state(gstreamer::ClockTime::from_seconds(10));
                 match state_result {
-                    Ok(success) => {
+                    Ok(gstreamer::StateChangeSuccess::Success) => {
                         tracing::info!(
-                            ?success,
                             ?current,
                             ?pending,
                             "async preroll completed successfully"
+                        );
+                    },
+                    Ok(gstreamer::StateChangeSuccess::NoPreroll) => {
+                        tracing::info!(
+                            ?current,
+                            ?pending,
+                            "async preroll completed (no-preroll element)"
+                        );
+                    },
+                    Ok(gstreamer::StateChangeSuccess::Async) => {
+                        // The 10s timeout expired but the state change is still
+                        // in progress (current=Ready/Paused, pending=Paused/Playing).
+                        // This is common for slow CDN sources that take time to
+                        // buffer the first frames. Rather than failing, we proceed
+                        // to Playing — GStreamer will complete the transition
+                        // asynchronously. If there's a real error, it will surface
+                        // on the bus as an Error message and the bus watch will
+                        // handle it.
+                        tracing::warn!(
+                            ?current,
+                            ?pending,
+                            "async preroll timed out after 10s — \
+                             proceeding to Playing (state change still in progress)"
                         );
                     },
                     Err(e) => {

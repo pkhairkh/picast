@@ -67,6 +67,12 @@ enum ClientCommand {
     Volume { volume: u8 },
     #[allow(dead_code)] // lang is needed for deserialization; command is not yet supported
     Subtitle { lang: String },
+    /// Application-level keep-alive. The client sends PING and the
+    /// server responds with a PONG event. This is distinct from
+    /// the WebSocket protocol-level ping/pong frames — some clients
+    /// (especially browser extensions) can't send WS-level pings
+    /// and need an application-level equivalent.
+    Ping,
 }
 
 // ── Server → Client Events ───────────────────────────────────────────
@@ -89,6 +95,8 @@ enum ServerEvent {
         message: String,
     },
     Connected,
+    /// Response to a client PING — application-level keep-alive.
+    Pong,
 }
 
 // ── WebSocket Server ─────────────────────────────────────────────────
@@ -284,6 +292,11 @@ async fn handle_client(
                 match msg {
                     Some(Ok(Message::Text(text))) => {
                         match serde_json::from_str::<ClientCommand>(&text) {
+                            Ok(ClientCommand::Ping) => {
+                                // Application-level ping — respond with Pong immediately.
+                                let pong_json = serde_json::to_string(&ServerEvent::Pong)?;
+                                ws.send(Message::Text(pong_json)).await?;
+                            },
                             Ok(cmd) => {
                                 if let Err(e) = handle_command(&session, cmd).await {
                                     let err_event = ServerEvent::Error {
@@ -412,6 +425,11 @@ async fn handle_command(session: &SessionManager, cmd: ClientCommand) -> Result<
         },
         ClientCommand::Subtitle { lang: _ } => {
             return Err(anyhow!("subtitle selection not yet supported"));
+        },
+        ClientCommand::Ping => {
+            // Handled in handle_client directly (sends Pong event).
+            // This arm is never reached because handle_client intercepts
+            // Ping before calling handle_command.
         },
     }
     Ok(())
