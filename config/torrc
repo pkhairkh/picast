@@ -23,9 +23,13 @@ NewCircuitPeriod 120
 # Don't enforce entry node restrictions (reduces path diversity)
 StrictNodes 0
 
-## ─── Security ───────────────────────────────────────────────
-# Disable control port (not needed, reduces attack surface)
-ControlPort 0
+## ─── Control Port ──────────────────────────────────────────
+# Control port for PiCast's TorManager (circuit health, NEWNYM).
+# Cookie authentication is required — no password-based auth.
+# Restricted to localhost only.
+ControlPort 9051
+CookieAuthentication 1
+CookieAuthFileGroupReadable 1
 
 # Don't run as a relay or exit — client only
 ExitRelay 0
@@ -48,3 +52,10 @@ MaxClientCircuitsPending 32
 
 # Prefer faster nodes for streaming
 PathsNeededToBuildCircuits 0.75
+
+## ─── PiCast Streaming Notes ──────────────────────────────────
+# IsolateSOCKSAuth on port 9050 means each unique SOCKS5 username
+# gets its own circuit. PiCast hashes the hostname to produce the
+# username, so different websites never share a circuit.
+# Port 9051 uses IsolateDestAddr for GStreamer's souphttpsrc which
+# does not support username-based isolation.

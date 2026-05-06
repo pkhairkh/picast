@@ -971,6 +971,25 @@ impl SessionManager {
         Ok(())
     }
 
+    // ── Public helpers (for main.rs background tasks) ───────────────
+
+    /// Get the active session ID as an async-compatible public method.
+    ///
+    /// Used by the background position-update task in `main.rs`.
+    pub async fn active_session_id_public(&self) -> Result<Uuid, SessionError> {
+        self.active_session_id()
+    }
+
+    /// Refresh position and duration from the playback subsystem and
+    /// broadcast a [`SessionEvent::PositionUpdate`].
+    ///
+    /// This is the public wrapper around the private
+    /// `refresh_playback_position` method, exposed so that the
+    /// background position-update task in `main.rs` can call it.
+    pub async fn refresh_playback_position_public(&self, session_id: Uuid) {
+        self.refresh_playback_position(session_id).await;
+    }
+
     /// Delete a session from SQLite.
     fn delete_session(&self, id: Uuid) -> Result<(), SessionError> {
         let db = self

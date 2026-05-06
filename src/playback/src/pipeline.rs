@@ -310,6 +310,7 @@ impl GstPipeline {
 
         let kmssink = ElementFactory::make(&config.video_sink)
             .property_from_str("driver-name", "vc4")
+            .property("can-scale", true)
             .property("force-modesetting", true)
             .build()
             .map_err(|e| {

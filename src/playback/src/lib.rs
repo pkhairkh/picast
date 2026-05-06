@@ -247,6 +247,9 @@ pub struct PlaybackEngine {
     /// Current decode mode (mock mode).
     #[cfg(not(feature = "hw"))]
     mock_decode_mode: std::sync::Mutex<DecodeMode>,
+    /// Mock event broadcast channel (simulates GStreamer bus events).
+    #[cfg(not(feature = "hw"))]
+    mock_event_tx: tokio::sync::broadcast::Sender<PlaybackState>,
 }
 
 impl PlaybackEngine {
@@ -260,6 +263,8 @@ impl PlaybackEngine {
         let initial_volume = config.volume;
         #[cfg(not(feature = "hw"))]
         let decode_mode = if config.hw_accel { DecodeMode::Hardware } else { DecodeMode::Software };
+        #[cfg(not(feature = "hw"))]
+        let (mock_event_tx, _) = tokio::sync::broadcast::channel(64);
 
         Ok(Self {
             config,
@@ -286,6 +291,8 @@ impl PlaybackEngine {
             mock_url: std::sync::Mutex::new(None),
             #[cfg(not(feature = "hw"))]
             mock_decode_mode: std::sync::Mutex::new(decode_mode),
+            #[cfg(not(feature = "hw"))]
+            mock_event_tx,
         })
     }
 
@@ -300,6 +307,8 @@ impl PlaybackEngine {
         let initial_volume = config.volume;
         #[cfg(not(feature = "hw"))]
         let decode_mode = if config.hw_accel { DecodeMode::Hardware } else { DecodeMode::Software };
+        #[cfg(not(feature = "hw"))]
+        let (mock_event_tx, _) = tokio::sync::broadcast::channel(_channel_size);
 
         Ok(Self {
             config,
@@ -326,6 +335,8 @@ impl PlaybackEngine {
             mock_url: std::sync::Mutex::new(None),
             #[cfg(not(feature = "hw"))]
             mock_decode_mode: std::sync::Mutex::new(decode_mode),
+            #[cfg(not(feature = "hw"))]
+            mock_event_tx,
         })
     }
 
@@ -439,6 +450,9 @@ impl PlaybackEngine {
         self.mock_position_ms.store(0, Ordering::Relaxed);
         self.is_playing.store(true, Ordering::Relaxed);
 
+        // Emit mock Playing event.
+        let _ = self.mock_event_tx.send(PlaybackState::Playing);
+
         // Set buffer health to full (healthy)
         {
             let mut guard = self.mock_buffer_health.lock().unwrap();
@@ -470,6 +484,7 @@ impl PlaybackEngine {
         self.mock_playing.store(false, Ordering::Relaxed);
         self.mock_paused.store(true, Ordering::Relaxed);
         self.is_playing.store(false, Ordering::Relaxed);
+        let _ = self.mock_event_tx.send(PlaybackState::Paused);
         Ok(())
     }
 
@@ -493,6 +508,7 @@ impl PlaybackEngine {
         self.mock_playing.store(true, Ordering::Relaxed);
         self.mock_paused.store(false, Ordering::Relaxed);
         self.is_playing.store(true, Ordering::Relaxed);
+        let _ = self.mock_event_tx.send(PlaybackState::Playing);
         Ok(())
     }
 
@@ -517,6 +533,8 @@ impl PlaybackEngine {
         self.mock_paused.store(false, Ordering::Relaxed);
         self.mock_position_ms.store(0, Ordering::Relaxed);
         self.is_playing.store(false, Ordering::Relaxed);
+
+        let _ = self.mock_event_tx.send(PlaybackState::Stopped);
 
         // Clear the URL
         {
@@ -622,6 +640,16 @@ impl PlaybackEngine {
     #[cfg(feature = "hw")]
     pub fn events(&self) -> tokio::sync::broadcast::Receiver<PlaybackEvent> {
         self.event_tx.subscribe()
+    }
+
+    /// Return a receiver for playback state changes (mock mode).
+    ///
+    /// In mock mode, events are simple `PlaybackState` changes rather
+    /// than full `PlaybackEvent` messages. This lets the session layer
+    /// detect transitions without requiring GStreamer.
+    #[cfg(not(feature = "hw"))]
+    pub fn events(&self) -> tokio::sync::broadcast::Receiver<PlaybackState> {
+        self.mock_event_tx.subscribe()
     }
 
     /// Return a reference to the pipeline configuration.

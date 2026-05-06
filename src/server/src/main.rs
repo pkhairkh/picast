@@ -26,6 +26,9 @@ use tokio::signal;
 use tokio::sync::broadcast;
 use tracing::{error, info, warn};
 
+/// PiCast version — set at build time via `env!` / `cargo:rerun-if-changed`.
+const VERSION: &str = env!("CARGO_PKG_VERSION");
+
 // ── Trait adapters ───────────────────────────────────────────────────
 //
 // These wrappers implement the session trait interfaces by delegating
@@ -171,8 +174,34 @@ fn init_tracing(config_level: &str) {
         .init();
 }
 
+/// Parse command-line arguments.
+///
+/// Supports `--version`, `--help`, and `--config <path>`.
+/// Everything else is handled by the TOML config + env vars.
+fn parse_cli_args() -> clap::ArgMatches {
+    clap::Command::new("picast")
+        .version(VERSION)
+        .about("PiCast — Tor-routed media casting appliance")
+        .arg(
+            clap::Arg::new("config")
+                .short('c')
+                .long("config")
+                .value_name("FILE")
+                .help("Path to picast.toml configuration file"),
+        )
+        .get_matches()
+}
+
 #[tokio::main]
 async fn main() -> Result<()> {
+    // ── 0. CLI arguments ──────────────────────────────────────────────
+    let cli = parse_cli_args();
+
+    // If --config was given, set PICAST_CONFIG before loading config.
+    if let Some(config_path) = cli.get_one::<String>("config") {
+        std::env::set_var("PICAST_CONFIG", config_path);
+    }
+
     // ── 1. Configuration ──────────────────────────────────────────────
     let config = AppConfig::load().unwrap_or_else(|e| {
         eprintln!("failed to load configuration: {}", e);
@@ -208,6 +237,11 @@ async fn main() -> Result<()> {
     let tor_manager = Arc::new(picast_tor::TorManager::new(&config.tor.socks_addr));
     info!(socks = %config.tor.socks_addr, "Tor manager created");
 
+    // Start the Tor background monitor — watches for process crashes
+    // and queries circuit health from the control port every 30 seconds.
+    tor_manager.start_monitor();
+    info!("Tor background monitor started");
+
     // 4b. Display
     #[cfg(feature = "hw")]
     let display_manager: Arc<tokio::sync::Mutex<picast_display::DisplayManager>> = {
@@ -234,9 +268,13 @@ async fn main() -> Result<()> {
     };
     info!("Playback engine created");
 
-    // 4d. Resolver
-    let resolver = Arc::new(picast_resolver::Resolver::new(tor_manager.clone()));
-    info!("Resolver created");
+    // 4d. Resolver — use a persistent cache so resolved URLs survive restarts.
+    let cache_path = std::path::Path::new("/var/lib/picast/resolve-cache.db");
+    let resolver = Arc::new(picast_resolver::Resolver::with_persistent_cache(
+        tor_manager.clone(),
+        cache_path,
+    ));
+    info!(cache = %cache_path.display(), "Resolver created (persistent cache)");
 
     // ── 5. Session manager ────────────────────────────────────────────
     // Wrap concrete types in trait adapters and wire them into the
@@ -327,8 +365,9 @@ async fn main() -> Result<()> {
         picast_protocols::run_dlna_sync(dlna_sync, dlna_event_rx).await;
     });
 
-    // ── 8. Run until shutdown ─────────────────────────────────────────
-    // Set up a periodic watchdog notification for systemd (if WatchdogSec is set).
+    // ── 8. Background tasks ──────────────────────────────────────────
+
+    // 8a. Periodic watchdog notification for systemd (if WatchdogSec is set).
     let watchdog_interval = tokio::time::interval(std::time::Duration::from_secs(10));
     let (watchdog_stop_tx, watchdog_stop_rx) = tokio::sync::oneshot::channel::<()>();
     let watchdog_handle = tokio::spawn(async move {
@@ -347,11 +386,41 @@ async fn main() -> Result<()> {
         }
     });
 
+    // 8b. Periodic position update during playback.
+    // Queries the playback engine every 2 seconds while a session is
+    // active and broadcasts PositionUpdate events so that WebSocket
+    // clients receive real-time progress.
+    let position_session = session.clone();
+    let position_playback = playback_engine.clone();
+    let (position_stop_tx, position_stop_rx) = tokio::sync::oneshot::channel::<()>();
+    let position_handle = tokio::spawn(async move {
+        let mut interval = tokio::time::interval(std::time::Duration::from_secs(2));
+        interval.tick().await; // skip the first immediate tick
+        let mut stop_rx = position_stop_rx;
+        loop {
+            tokio::select! {
+                _ = interval.tick() => {
+                    // Only query position if there's an active session playing.
+                    if position_playback.is_playing() {
+                        if let Ok(id) = position_session.active_session_id_public().await {
+                            position_session.refresh_playback_position_public(id).await;
+                        }
+                    }
+                }
+                _ = &mut stop_rx => break,
+            }
+        }
+    });
+
     shutdown_signal.await;
 
     // Stop the watchdog before shutdown.
     let _ = watchdog_stop_tx.send(());
     let _ = watchdog_handle.await;
+
+    // Stop the position update task.
+    let _ = position_stop_tx.send(());
+    let _ = position_handle.await;
 
     // Signal all tasks to wind down.
     let _ = shutdown_tx.send(());

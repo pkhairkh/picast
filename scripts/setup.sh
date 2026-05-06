@@ -492,6 +492,10 @@ install_picast() {
     chown picast:picast /var/lib/picast
     info "Data directory: /var/lib/picast"
 
+    # Create resolve cache directory (already under /var/lib/picast)
+    # The SQLite cache file will be created automatically by the resolver.
+    info "Resolve cache: /var/lib/picast/resolve-cache.db"
+
     # Create temp directory
     mkdir -p /tmp/picast/subs
     chown picast:picast /tmp/picast

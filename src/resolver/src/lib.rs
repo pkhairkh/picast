@@ -135,17 +135,21 @@ pub fn mime_from_extension(path: &str) -> Option<String> {
 ///
 /// Holds a reference to the [`picast_tor::TorManager`] so it can route
 /// `.onion` requests (or any request the user tags as "anonymous")
-/// through the Tor SOCKS proxy. Results are cached in memory to
-/// prevent duplicate resolution of the same URL.
+/// through the Tor SOCKS proxy. Results are cached to prevent duplicate
+/// resolution of the same URL.
+///
+/// By default the cache is in-memory (lost on restart). Use
+/// [`Resolver::with_persistent_cache`] to persist the cache to a
+/// SQLite file so that resolved URLs survive restarts.
 pub struct Resolver {
     /// Reference to the Tor subsystem for anonymous resolution.
     tor: Arc<picast_tor::TorManager>,
-    /// In-memory cache of resolved URLs.
+    /// Cache of resolved URLs (in-memory or file-backed).
     cache: Arc<Mutex<ResolveCache>>,
 }
 
 impl Resolver {
-    /// Create a new resolver with the given Tor manager.
+    /// Create a new resolver with the given Tor manager (in-memory cache).
     pub fn new(tor: Arc<picast_tor::TorManager>) -> Self {
         Self { tor, cache: Arc::new(Mutex::new(ResolveCache::new())) }
     }
@@ -153,6 +157,32 @@ impl Resolver {
     /// Create a new resolver with a custom cache TTL.
     pub fn with_cache_ttl(tor: Arc<picast_tor::TorManager>, ttl: std::time::Duration) -> Self {
         Self { tor, cache: Arc::new(Mutex::new(ResolveCache::with_ttl(ttl))) }
+    }
+
+    /// Create a new resolver with a persistent file-backed cache.
+    ///
+    /// The cache is stored as a SQLite database at `path` so that
+    /// resolved URLs survive server restarts. This avoids re-resolving
+    /// every URL through Tor/yt-dlp on every boot, which would be
+    /// slow and waste bandwidth.
+    pub fn with_persistent_cache(
+        tor: Arc<picast_tor::TorManager>,
+        path: &std::path::Path,
+    ) -> Self {
+        Self { tor, cache: Arc::new(Mutex::new(ResolveCache::with_path(path))) }
+    }
+
+    /// Create a new resolver with a persistent file-backed cache and
+    /// custom TTL.
+    pub fn with_persistent_cache_and_ttl(
+        tor: Arc<picast_tor::TorManager>,
+        path: &std::path::Path,
+        ttl: std::time::Duration,
+    ) -> Self {
+        Self {
+            tor,
+            cache: Arc::new(Mutex::new(ResolveCache::with_path_and_ttl(Some(path), ttl))),
+        }
     }
 
     /// Resolve `url` into a [`ResolveResult`].

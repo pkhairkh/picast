@@ -27,6 +27,7 @@ async-trait = { workspace = true }
 serde = { workspace = true, features = ["derive"] }
 toml = "0.8"
 sd-notify = "0.4"
+clap = { version = "4", features = ["std"] }
 
 [dev-dependencies]
 tokio = { workspace = true }

@@ -62,6 +62,7 @@
 
 # Allow Tor SOCKS proxy (primary — content resolution + media fetching)
 -A OUTPUT -d 127.0.0.1/32 -p tcp --dport 9050 -j ACCEPT
+# Allow Tor control port (circuit health monitoring + NEWNYM)
 -A OUTPUT -d 127.0.0.1/32 -p tcp --dport 9051 -j ACCEPT
 
 # Allow LAN (DLNA, mDNS, SSDP, SSH responses)
