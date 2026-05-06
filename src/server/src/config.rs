@@ -113,11 +113,14 @@ pub struct DlnaConfig {
     /// Friendly name advertised on the network.
     #[serde(default = "default_dlna_name")]
     pub friendly_name: String,
+    /// DLNA renderer listen port.
+    #[serde(default = "default_dlna_port")]
+    pub port: u16,
 }
 
 impl Default for DlnaConfig {
     fn default() -> Self {
-        Self { friendly_name: default_dlna_name() }
+        Self { friendly_name: default_dlna_name(), port: default_dlna_port() }
     }
 }
 
@@ -151,6 +154,9 @@ fn default_socks_addr() -> String {
 }
 fn default_dlna_name() -> String {
     "PiCast".into()
+}
+fn default_dlna_port() -> u16 {
+    49152
 }
 fn default_log_level() -> String {
     "info".into()
@@ -235,6 +241,13 @@ impl AppConfig {
         }
         if let Ok(v) = std::env::var("PICAST_DLNA_NAME") {
             self.dlna.friendly_name = v;
+        }
+        if let Ok(v) = std::env::var("PICAST_DLNA_PORT") {
+            if let Ok(port) = v.parse::<u16>() {
+                self.dlna.port = port;
+            } else {
+                tracing::warn!(value = %v, "PICAST_DLNA_PORT is not a valid port number");
+            }
         }
         if let Ok(v) = std::env::var("PICAST_LOG_LEVEL") {
             self.logging.level = v;

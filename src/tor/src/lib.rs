@@ -406,7 +406,10 @@ impl TorManager {
                             control_port,
                             &cookie_path,
                         ).await {
-                            let mut guard = circuit_health.lock().unwrap();
+                            let mut guard = circuit_health.lock().unwrap_or_else(|e| {
+                                tracing::warn!("circuit_health mutex poisoned — recovering");
+                                e.into_inner()
+                            });
                             *guard = health;
                         }
                     }
@@ -419,7 +422,7 @@ impl TorManager {
     /// monitoring task. Returns the default `CircuitHealth` if the
     /// monitor hasn't run yet or the control port is not available.
     pub fn last_circuit_health(&self) -> CircuitHealth {
-        *self.circuit_health.lock().unwrap()
+        *self.circuit_health_lock()
     }
 
     /// Return the SOCKS5 proxy address string.
@@ -632,10 +635,11 @@ impl TorManager {
         // Use the best latency measurement available.
         let best_latency = http_latency.or(latency_ms);
 
+        let health_snapshot = *self.circuit_health_lock();
         Ok(CircuitHealth {
-            open_circuits: self.circuit_health.lock().unwrap().open_circuits,
-            built_circuits: self.circuit_health.lock().unwrap().built_circuits,
-            failed_circuits: self.circuit_health.lock().unwrap().failed_circuits,
+            open_circuits: health_snapshot.open_circuits,
+            built_circuits: health_snapshot.built_circuits,
+            failed_circuits: health_snapshot.failed_circuits,
             latency_ms: best_latency,
             is_healthy: connect_ms < 1000 && best_latency.is_some_and(|l| l < 5000),
         })
@@ -675,9 +679,12 @@ impl TorManager {
             .map_err(|e| TorError::ControlPort(format!("write AUTHENTICATE failed: {}", e)))?;
 
         let mut response = String::new();
-        reader.read_line(&mut response).await.map_err(|e| {
-            TorError::ControlPort(format!("read AUTHENTICATE response failed: {}", e))
-        })?;
+        tokio::time::timeout(std::time::Duration::from_secs(5), reader.read_line(&mut response))
+            .await
+            .map_err(|_| TorError::ControlPort("AUTHENTICATE response timed out (5s)".into()))?
+            .map_err(|e| {
+                TorError::ControlPort(format!("read AUTHENTICATE response failed: {}", e))
+            })?;
 
         if !response.starts_with("250") {
             return Err(TorError::ControlPort(format!(
@@ -693,9 +700,12 @@ impl TorManager {
             .map_err(|e| TorError::ControlPort(format!("write SIGNAL NEWNYM failed: {}", e)))?;
 
         response.clear();
-        reader.read_line(&mut response).await.map_err(|e| {
-            TorError::ControlPort(format!("read SIGNAL NEWNYM response failed: {}", e))
-        })?;
+        tokio::time::timeout(std::time::Duration::from_secs(5), reader.read_line(&mut response))
+            .await
+            .map_err(|_| TorError::ControlPort("SIGNAL NEWNYM response timed out (5s)".into()))?
+            .map_err(|e| {
+                TorError::ControlPort(format!("read SIGNAL NEWNYM response failed: {}", e))
+            })?;
 
         if !response.starts_with("250") {
             return Err(TorError::ControlPort(format!("NEWNYM rejected: {}", response.trim())));
@@ -800,6 +810,14 @@ impl TorManager {
             Err(_) => stream_isolation_id(url),
         }
     }
+
+    /// Lock circuit_health, recovering from poison if needed.
+    fn circuit_health_lock(&self) -> std::sync::MutexGuard<'_, CircuitHealth> {
+        self.circuit_health.lock().unwrap_or_else(|e| {
+            tracing::warn!("circuit_health mutex poisoned — recovering");
+            e.into_inner()
+        })
+    }
 }
 
 // ── Utility functions ────────────────────────────────────────────────
@@ -878,9 +896,9 @@ async fn query_circuit_health(
         .map_err(|e| TorError::ControlPort(format!("write AUTHENTICATE failed: {}", e)))?;
 
     let mut response = String::new();
-    reader
-        .read_line(&mut response)
+    tokio::time::timeout(std::time::Duration::from_secs(5), reader.read_line(&mut response))
         .await
+        .map_err(|_| TorError::ControlPort("AUTHENTICATE response timed out (5s)".into()))?
         .map_err(|e| TorError::ControlPort(format!("read AUTHENTICATE response failed: {}", e)))?;
 
     if !response.starts_with("250") {
@@ -901,9 +919,12 @@ async fn query_circuit_health(
     let mut line = String::new();
     loop {
         line.clear();
-        reader.read_line(&mut line).await.map_err(|e| {
-            TorError::ControlPort(format!("read circuit-status line failed: {}", e))
-        })?;
+        tokio::time::timeout(std::time::Duration::from_secs(5), reader.read_line(&mut line))
+            .await
+            .map_err(|_| TorError::ControlPort("circuit-status read timed out (5s)".into()))?
+            .map_err(|e| {
+                TorError::ControlPort(format!("read circuit-status line failed: {}", e))
+            })?;
 
         if line.starts_with("250 OK") || line.starts_with("250-") {
             break;
@@ -976,17 +997,30 @@ impl Drop for TorManager {
             );
             // Best-effort synchronous kill. The async `shutdown()` is
             // preferred but won't run in `drop`.
-            if let Ok(mut guard) = self.child.try_lock() {
-                if let Some(ref mut c) = *guard {
-                    #[cfg(unix)]
-                    {
-                        let _ = unsafe { libc_kill(c.id().unwrap_or(0), libc::SIGTERM) };
+            match self.child.try_lock() {
+                Ok(mut guard) => {
+                    if let Some(ref mut c) = *guard {
+                        #[cfg(unix)]
+                        {
+                            // Send SIGTERM to the Tor process specifically (not the process group).
+                            if let Some(pid) = c.id() {
+                                unsafe {
+                                    let _ = libc::kill(pid as i32, libc::SIGTERM);
+                                }
+                            }
+                        }
+                        #[cfg(not(unix))]
+                        {
+                            let _ = c.start_kill();
+                        }
                     }
-                    #[cfg(not(unix))]
-                    {
-                        let _ = c.start_kill();
-                    }
-                }
+                },
+                Err(_) => {
+                    tracing::warn!(
+                        "Tor child lock held during drop — Tor process may be orphaned. \
+                         Use shutdown() for clean termination."
+                    );
+                },
             }
         }
     }

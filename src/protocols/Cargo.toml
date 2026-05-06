@@ -18,6 +18,7 @@ serde = { workspace = true }
 serde_json = { workspace = true }
 tracing = { workspace = true }
 anyhow = { workspace = true }
+url = { workspace = true }
 uuid = { workspace = true }
 libc = "0.2"
 

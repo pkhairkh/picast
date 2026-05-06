@@ -43,7 +43,15 @@ struct SeekRequest {
 
 #[derive(Debug, Deserialize)]
 struct VolumeRequest {
+    /// Volume level (0-100). Values above 100 are clamped.
     volume: u8,
+}
+
+impl VolumeRequest {
+    /// Return the volume clamped to the valid 0-100 range.
+    fn clamped_volume(&self) -> u8 {
+        self.volume.min(100)
+    }
 }
 
 // ── Response Payloads ────────────────────────────────────────────────
@@ -119,7 +127,15 @@ impl HttpApiServer {
                     tokio::spawn(async move {
                         let service = service_fn(move |req| {
                             let session = session.clone();
-                            async move { handle_request(req, &session).await }
+                            async move {
+                                match handle_request(req, &session).await {
+                                    Ok(resp) => Ok(resp),
+                                    Err(e) => {
+                                        tracing::warn!(error = %e, "request handler error");
+                                        error_response(StatusCode::BAD_REQUEST, &e.to_string())
+                                    }
+                                }
+                            }
                         });
 
                         if let Err(e) = hyper::server::conn::http1::Builder::new()
@@ -188,6 +204,9 @@ async fn handle_request(
         // Cast.
         (Method::POST, "/api/cast") => {
             let payload = read_body_json::<CastRequest>(body).await?;
+            if let Err(e) = is_safe_cast_url(&payload.url) {
+                return error_response(StatusCode::BAD_REQUEST, &e.to_string());
+            }
             match session.load(&payload.url).await {
                 Ok(id) => {
                     let resp =
@@ -258,9 +277,10 @@ async fn handle_request(
         // Volume.
         (Method::POST, "/api/volume") => {
             let payload = read_body_json::<VolumeRequest>(body).await?;
-            match session.set_volume(payload.volume).await {
+            let volume = payload.clamped_volume();
+            match session.set_volume(volume).await {
                 Ok(()) => {
-                    json_response(StatusCode::OK, &serde_json::json!({"volume": payload.volume}))
+                    json_response(StatusCode::OK, &serde_json::json!({"volume": volume}))
                 },
                 Err(e) => error_response(StatusCode::INTERNAL_SERVER_ERROR, &e.to_string()),
             }
@@ -303,11 +323,32 @@ fn cors_response(status: StatusCode) -> Response<BoxBody> {
         .unwrap()
 }
 
-/// Read and parse a JSON body.
+/// Maximum allowed HTTP request body size (1 MB).
+const MAX_BODY_SIZE: usize = 1_048_576;
+
+/// Read and parse a JSON body with size validation.
 async fn read_body_json<T: serde::de::DeserializeOwned>(body: Incoming) -> Result<T> {
     use http_body_util::BodyExt;
     let bytes = body.collect().await?.to_bytes();
+    if bytes.len() > MAX_BODY_SIZE {
+        return Err(anyhow::anyhow!("request body too large ({} bytes, max {})", bytes.len(), MAX_BODY_SIZE));
+    }
     Ok(serde_json::from_slice(&bytes)?)
+}
+
+/// Validate that a URL is safe for casting.
+///
+/// Rejects `file://`, `data:`, `javascript:`, and other dangerous schemes.
+/// Only `http://` and `https://` are allowed.
+fn is_safe_cast_url(url: &str) -> Result<()> {
+    let parsed = url::Url::parse(url).map_err(|e| anyhow::anyhow!("invalid URL: {}", e))?;
+    match parsed.scheme() {
+        "http" | "https" => Ok(()),
+        "file" => Err(anyhow::anyhow!("file:// URLs are not allowed — use http:// or https://")),
+        "data" => Err(anyhow::anyhow!("data: URLs are not allowed — use http:// or https://")),
+        "javascript" => Err(anyhow::anyhow!("javascript: URLs are not allowed")),
+        scheme => Err(anyhow::anyhow!("unsupported URL scheme: {} — use http:// or https://", scheme)),
+    }
 }
 
 impl StatusResponse {

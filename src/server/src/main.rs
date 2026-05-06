@@ -268,6 +268,8 @@ async fn main() -> Result<()> {
             .await
         {
             error!(error = %e, "HTTP server error");
+            // H17: Signal the process to exit — a critical server has failed.
+            std::process::exit(1);
         }
     });
 
@@ -280,6 +282,8 @@ async fn main() -> Result<()> {
             .await
         {
             error!(error = %e, "WebSocket server error");
+            // H17: Signal the process to exit — a critical server has failed.
+            std::process::exit(1);
         }
     });
 
@@ -313,6 +317,22 @@ async fn main() -> Result<()> {
         let _ = dlna_sync_handle.await;
     })
     .await;
+
+    // H16: Stop playback engine and release display before shutting down
+    // other subsystems. This ensures DRM master is released and GStreamer
+    // resources are cleaned up.
+    info!("stopping playback engine…");
+    if let Err(e) = playback_engine.stop().await {
+        warn!(error = %e, "Playback engine shutdown error");
+    }
+
+    info!("releasing display…");
+    {
+        let mut dm = display_manager.lock().await;
+        if let Err(e) = dm.release() {
+            warn!(error = %e, "Display release error");
+        }
+    }
 
     // Stop DLNA renderer subprocess.
     if let Err(e) = dlna_renderer.stop().await {

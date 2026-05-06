@@ -490,6 +490,21 @@ install_picast() {
     chown picast:picast /tmp/picast
     info "Temp directory: /tmp/picast"
 
+    # Install TOML config file
+    mkdir -p /etc/picast
+    if [ -f "${REPO_ROOT}/picast.toml.example" ]; then
+        if [ ! -f /etc/picast/picast.toml ]; then
+            cp "${REPO_ROOT}/picast.toml.example" /etc/picast/picast.toml
+            chown picast:picast /etc/picast/picast.toml
+            chmod 644 /etc/picast/picast.toml
+            info "Installed config to /etc/picast/picast.toml"
+        else
+            info "Config already exists at /etc/picast/picast.toml — not overwriting"
+        fi
+    else
+        warn "picast.toml.example not found — skipping config installation"
+    fi
+
     # Install systemd service (update ExecStart to match our binary name)
     if [ -f "${CONFIG_DIR}/picast.service" ]; then
         backup_file /etc/systemd/system/picast.service

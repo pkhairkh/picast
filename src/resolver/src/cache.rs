@@ -102,45 +102,7 @@ impl ResolveCache {
     /// on each insert.
     pub fn insert(&self, _url: &str, result: ResolveResult) {
         let conn = self.conn.lock().unwrap();
-        let now = now_epoch_secs();
-        let subtitle_json =
-            serde_json::to_string(&result.subtitle_tracks).unwrap_or_else(|_| "[]".into());
-
-        // Convert u64/u32 fields to i64/i32 for SQLite compatibility.
-        let content_length: Option<i64> = result.content_length.map(|v| v as i64);
-        let duration: Option<i64> = result.duration.map(|v| v as i64);
-        let width: Option<i32> = result.width.map(|v| v as i32);
-        let height: Option<i32> = result.height.map(|v| v as i32);
-
-        if let Err(e) = conn.execute(
-            "INSERT OR REPLACE INTO resolved_urls
-                (source_url, direct_url, category, mime_type, content_length,
-                 used_tor, title, duration, thumbnail, vcodec, acodec,
-                 width, height, subtitle_tracks, resolved_at)
-             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
-            params![
-                result.source_url,
-                result.direct_url,
-                result.category.to_string(),
-                result.mime_type,
-                content_length,
-                result.used_tor as i32,
-                result.title,
-                duration,
-                result.thumbnail,
-                result.vcodec,
-                result.acodec,
-                width,
-                height,
-                subtitle_json,
-                now,
-            ],
-        ) {
-            tracing::warn!(error = %e, "failed to insert cache entry");
-        }
-
-        // Clean up stale entries on each insert.
-        self.cleanup_stale(&conn);
+        self.insert_with_conn(&conn, _url, &result);
     }
 
     /// Look up a URL in the cache.
@@ -217,6 +179,93 @@ impl ResolveCache {
         let cleanup_secs = CLEANUP_AGE.as_secs() as i64;
         let cutoff = now - cleanup_secs;
         let _ = conn.execute("DELETE FROM resolved_urls WHERE resolved_at < ?", params![cutoff]);
+    }
+
+    /// Look up a URL in the cache, or insert it using the provided closure.
+    ///
+    /// This is atomic — the lock is held across the get and insert,
+    /// preventing TOCTOU races where two tasks resolve the same URL.
+    pub fn get_or_insert_with<F>(&self, url: &str, f: F) -> Option<ResolveResult>
+    where
+        F: FnOnce() -> ResolveResult,
+    {
+        let conn = self.conn.lock().unwrap();
+        let now = now_epoch_secs();
+        let ttl_secs = self.ttl.as_secs() as i64;
+        let cutoff = now - ttl_secs;
+
+        // Try to get from cache first.
+        let mut stmt = match conn.prepare(
+            "SELECT source_url, direct_url, category, mime_type, content_length,
+                used_tor, title, duration, thumbnail, vcodec, acodec,
+                width, height, subtitle_tracks
+             FROM resolved_urls
+             WHERE source_url = ?
+               AND resolved_at > ?",
+        ) {
+            Ok(stmt) => stmt,
+            Err(e) => {
+                tracing::warn!(error = %e, "cache prepare error");
+                return None;
+            },
+        };
+
+        let result = stmt.query_row(params![url, cutoff], |row| Ok(row_to_resolve_result(row)));
+
+        match result {
+            Ok(r) => Some(r),
+            Err(rusqlite::Error::QueryReturnedNoRows) => {
+                // Cache miss — compute and insert atomically.
+                let computed = f();
+                self.insert_with_conn(&conn, url, &computed);
+                Some(computed)
+            },
+            Err(e) => {
+                tracing::warn!(error = %e, "cache query error");
+                None
+            },
+        }
+    }
+
+    /// Insert a cache entry using an existing locked connection.
+    fn insert_with_conn(&self, conn: &Connection, _url: &str, result: &ResolveResult) {
+        let now = now_epoch_secs();
+        let subtitle_json =
+            serde_json::to_string(&result.subtitle_tracks).unwrap_or_else(|_| "[]".into());
+
+        let content_length: Option<i64> = result.content_length.map(|v| v as i64);
+        let duration: Option<i64> = result.duration.map(|v| v as i64);
+        let width: Option<i32> = result.width.map(|v| v as i32);
+        let height: Option<i32> = result.height.map(|v| v as i32);
+
+        if let Err(e) = conn.execute(
+            "INSERT OR REPLACE INTO resolved_urls
+                (source_url, direct_url, category, mime_type, content_length,
+                 used_tor, title, duration, thumbnail, vcodec, acodec,
+                 width, height, subtitle_tracks, resolved_at)
+             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            params![
+                result.source_url,
+                result.direct_url,
+                result.category.to_string(),
+                result.mime_type,
+                content_length,
+                result.used_tor as i32,
+                result.title,
+                duration,
+                result.thumbnail,
+                result.vcodec,
+                result.acodec,
+                width,
+                height,
+                subtitle_json,
+                now,
+            ],
+        ) {
+            tracing::warn!(error = %e, "failed to insert cache entry");
+        }
+
+        self.cleanup_stale(conn);
     }
 }
 

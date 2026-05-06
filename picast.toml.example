@@ -28,6 +28,8 @@ drm_device = ""
 [dlna]
 # Friendly name advertised on the local network via SSDP.
 friendly_name = "PiCast"
+# DLNA renderer listen port.
+port = 49152
 
 [logging]
 # Log level: trace, debug, info, warn, error

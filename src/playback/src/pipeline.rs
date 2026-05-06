@@ -30,21 +30,31 @@
 use crate::{BufferHealth, PipelineConfig, PlaybackError};
 use gstreamer::prelude::*;
 use gstreamer::{Element, ElementFactory, Pipeline, State};
-use std::sync::Once;
 
 /// Ensure GStreamer is initialised exactly once.
-static GST_INIT: Once = Once::new();
+static GST_INIT: std::sync::OnceLock<Result<(), PlaybackError>> = std::sync::OnceLock::new();
 
 /// Initialise GStreamer. Safe to call multiple times.
+/// Returns an error if initialisation fails (instead of panicking),
+/// and subsequent calls will return the same error.
 fn ensure_gst_init() -> Result<(), PlaybackError> {
-    GST_INIT.call_once(|| {
-        if let Err(e) = gstreamer::init() {
-            tracing::error!("GStreamer initialisation failed: {}", e);
-            panic!("GStreamer init failed: {}", e);
-        }
-        tracing::debug!("GStreamer initialised successfully");
-    });
-    Ok(())
+    GST_INIT
+        .get_or_init(|| {
+            match gstreamer::init() {
+                Ok(()) => {
+                    tracing::debug!("GStreamer initialised successfully");
+                    Ok(())
+                },
+                Err(e) => {
+                    tracing::error!("GStreamer initialisation failed: {}", e);
+                    Err(PlaybackError::Gstreamer(format!(
+                        "GStreamer init failed (permanent): {}",
+                        e
+                    )))
+                },
+            }
+        })
+        .clone()
 }
 
 /// A constructed GStreamer pipeline ready for state transitions.
@@ -107,7 +117,11 @@ impl GstPipeline {
             } else {
                 ("127.0.0.1", 9050u32)
             };
-            src.set_property("proxy-id", isolation_username);
+            // Note: souphttpsrc's built-in SOCKS5 does not support
+            // username-based circuit isolation (IsolateSOCKSAuth).
+            // All connections through this proxy share Tor circuits.
+            // For per-host isolation, use a SOCKS5 forwarder or
+            // GStreamer's souphttpsrc with a local socat bridge.
             src.set_property("socks5-proxy-ip", host);
             src.set_property("socks5-proxy-port", port);
             tracing::debug!(

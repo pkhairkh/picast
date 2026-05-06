@@ -121,7 +121,8 @@ pub async fn resolve_with_ytdlp_and_subs(
     );
 
     let mut cmd = Command::new("yt-dlp");
-    cmd.arg("--dump-json")
+    cmd.kill_on_drop(true)
+        .arg("--dump-json")
         .arg("--no-download")
         .arg("--no-warnings")
         .arg("--socket-timeout")

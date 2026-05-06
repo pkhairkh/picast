@@ -43,7 +43,7 @@ use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::Arc;
 use thiserror::Error;
 #[cfg(feature = "hw")]
-use tokio::sync::mpsc;
+use tokio::sync::broadcast;
 #[cfg(feature = "hw")]
 use tokio::sync::Mutex;
 
@@ -205,7 +205,7 @@ pub struct PlaybackEngine {
     gst_pipeline: Arc<Mutex<Option<GstPipeline>>>,
     /// Event sender — cloned receivers are handed out via `events()`.
     #[cfg(feature = "hw")]
-    event_tx: mpsc::Sender<PlaybackEvent>,
+    event_tx: tokio::sync::broadcast::Sender<PlaybackEvent>,
     /// Whether the engine is currently playing.
     is_playing: Arc<AtomicBool>,
 
@@ -256,7 +256,7 @@ impl PlaybackEngine {
             #[cfg(feature = "hw")]
             gst_pipeline: Arc::new(Mutex::new(None)),
             #[cfg(feature = "hw")]
-            event_tx: mpsc::channel(64).0,
+            event_tx: tokio::sync::broadcast::channel(64).0,
             is_playing: Arc::new(AtomicBool::new(false)),
             #[cfg(not(feature = "hw"))]
             mock_loaded: AtomicBool::new(false),
@@ -285,7 +285,7 @@ impl PlaybackEngine {
         _channel_size: usize,
     ) -> Result<Self, PlaybackError> {
         #[cfg(feature = "hw")]
-        let event_tx = mpsc::channel(_channel_size).0;
+        let event_tx = tokio::sync::broadcast::channel(_channel_size).0;
         #[cfg(not(feature = "hw"))]
         let initial_volume = config.volume;
         #[cfg(not(feature = "hw"))]
@@ -367,10 +367,10 @@ impl PlaybackEngine {
                             let new_state = s.current();
 
                             if new_state == State::Playing {
-                                let _ = event_tx.try_send(PlaybackEvent::Playing);
+                                let _ = event_tx.send(PlaybackEvent::Playing);
                                 is_playing.store(true, Ordering::Relaxed);
                             } else if new_state == State::Paused {
-                                let _ = event_tx.try_send(PlaybackEvent::Paused);
+                                let _ = event_tx.send(PlaybackEvent::Paused);
                                 is_playing.store(false, Ordering::Relaxed);
                             }
                         }
@@ -378,20 +378,20 @@ impl PlaybackEngine {
                 },
                 MessageView::Eos(_) => {
                     tracing::info!("end of stream reached");
-                    let _ = event_tx.try_send(PlaybackEvent::EndOfStream);
+                    let _ = event_tx.send(PlaybackEvent::EndOfStream);
                     is_playing.store(false, Ordering::Relaxed);
                 },
                 MessageView::Error(e) => {
                     let msg = e.error().to_string();
                     let debug = e.debug().map(|d| d.to_string());
                     tracing::error!(error = %msg, debug = ?debug, "GStreamer error");
-                    let _ = event_tx.try_send(PlaybackEvent::Error { message: msg, debug });
+                    let _ = event_tx.send(PlaybackEvent::Error { message: msg, debug });
                     is_playing.store(false, Ordering::Relaxed);
                 },
                 MessageView::Buffering(b) => {
                     let percent = b.percent() as u8;
                     tracing::debug!(percent = percent, "buffering progress");
-                    let _ = event_tx.try_send(PlaybackEvent::Buffering { percent });
+                    let _ = event_tx.send(PlaybackEvent::Buffering { percent });
                 },
                 MessageView::Latency(l) => {
                     // Latency message — not forwarding in v1.
@@ -494,7 +494,7 @@ impl PlaybackEngine {
             pipeline.stop()?;
             *guard = None;
             self.is_playing.store(false, Ordering::Relaxed);
-            let _ = self.event_tx.try_send(PlaybackEvent::Stopped);
+            let _ = self.event_tx.send(PlaybackEvent::Stopped);
         }
         Ok(())
     }
@@ -607,20 +607,11 @@ impl PlaybackEngine {
 
     /// Return a receiver for playback events.
     ///
-    /// Each call creates a new receiver. The sender is the same
-    /// internal channel, so events are distributed to all receivers.
-    /// Note: this creates a new channel pair since mpsc is single-consumer.
-    /// For broadcast semantics, use `tokio::sync::broadcast` in the
-    /// session layer.
+    /// Each call creates a new receiver via `broadcast::Sender::subscribe()`.
+    /// All subscribers receive a copy of each event.
     #[cfg(feature = "hw")]
-    pub fn events(&self) -> mpsc::Receiver<PlaybackEvent> {
-        // Since mpsc::Sender is single-consumer, we need a workaround.
-        // For v1, we'll use a broadcast channel internally.
-        // This is a known limitation — the session layer wraps this
-        // with its own broadcast.
-        let (_, rx) = mpsc::channel(64);
-        // TODO: implement proper event fan-out
-        rx
+    pub fn events(&self) -> tokio::sync::broadcast::Receiver<PlaybackEvent> {
+        self.event_tx.subscribe()
     }
 
     /// Return a reference to the pipeline configuration.

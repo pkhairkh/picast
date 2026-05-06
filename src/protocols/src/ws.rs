@@ -115,7 +115,12 @@ impl WebSocketServer {
                     let session = self.session.clone();
 
                     tokio::spawn(async move {
-                        let ws_stream = tokio_tungstenite::accept_async(stream).await;
+                        let ws_config = tokio_tungstenite::tungstenite::protocol::WebSocketConfig {
+                            max_message_size: Some(1_048_576), // 1 MB
+                            max_frame_size: Some(1_048_576),    // 1 MB
+                            ..Default::default()
+                        };
+                        let ws_stream = tokio_tungstenite::accept_async_with_config(stream, Some(ws_config)).await;
                         match ws_stream {
                             Ok(ws_stream) => {
                                 tracing::debug!(remote = %remote, "WebSocket client connected");
@@ -248,6 +253,16 @@ async fn handle_client(
 async fn handle_command(session: &SessionManager, cmd: ClientCommand) -> Result<()> {
     match cmd {
         ClientCommand::Cast { url } => {
+            // Validate URL scheme before casting.
+            match url::Url::parse(&url) {
+                Ok(parsed) => match parsed.scheme() {
+                    "http" | "https" => {},
+                    "file" => return Err(anyhow!("file:// URLs are not allowed")),
+                    "data" => return Err(anyhow!("data: URLs are not allowed")),
+                    scheme => return Err(anyhow!("unsupported URL scheme: {}", scheme)),
+                },
+                Err(e) => return Err(anyhow!("invalid URL: {}", e)),
+            }
             session.load(&url).await.map_err(|e| anyhow!("cast failed: {}", e))?;
         },
         ClientCommand::Stop => {
@@ -263,7 +278,8 @@ async fn handle_command(session: &SessionManager, cmd: ClientCommand) -> Result<
             session.seek(position_ms).await.map_err(|e| anyhow!("seek failed: {}", e))?;
         },
         ClientCommand::Volume { volume } => {
-            session.set_volume(volume).await.map_err(|e| anyhow!("volume failed: {}", e))?;
+            let clamped = volume.min(100);
+            session.set_volume(clamped).await.map_err(|e| anyhow!("volume failed: {}", e))?;
         },
         ClientCommand::Subtitle { lang } => {
             // Subtitle support deferred to v0.4.0.

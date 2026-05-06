@@ -491,36 +491,28 @@ impl SessionManager {
             .lock()
             .map_err(|e| SessionError::Subsystem(format!("db lock poisoned: {}", e)))?;
 
-        let session = db
+        // Collect raw values from the row inside the closure (which returns
+        // Result<_, rusqlite::Error>). Parsing/validation is done outside the
+        // closure so we can return SessionError instead of rusqlite::Error.
+        let raw = db
             .query_row(
                 "SELECT id, source_url, resolved_url, state, position_ms, duration_ms,
                     volume, title, created_at, updated_at
              FROM sessions WHERE id = ?1",
                 rusqlite::params![id.to_string()],
                 |row| {
-                    let id_str: String = row.get(0)?;
-                    let source_url: String = row.get(1)?;
-                    let resolved_url: Option<String> = row.get(2)?;
-                    let state_str: String = row.get(3)?;
-                    let position_ms: i64 = row.get(4)?;
-                    let duration_ms: Option<i64> = row.get(5)?;
-                    let volume: i32 = row.get(6)?;
-                    let title: Option<String> = row.get(7)?;
-                    let created_at_str: String = row.get(8)?;
-                    let updated_at_str: String = row.get(9)?;
-
-                    Ok(MediaSession {
-                        id: Uuid::parse_str(&id_str).unwrap(),
-                        source_url,
-                        resolved_url,
-                        state: state_str.parse().unwrap(),
-                        position_ms: position_ms as u64,
-                        duration_ms: duration_ms.map(|d| d as u64),
-                        volume: volume as u8,
-                        title,
-                        created_at: created_at_str.parse().unwrap(),
-                        updated_at: updated_at_str.parse().unwrap(),
-                    })
+                    Ok((
+                        row.get::<_, String>(0)?,
+                        row.get::<_, String>(1)?,
+                        row.get::<_, Option<String>>(2)?,
+                        row.get::<_, String>(3)?,
+                        row.get::<_, i64>(4)?,
+                        row.get::<_, Option<i64>>(5)?,
+                        row.get::<_, i32>(6)?,
+                        row.get::<_, Option<String>>(7)?,
+                        row.get::<_, String>(8)?,
+                        row.get::<_, String>(9)?,
+                    ))
                 },
             )
             .map_err(|e| match e {
@@ -528,7 +520,39 @@ impl SessionManager {
                 other => SessionError::Database(other),
             })?;
 
-        Ok(session)
+        let (id_str, source_url, resolved_url, state_str, position_ms, duration_ms, volume, title, created_at_str, updated_at_str) = raw;
+
+        let id = Uuid::parse_str(&id_str).map_err(|e| {
+            SessionError::Subsystem(format!("corrupt session ID '{}': {}", id_str, e))
+        })?;
+        let state: PlayerState = state_str.parse().map_err(|e| {
+            SessionError::Subsystem(format!("corrupt session state '{}': {}", state_str, e))
+        })?;
+        let volume_u8 = if volume < 0 || volume > 255 {
+            tracing::warn!(volume = volume, "corrupt volume in DB — clamping to 100");
+            100u8
+        } else {
+            volume as u8
+        };
+        let created_at = created_at_str.parse::<DateTime<Utc>>().map_err(|e| {
+            SessionError::Subsystem(format!("corrupt created_at '{}': {}", created_at_str, e))
+        })?;
+        let updated_at = updated_at_str.parse::<DateTime<Utc>>().map_err(|e| {
+            SessionError::Subsystem(format!("corrupt updated_at '{}': {}", updated_at_str, e))
+        })?;
+
+        Ok(MediaSession {
+            id,
+            source_url,
+            resolved_url,
+            state,
+            position_ms: position_ms as u64,
+            duration_ms: duration_ms.map(|d| d as u64),
+            volume: volume_u8,
+            title,
+            created_at,
+            updated_at,
+        })
     }
 
     /// Retrieve the state of a specific session by ID.
@@ -590,29 +614,35 @@ impl SessionManager {
     ///
     /// Returns the new session's UUID on success.
     pub async fn load(&self, url: &str) -> Result<Uuid, SessionError> {
-        // Check if a session is already active.
-        {
-            let guard = self
+        // Atomically check no active session and reserve the slot.
+        let session_id = {
+            let mut guard = self
                 .active_session_id
                 .lock()
                 .map_err(|e| SessionError::Subsystem(format!("lock poisoned: {}", e)))?;
             if guard.is_some() {
                 return Err(SessionError::AlreadyActive);
             }
-        }
+            let id = Uuid::new_v4();
+            *guard = Some(id);
+            id
+        };
 
-        // Create the session in Idle state.
+        // Create the session in Idle state (outside the lock to avoid holding it during DB I/O).
         let mut session = MediaSession::new(url.to_owned());
+        session.id = session_id;
         session.state = PlayerState::Idle;
-        self.insert_session(&session)?;
 
-        // Mark as the active session.
-        {
-            let mut guard = self
-                .active_session_id
-                .lock()
-                .map_err(|e| SessionError::Subsystem(format!("lock poisoned: {}", e)))?;
-            *guard = Some(session.id);
+        // If DB insert fails, clear the reserved slot.
+        if let Err(e) = self.insert_session(&session) {
+            {
+                let mut guard = self
+                    .active_session_id
+                    .lock()
+                    .map_err(|e2| SessionError::Subsystem(format!("lock poisoned: {}", e2)))?;
+                *guard = None;
+            }
+            return Err(e);
         }
 
         let id = session.id;
@@ -628,6 +658,7 @@ impl SessionManager {
             resolver.resolve(url).await.map_err(|e| {
                 // Transition to Error state on resolution failure.
                 let _ = self.try_transition(id, PlayerState::Error);
+                let _ = self.clear_active_session();
                 SessionError::ResolutionFailed(e.to_string())
             })?
         } else {
@@ -679,6 +710,7 @@ impl SessionManager {
 
             playback.play(&direct_url, &socks_addr, &isolation_username).await.map_err(|e| {
                 let _ = self.try_transition(id, PlayerState::Error);
+                let _ = self.clear_active_session();
                 SessionError::PlaybackError(e.to_string())
             })?;
         }
@@ -700,13 +732,13 @@ impl SessionManager {
     pub async fn pause(&self) -> Result<(), SessionError> {
         let id = self.active_session_id()?;
 
-        // Transition: Playing → Paused.
-        self.try_transition(id, PlayerState::Paused)?;
-
-        // Delegate to playback subsystem.
+        // Delegate to playback subsystem first — only update DB state on success.
         if let Some(ref playback) = self.playback {
             playback.pause().await.map_err(|e| SessionError::PlaybackError(e.to_string()))?;
         }
+
+        // Transition: Playing → Paused (after subsystem confirms success).
+        self.try_transition(id, PlayerState::Paused)?;
 
         // Push latest state to watch channel.
         if let Ok(session) = self.load_session(id) {
@@ -722,13 +754,13 @@ impl SessionManager {
     pub async fn resume(&self) -> Result<(), SessionError> {
         let id = self.active_session_id()?;
 
-        // Transition: Paused → Playing.
-        self.try_transition(id, PlayerState::Playing)?;
-
-        // Delegate to playback subsystem.
+        // Delegate to playback subsystem first — only update DB state on success.
         if let Some(ref playback) = self.playback {
             playback.resume().await.map_err(|e| SessionError::PlaybackError(e.to_string()))?;
         }
+
+        // Transition: Paused → Playing (after subsystem confirms success).
+        self.try_transition(id, PlayerState::Playing)?;
 
         // Push latest state to watch channel.
         if let Ok(session) = self.load_session(id) {
@@ -803,7 +835,7 @@ impl SessionManager {
         // Broadcast seek event.
         let _ = self.event_tx.send(SessionEvent::Seeking { id, position_ms });
 
-        // Delegate to playback subsystem.
+        // Delegate to playback subsystem first — only update DB state on success.
         if let Some(ref playback) = self.playback {
             playback
                 .seek(position_ms)
@@ -880,6 +912,16 @@ impl SessionManager {
             .lock()
             .map_err(|e| SessionError::Subsystem(format!("lock poisoned: {}", e)))?;
         guard.ok_or(SessionError::NoActiveSession)
+    }
+
+    /// Clear the active session ID (used on error/cleanup paths).
+    fn clear_active_session(&self) -> Result<(), SessionError> {
+        let mut guard = self
+            .active_session_id
+            .lock()
+            .map_err(|e| SessionError::Subsystem(format!("lock poisoned: {}", e)))?;
+        *guard = None;
+        Ok(())
     }
 
     /// Delete a session from SQLite.

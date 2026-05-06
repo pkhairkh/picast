@@ -345,6 +345,18 @@ impl DisplayManager {
 
         // Select the best CRTC for our connector.
         let crtc = self.crtcs.first().ok_or(DisplayError::NoCrtc)?.clone();
+
+        // Save current CRTC state for restoration on release().
+        let crtc_handle = drm::control::crtc::Handle::from_raw(crtc.crtc_id);
+        let crtc_info = drm::control::crtc::Info::from_device(fd, crtc_handle).ok();
+        self.saved_crtc = Some(SavedCrtcState {
+            crtc_id: crtc.crtc_id,
+            fb_id: crtc_info.as_ref().and_then(|i| i.framebuffer().map(|fb| fb.into())),
+            mode: crtc_info.as_ref().and_then(|i| i.mode()),
+            x: 0,
+            y: 0,
+        });
+
         self.active_crtc = Some(crtc.clone());
 
         tracing::info!(
@@ -362,8 +374,37 @@ impl DisplayManager {
     /// an inconsistent state.
     pub fn release(&mut self) -> Result<(), DisplayError> {
         if let Some(ref saved) = self.saved_crtc {
-            tracing::info!(crtc_id = saved.crtc_id, "restoring saved CRTC state");
-            // Restore would go here with actual atomic commit.
+            tracing::info!(
+                crtc_id = saved.crtc_id,
+                fb_id = ?saved.fb_id,
+                has_mode = saved.mode.is_some(),
+                "restoring saved CRTC state"
+            );
+            // Restore CRTC state via atomic modeset.
+            // This requires the DRM fd to still be valid.
+            if let Some(ref fd) = self.drm_fd {
+                let crtc_handle = drm::control::crtc::Handle::from_raw(saved.crtc_id);
+                if let Some(mode) = saved.mode {
+                    let restore_result = drm::control::crtc::set(
+                        fd,
+                        crtc_handle,
+                        saved.fb_id.map(|id| drm::control::framebuffer::Handle::from_raw(id)),
+                        &mode,
+                    );
+                    match restore_result {
+                        Ok(()) => tracing::info!(crtc_id = saved.crtc_id, "CRTC state restored"),
+                        Err(e) => tracing::warn!(
+                            crtc_id = saved.crtc_id,
+                            error = %e,
+                            "failed to restore CRTC state"
+                        ),
+                    }
+                } else {
+                    tracing::warn!(crtc_id = saved.crtc_id, "no saved mode — cannot restore CRTC");
+                }
+            } else {
+                tracing::warn!("DRM fd no longer available — cannot restore CRTC state");
+            }
         }
         self.active_crtc = None;
         self.saved_crtc = None;
