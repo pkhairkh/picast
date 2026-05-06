@@ -535,7 +535,7 @@ impl SessionManager {
         let state: PlayerState = state_str.parse().map_err(|e| {
             SessionError::Subsystem(format!("corrupt session state '{}': {}", state_str, e))
         })?;
-        let volume_u8 = if volume < 0 || volume > 255 {
+        let volume_u8 = if !(0..=255).contains(&volume) {
             tracing::warn!(volume = volume, "corrupt volume in DB — clamping to 100");
             100u8
         } else {
@@ -747,11 +747,10 @@ impl SessionManager {
                 })
                 .unwrap_or_default();
 
-            playback.play(&resolve_info.direct_url, &socks_addr, &isolation_username).await.map_err(|e| SessionError::PlaybackError(e.to_string())).map_err(|e| {
+            playback.play(&resolve_info.direct_url, &socks_addr, &isolation_username).await.map_err(|e| SessionError::PlaybackError(e.to_string())).inspect_err(|_| {
                 // Transition to Error state on playback failure.
                 let _ = self.try_transition(id, PlayerState::Error);
                 let _ = self.clear_active_session();
-                e
             })?;
         }
 
