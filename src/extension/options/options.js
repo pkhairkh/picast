@@ -3,6 +3,12 @@
  *
  * Manages the settings UI: load/save/reset preferences,
  * test connection to PiCast receiver.
+ *
+ * Firefox MV3 note: optional_host_permissions ("http://*/*") must be
+ * explicitly granted by the user via chrome.permissions.request().
+ * The "Test Connection" flow requests this permission if needed,
+ * then routes the health-check through the background script to
+ * avoid CSP/CORS issues in extension pages.
  */
 
 "use strict";
@@ -127,6 +133,57 @@ function resetSettings() {
   });
 }
 
+// ─── Host Permission Helpers ───────────────────────────────────────
+
+/**
+ * Determine the origin pattern needed for a given host.
+ * - *.local hosts are covered by the mandatory host_permissions.
+ * - IP addresses and other hostnames need optional_host_permissions.
+ */
+function needsOptionalPermission(host) {
+  // *.local hosts are covered by "http://*.local/*" in host_permissions
+  if (host.endsWith(".local")) return false;
+  // Everything else (IP addresses, .lan, etc.) needs optional permission
+  return true;
+}
+
+/**
+ * Request the optional "http://*/*" host permission.
+ * Must be called from a user-gesture handler (button click).
+ * Returns true if permission was granted (or already held).
+ */
+async function requestHostPermission(host) {
+  const origin = `http://${host}/*`;
+
+  // Check if we already have it
+  const hasPermission = await new Promise((resolve) => {
+    chrome.permissions.contains({ origins: [origin] }, resolve);
+  });
+  if (hasPermission) return true;
+
+  // We also try the broader pattern as a fallback
+  const broadOrigin = "http://*/*";
+  const hasBroadPermission = await new Promise((resolve) => {
+    chrome.permissions.contains({ origins: [broadOrigin] }, resolve);
+  });
+  if (hasBroadPermission) return true;
+
+  // Request the specific origin first (less scary to the user)
+  console.log("[PiCast Options] Requesting host permission for", origin);
+  const granted = await new Promise((resolve) => {
+    chrome.permissions.request({ origins: [origin] }, resolve);
+  });
+
+  if (granted) return true;
+
+  // Fallback: try the broad pattern
+  console.log("[PiCast Options] Specific origin denied, trying broad pattern");
+  const broadGranted = await new Promise((resolve) => {
+    chrome.permissions.request({ origins: [broadOrigin] }, resolve);
+  });
+  return broadGranted;
+}
+
 // ─── Test Connection ───────────────────────────────────────────────
 
 async function testConnection() {
@@ -140,7 +197,6 @@ async function testConnection() {
     // Not a URL, use as-is
   }
   const port = parseInt(httpPort.value, 10) || DEFAULTS.httpPort;
-  const url = `http://${host}:${port}/api/health`;
 
   testBtn.disabled = true;
   testBtn.textContent = "Testing\u2026";
@@ -148,30 +204,44 @@ async function testConnection() {
   testResult.className = "test-result";
 
   try {
-    const controller = new AbortController();
-    const timeout = setTimeout(() => controller.abort(), 5000);
+    // Step 1: Ensure we have host permission for this target
+    if (needsOptionalPermission(host)) {
+      testResult.textContent = "Requesting permission\u2026";
+      testResult.className = "test-result";
 
-    const response = await fetch(url, { signal: controller.signal });
-    clearTimeout(timeout);
-
-    if (response.ok) {
-      const data = await response.json();
-      if (data.status === "ok") {
-        testResult.textContent = "\u2713 Connected successfully!";
-        testResult.className = "test-result success";
-      } else {
-        testResult.textContent = `\u26A0 Unexpected response: ${JSON.stringify(data)}`;
+      const granted = await requestHostPermission(host);
+      if (!granted) {
+        testResult.textContent = "\u2717 Permission denied. The extension needs access to http:// URLs to connect to your Pi.";
         testResult.className = "test-result error";
+        return;
       }
+    }
+
+    // Step 2: Route the health check through the background script
+    // (avoids Firefox CSP/CORS issues with fetch() from extension pages)
+    testResult.textContent = "Connecting\u2026";
+    const result = await new Promise((resolve, reject) => {
+      chrome.runtime.sendMessage(
+        { type: "TEST_CONNECTION", host, port },
+        (response) => {
+          if (chrome.runtime.lastError) {
+            reject(new Error(chrome.runtime.lastError.message));
+            return;
+          }
+          resolve(response);
+        }
+      );
+    });
+
+    if (result && result.success) {
+      testResult.textContent = `\u2713 ${result.message}`;
+      testResult.className = "test-result success";
     } else {
-      testResult.textContent = `\u2717 HTTP ${response.status}`;
+      testResult.textContent = `\u2717 Connection failed: ${result?.error || "Unknown error"}`;
       testResult.className = "test-result error";
     }
   } catch (err) {
-    const msg = err.name === "AbortError"
-      ? "Connection timed out (5s)"
-      : err.message;
-    testResult.textContent = `\u2717 Connection failed: ${msg}`;
+    testResult.textContent = `\u2717 Error: ${err.message}`;
     testResult.className = "test-result error";
   } finally {
     testBtn.disabled = false;

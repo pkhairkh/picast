@@ -796,6 +796,27 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
       sendResponse({ success: true });
       return false;
 
+    case "TEST_CONNECTION": {
+      const testHost = message.host;
+      const testPort = message.port;
+      testConnectionFromBackground(testHost, testPort)
+        .then((result) => sendResponse(result))
+        .catch((err) => sendResponse({ success: false, error: err.message }));
+      return true;
+    }
+
+    case "GRANT_PERMISSION": {
+      // This must be called from a user-gesture context (popup/options)
+      // We can't call chrome.permissions.request() from the background script,
+      // so the options page should handle this directly. This handler is a
+      // fallback that checks current permission status.
+      const origin = message.origin;
+      chrome.permissions.contains({ origins: [origin] }, (hasPermission) => {
+        sendResponse({ hasPermission });
+      });
+      return true;
+    }
+
     case "DISCOVER":
       discoverPiCast().then((result) => {
         sendResponse({ success: true, discovered: result });
@@ -807,6 +828,41 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
       return false;
   }
 });
+
+// ─── Connection Test (background context) ────────────────────────
+
+/**
+ * Test connection to a PiCast receiver from the background script.
+ * This avoids Firefox CSP/CORS issues with fetch() from extension pages.
+ */
+async function testConnectionFromBackground(host, port) {
+  const url = `http://${host}:${port}/api/health`;
+  const controller = new AbortController();
+  const timeout = setTimeout(() => controller.abort(), 5000);
+
+  try {
+    const response = await fetch(url, {
+      method: "GET",
+      signal: controller.signal,
+    });
+    clearTimeout(timeout);
+
+    if (response.ok) {
+      const data = await response.json();
+      if (data.status === "ok") {
+        return { success: true, message: "Connected successfully!" };
+      }
+      return { success: false, error: `Unexpected response: ${JSON.stringify(data)}` };
+    }
+    return { success: false, error: `HTTP ${response.status}` };
+  } catch (err) {
+    clearTimeout(timeout);
+    if (err.name === "AbortError") {
+      return { success: false, error: "Connection timed out (5s)" };
+    }
+    return { success: false, error: err.message || "Network error" };
+  }
+}
 
 // ─── Discovery ────────────────────────────────────────────────────
 
