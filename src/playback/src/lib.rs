@@ -125,6 +125,20 @@ pub struct PipelineConfig {
     /// but plane numbering varies by kernel version and vc4 configuration.
     #[serde(default = "default_plane_id")]
     pub plane_id: u32,
+    /// DRM connector ID for kmssink (e.g. 33 for HDMI-A-1 on Pi 4).
+    /// When `None`, kmssink auto-detects the first connected connector.
+    /// Setting this explicitly avoids misdetection on multi-output setups.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub connector_id: Option<u32>,
+    /// Pre-opened DRM device file descriptor for kmssink.
+    /// When `Some`, kmssink uses this fd instead of opening the device
+    /// itself, which guarantees it shares our DRM master and can modeset.
+    /// When `None`, kmssink opens the device itself.
+    ///
+    /// This field is not serialized — it's set programmatically at
+    /// runtime from the DisplayManager.
+    #[serde(skip)]
+    pub drm_fd: Option<i32>,
 }
 
 impl Default for PipelineConfig {
@@ -136,6 +150,8 @@ impl Default for PipelineConfig {
             hw_accel: true,
             volume: 1.0,
             plane_id: 0,
+            connector_id: None,
+            drm_fd: None,
         }
     }
 }
@@ -291,6 +307,39 @@ impl PlaybackEngine {
     /// idle state with no pipeline loaded.
     pub fn new(config: PipelineConfig) -> Result<Self, PlaybackError> {
         // GStreamer init is deferred to pipeline construction.
+
+        // Start a GLib main loop in a background thread so that
+        // GStreamer bus watch callbacks are dispatched.  Without a
+        // running main loop, `Bus::add_watch()` attaches a source to
+        // the default main context that is never iterated, so bus
+        // messages (errors, state changes, buffering) are silently
+        // dropped — leaving us completely blind to pipeline failures.
+        #[cfg(feature = "hw")]
+        {
+            static GLIB_MAIN_LOOP: std::sync::OnceLock<()> = std::sync::OnceLock::new();
+            GLIB_MAIN_LOOP.get_or_init(|| {
+                std::thread::Builder::new()
+                    .name("glib-main-loop".into())
+                    .spawn(|| {
+                        let context = gstreamer::glib::MainContext::default();
+                        if context.acquire() {
+                            let main_loop = gstreamer::glib::MainLoop::new(Some(&context), false);
+                            tracing::info!(
+                                "GLib main loop started — bus watch callbacks will be dispatched"
+                            );
+                            main_loop.run();
+                        } else {
+                            tracing::error!(
+                                "Failed to acquire GLib main context — \
+                                 bus watch callbacks will NOT be dispatched. \
+                                 Pipeline errors and state changes will go unreported."
+                            );
+                        }
+                    })
+                    .expect("Failed to spawn GLib main loop thread");
+            });
+        }
+
         #[cfg(not(feature = "hw"))]
         let initial_volume = config.volume;
         #[cfg(not(feature = "hw"))]
@@ -423,7 +472,23 @@ impl PlaybackEngine {
 
             match msg.view() {
                 MessageView::StateChanged(s) => {
+                    let old_state = s.old();
                     let new_state = s.current();
+                    let pending = s.pending();
+
+                    // Log all state transitions at info level for
+                    // diagnostics — the async Ready→Paused→Playing
+                    // transition is the critical path and failures
+                    // here explain why video never appears.
+                    if new_state != old_state {
+                        tracing::info!(
+                            old = ?old_state,
+                            new = ?new_state,
+                            pending = ?pending,
+                            source = %msg.src().map(|s| s.path_string()).unwrap_or_default(),
+                            "pipeline state change"
+                        );
+                    }
 
                     if new_state == State::Playing {
                         let _ = event_tx.send(PlaybackEvent::Playing);
@@ -441,11 +506,7 @@ impl PlaybackEngine {
                 MessageView::Error(e) => {
                     let msg = e.error().to_string();
                     let debug_info = e.debug().map(|d| d.to_string());
-                    let source_element = e.src().map(|s| {
-                        let path = s.path_string();
-                        // Shorten the path to just the element name for readability.
-                        path.rsplit(':').next().unwrap_or(&path).to_string()
-                    });
+                    let source_element = e.src().map(|s| s.path_string());
                     tracing::error!(
                         error = %msg,
                         debug = ?debug_info,
@@ -478,6 +539,14 @@ impl PlaybackEngine {
                 MessageView::Latency(_l) => {
                     // Latency message — not forwarding in v1.
                 },
+                MessageView::Warning(w) => {
+                    let msg = w.error().to_string();
+                    tracing::warn!(
+                        warning = %msg,
+                        source = %msg.src().map(|s| s.path_string()).unwrap_or_default(),
+                        "GStreamer warning"
+                    );
+                },
                 _ => {},
             }
 
@@ -500,6 +569,27 @@ impl PlaybackEngine {
             Ok(()) => {
                 tracing::info!("pipeline started successfully (hw_accel={})", self.config.hw_accel);
                 *guard = Some(pipeline);
+
+                // Spawn a diagnostic task that checks the actual pipeline
+                // state after a few seconds.  When `set_state(Playing)`
+                // returns `Ok(Async)`, the pipeline is transitioning
+                // asynchronously and may never reach Playing if preroll
+                // fails (e.g. kmssink can't get DRM master).  This check
+                // surfaces such failures in the logs.
+                let pipeline_weak_diag = guard.as_ref().unwrap().pipeline().downgrade();
+                tokio::spawn(async move {
+                    tokio::time::sleep(std::time::Duration::from_secs(5)).await;
+                    if let Some(pipe) = pipeline_weak_diag.upgrade() {
+                        let (result, current, pending) = pipe.state(gstreamer::ClockTime::from_mseconds(0));
+                        tracing::info!(
+                            result = ?result,
+                            current = ?current,
+                            pending = ?pending,
+                            "pipeline state check after 5s"
+                        );
+                    }
+                });
+
                 Ok(())
             },
             Err(PlaybackError::Gstreamer(ref msg)) if self.config.hw_accel && is_negotiation_error(msg) => {
@@ -582,7 +672,20 @@ impl PlaybackEngine {
 
             match msg.view() {
                 MessageView::StateChanged(s) => {
+                    let old_state = s.old();
                     let new_state = s.current();
+                    let pending = s.pending();
+
+                    if new_state != old_state {
+                        tracing::info!(
+                            old = ?old_state,
+                            new = ?new_state,
+                            pending = ?pending,
+                            source = %msg.src().map(|s| s.path_string()).unwrap_or_default(),
+                            "pipeline state change (SW decode)"
+                        );
+                    }
+
                     if new_state == State::Playing {
                         let _ = event_tx.send(PlaybackEvent::Playing);
                         is_playing.store(true, Ordering::Relaxed);
@@ -602,10 +705,19 @@ impl PlaybackEngine {
                     tracing::error!(
                         error = %msg,
                         debug = ?debug_info,
+                        source = %msg.src().map(|s| s.path_string()).unwrap_or_default(),
                         "GStreamer error (SW decode fallback)"
                     );
                     let _ = event_tx.send(PlaybackEvent::Error { message: msg, debug: debug_info });
                     is_playing.store(false, Ordering::Relaxed);
+                },
+                MessageView::Warning(w) => {
+                    let msg = w.error().to_string();
+                    tracing::warn!(
+                        warning = %msg,
+                        source = %msg.src().map(|s| s.path_string()).unwrap_or_default(),
+                        "GStreamer warning (SW decode)"
+                    );
                 },
                 MessageView::Buffering(b) => {
                     let percent = b.percent() as u8;

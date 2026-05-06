@@ -341,13 +341,24 @@ impl GstPipeline {
                     let sink_pad =
                         vbin.static_pad("sink").expect("video bin should have a sink pad");
                     if sink_pad.is_linked() {
-                        tracing::debug!("video pad already linked, skipping");
+                        tracing::info!("video pad already linked, skipping");
                         return;
                     }
+                    let caps_str = caps
+                        .as_ref()
+                        .map(|c| c.to_string())
+                        .unwrap_or_default();
                     if let Err(e) = pad.link(&sink_pad) {
-                        tracing::error!("failed to link parsebin video pad: {:?}", e);
+                        tracing::error!(
+                            error = ?e,
+                            caps = %caps_str,
+                            "failed to link parsebin video pad"
+                        );
                     } else {
-                        tracing::debug!("linked parsebin → video bin");
+                        tracing::info!(
+                            caps = %caps_str,
+                            "linked parsebin → video bin"
+                        );
                     }
                 }
             } else if is_audio {
@@ -355,11 +366,18 @@ impl GstPipeline {
                     let sink_pad =
                         aq.static_pad("sink").expect("audio_queue should have a sink pad");
                     if sink_pad.is_linked() {
-                        tracing::debug!("audio pad already linked, skipping");
+                        tracing::info!("audio pad already linked, skipping");
                         return;
                     }
+                    let caps_str = caps
+                        .as_ref()
+                        .map(|c| c.to_string())
+                        .unwrap_or_default();
                     match pad.link(&sink_pad) {
-                        Ok(_) => tracing::debug!("linked parsebin → audio_queue"),
+                        Ok(_) => tracing::info!(
+                            caps = %caps_str,
+                            "linked parsebin → audio_queue"
+                        ),
                         Err(e) => {
                             // Audio pad can't link to the audio chain (e.g. unsupported
                             // codec, missing decoder).  An unlinked pad causes GStreamer
@@ -465,9 +483,6 @@ impl GstPipeline {
         let mut kmssink_builder = ElementFactory::make(&config.video_sink)
             .property_from_str("driver-name", "vc4")
             .property("can-scale", true);
-            // NOTE: force-modesetting removed — it can conflict with an
-            // already-running display server or console framebuffer.
-            // kmssink will modeset automatically when it acquires DRM master.
 
         // Only set plane-id if explicitly configured (> 0).
         // When plane-id is 0 (default), kmssink auto-detects the best
@@ -477,6 +492,28 @@ impl GstPipeline {
             tracing::info!(plane_id = config.plane_id, "kmssink: using explicit plane-id");
         } else {
             tracing::info!("kmssink: auto-detecting overlay plane (plane-id not set)");
+        }
+
+        // Set connector-id if known — this ensures kmssink renders to
+        // the correct HDMI output.  Without it, kmssink auto-detects
+        // the first connected connector, which is usually correct but
+        // can fail on multi-monitor setups.
+        if let Some(conn_id) = config.connector_id {
+            if conn_id > 0 {
+                kmssink_builder = kmssink_builder.property("connector-id", conn_id as i32);
+                tracing::info!(connector_id = conn_id, "kmssink: using explicit connector-id");
+            }
+        }
+
+        // If the DisplayManager passed us a DRM fd, tell kmssink to use
+        // it instead of opening the device itself.  This avoids the race
+        // where our process still holds the device open (even without
+        // master) and kmssink can't acquire master as a subsequent opener.
+        if let Some(drm_fd) = config.drm_fd {
+            if drm_fd >= 0 {
+                kmssink_builder = kmssink_builder.property("fd", drm_fd);
+                tracing::info!(fd = drm_fd, "kmssink: using provided DRM fd");
+            }
         }
 
         let kmssink = kmssink_builder.build().map_err(|e| {

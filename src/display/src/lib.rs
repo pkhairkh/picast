@@ -489,13 +489,30 @@ impl DisplayManager {
         // Drop DRM master so kmssink (GStreamer) can acquire it for playback.
         // If we hold master, kmssink's set_state(Playing) will fail because
         // only one FD can be DRM master at a time.
+        //
+        // We also close our DRM device fd entirely.  When our process
+        // still has the device open (even without master), kmssink opens
+        // the device as a *subsequent* opener and does NOT automatically
+        // get DRM master.  On Linux ≥ 4.17, drmSetMaster() requires
+        // either the caller to be the current master or have CAP_SYS_ADMIN.
+        // Even with CAP_SYS_ADMIN, drmSetMaster returns EBUSY if another
+        // process already holds master — which is the case when fbcon
+        // (framebuffer console) is still bound to the vc4 device.
+        //
+        // By closing our fd completely, kmssink becomes the *first* (and
+        // only) opener of the DRM device and is automatically granted
+        // DRM master by the kernel — no drmSetMaster() call needed.
+        // The saved CRTC state is preserved in self.saved_crtc for
+        // restoration in release(), which re-opens the device.
         if has_master {
             if let Err(e) = fd.release_master_lock() {
                 tracing::warn!(error = %e, "failed to drop DRM master after saving CRTC state");
-            } else {
-                tracing::info!("released DRM master — kmssink can now acquire it");
             }
         }
+        // Close our fd so kmssink opens the device fresh and gets DRM
+        // master automatically as the first opener.
+        self.drm_fd = None;
+        tracing::info!("closed DRM device fd — kmssink will open it fresh and acquire DRM master automatically");
 
         Ok(())
     }
@@ -513,7 +530,26 @@ impl DisplayManager {
                 "restoring saved CRTC state"
             );
             // Restore CRTC state via set_crtc.
-            // This requires the DRM fd to still be valid.
+            // This requires the DRM fd to be valid.  If we closed the fd
+            // in acquire() (to let kmssink become the first opener and get
+            // DRM master automatically), re-open the device now.  The
+            // pipeline should have been stopped (NULL state) by this point,
+            // so kmssink has released its fd and the kernel has dropped
+            // DRM master — we can re-open and acquire master ourselves.
+            if self.drm_fd.is_none() {
+                tracing::info!("re-opening DRM device for CRTC restoration");
+                let file = OpenOptions::new()
+                    .read(true)
+                    .write(true)
+                    .open(&self.device_path)
+                    .map_err(|e| {
+                        DisplayError::DeviceOpen(format!(
+                            "re-open {} for CRTC restore: {}",
+                            self.device_path, e
+                        ))
+                    })?;
+                self.drm_fd = Some(Card(file));
+            }
             if let Some(ref fd) = self.drm_fd {
                 // Re-acquire DRM master temporarily to restore the CRTC.
                 // kmssink should have released it when the pipeline went to
@@ -602,6 +638,25 @@ impl DisplayManager {
     /// Return the active CRTC, if any.
     pub fn active_crtc(&self) -> Option<&DrmCrtc> {
         self.active_crtc.as_ref()
+    }
+
+    /// Return the connector ID of the first connected display, if known.
+    ///
+    /// Only available after `acquire()` has been called.
+    pub fn active_connector_id(&self) -> Option<u32> {
+        self.connectors
+            .iter()
+            .find(|c| c.connected)
+            .map(|c| c.connector_id)
+    }
+
+    /// Return the raw DRM device file descriptor, if the device is open.
+    ///
+    /// Returns `None` after `acquire()` closes the fd to let kmssink
+    /// open the device fresh (see acquire() documentation).
+    #[cfg(feature = "hw")]
+    pub fn drm_fd(&self) -> Option<i32> {
+        self.drm_fd.as_ref().map(|card| card.as_raw_fd())
     }
 
     /// Clear the screen by filling the primary plane with black.
