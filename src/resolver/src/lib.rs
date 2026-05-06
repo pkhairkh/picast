@@ -22,6 +22,7 @@
 
 pub mod cache;
 pub mod classifier;
+pub mod custom;
 pub mod ytdlp;
 
 pub use classifier::UrlCategory;
@@ -273,8 +274,22 @@ impl Resolver {
                 result
             },
             UrlCategory::WebPage => {
-                // Web page URLs require yt-dlp to extract the direct media URL.
-                // Route through Tor SOCKS proxy for circuit isolation.
+                // Check custom resolvers first (Voe, DoodStream, etc.)
+                if let Some(host) = parsed.host_str() {
+                    if custom::is_voe_domain(host) {
+                        tracing::info!(url = url, resolver = "voe", "using Voe custom resolver");
+                        let mut result = custom::resolve_voe(url).await?;
+                        result.category = UrlCategory::WebPage;
+                        return Ok(result);
+                    }
+                    if custom::is_doodstream_domain(host) {
+                        tracing::info!(url = url, resolver = "doodstream", "using DoodStream custom resolver");
+                        let mut result = custom::resolve_doodstream(url).await?;
+                        result.category = UrlCategory::WebPage;
+                        return Ok(result);
+                    }
+                }
+                // Fall back to yt-dlp for all other web page URLs.
                 let mut result = self.resolve_webpage(url).await?;
                 result.category = UrlCategory::WebPage;
                 result

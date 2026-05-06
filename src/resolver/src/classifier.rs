@@ -93,6 +93,16 @@ const WEB_PAGE_DOMAINS: &[&str] = &[
     "reddit.com",
     "www.reddit.com",
     "streamable.com",
+    // Voe CDN front-end domains (handled by custom resolver)
+    "voe.sx",
+    "charlessheimprove.com",
+    // DoodStream front-end domains (handled by custom resolver)
+    "playmogo.com",
+    "doodstream.com",
+    "dood.to",
+    "dood.watch",
+    "dood.la",
+    "dood.ws",
 ];
 
 /// File extensions that indicate a direct media file.
