@@ -12,6 +12,7 @@ SupplementaryGroups=video render audio
 Environment=RUST_LOG=picast=info
 Environment=HOME=/var/lib/picast
 Environment=XDG_CACHE_HOME=/var/lib/picast/.cache
+Environment=TMPDIR=/tmp/picast
 ExecStart=/usr/local/bin/picast-server --config /etc/picast/picast.toml
 NotifyAccess=all
 
