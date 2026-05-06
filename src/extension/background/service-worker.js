@@ -860,6 +860,23 @@ async function testConnectionFromBackground(host, port) {
     if (err.name === "AbortError") {
       return { success: false, error: "Connection timed out (5s)" };
     }
+    // Detect Firefox HTTPS-Only upgrade: fetch to http:// fails because
+    // Firefox silently upgrades to https:// and the server has no TLS.
+    // The error is typically TypeError with "NetworkError" or "Failed to fetch".
+    if (
+      err.message.includes("NetworkError") ||
+      err.message.includes("Failed to fetch") ||
+      err.name === "TypeError"
+    ) {
+      return {
+        success: false,
+        error:
+          "Firefox HTTPS-Only Mode is upgrading http:// to https://. " +
+          "Go to about:preferences#privacy, find HTTPS-Only Mode, " +
+          "and add an exception for " + host + ". " +
+          "Or disable HTTPS-Only Mode entirely.",
+      };
+    }
     return { success: false, error: err.message || "Network error" };
   }
 }
@@ -897,7 +914,18 @@ async function discoverPiCast() {
       }
     }
   } catch (e) {
-    console.warn("[PiCast] Discovery failed for", base, e.message);
+    if (
+      e.message.includes("NetworkError") ||
+      e.message.includes("Failed to fetch") ||
+      e.name === "TypeError"
+    ) {
+      console.warn(
+        "[PiCast] Discovery failed — likely Firefox HTTPS-Only upgrade.",
+        "Add an exception in about:preferences#privacy for", config.piHost
+      );
+    } else {
+      console.warn("[PiCast] Discovery failed for", base, e.message);
+    }
     isConnected = false;
     updateBadge("disconnected");
   }
