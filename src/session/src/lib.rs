@@ -1966,4 +1966,398 @@ mod tests {
             assert_eq!(result.unwrap().state, PlayerState::Playing);
         }
     }
+
+    // ══════════════════════════════════════════════════════════════════
+    // NEW COMPREHENSIVE TESTS
+    // ══════════════════════════════════════════════════════════════════
+
+    // ── 1. State transition validation ───────────────────────────────
+
+    #[test]
+    fn test_idle_to_resolving_valid() {
+        assert!(PlayerState::Idle.can_transition_to(PlayerState::Resolving));
+        assert!(PlayerState::Idle.transition(PlayerState::Resolving).is_ok());
+    }
+
+    #[test]
+    fn test_idle_to_playing_invalid() {
+        assert!(!PlayerState::Idle.can_transition_to(PlayerState::Playing));
+        let err = PlayerState::Idle.transition(PlayerState::Playing).unwrap_err();
+        assert!(matches!(
+            err,
+            SessionError::InvalidTransition { from: PlayerState::Idle, to: PlayerState::Playing }
+        ));
+    }
+
+    #[test]
+    fn test_playing_to_paused_valid() {
+        assert!(PlayerState::Playing.can_transition_to(PlayerState::Paused));
+        assert!(PlayerState::Playing.transition(PlayerState::Paused).is_ok());
+    }
+
+    #[test]
+    fn test_playing_to_seeking_valid() {
+        assert!(PlayerState::Playing.can_transition_to(PlayerState::Seeking));
+        assert!(PlayerState::Playing.transition(PlayerState::Seeking).is_ok());
+    }
+
+    #[test]
+    fn test_paused_to_playing_valid() {
+        assert!(PlayerState::Paused.can_transition_to(PlayerState::Playing));
+        assert!(PlayerState::Paused.transition(PlayerState::Playing).is_ok());
+    }
+
+    #[test]
+    fn test_paused_to_seeking_valid() {
+        assert!(PlayerState::Paused.can_transition_to(PlayerState::Seeking));
+        assert!(PlayerState::Paused.transition(PlayerState::Seeking).is_ok());
+    }
+
+    #[test]
+    fn test_seeking_to_playing_valid() {
+        assert!(PlayerState::Seeking.can_transition_to(PlayerState::Playing));
+        assert!(PlayerState::Seeking.transition(PlayerState::Playing).is_ok());
+    }
+
+    #[test]
+    fn test_seeking_to_paused_invalid() {
+        assert!(!PlayerState::Seeking.can_transition_to(PlayerState::Paused));
+        let err = PlayerState::Seeking.transition(PlayerState::Paused).unwrap_err();
+        assert!(matches!(
+            err,
+            SessionError::InvalidTransition { from: PlayerState::Seeking, to: PlayerState::Paused }
+        ));
+    }
+
+    #[test]
+    fn test_error_to_idle_valid() {
+        assert!(PlayerState::Error.can_transition_to(PlayerState::Idle));
+        assert!(PlayerState::Error.transition(PlayerState::Idle).is_ok());
+    }
+
+    #[test]
+    fn test_error_to_playing_invalid() {
+        assert!(!PlayerState::Error.can_transition_to(PlayerState::Playing));
+        let err = PlayerState::Error.transition(PlayerState::Playing).unwrap_err();
+        assert!(matches!(
+            err,
+            SessionError::InvalidTransition { from: PlayerState::Error, to: PlayerState::Playing }
+        ));
+    }
+
+    // ── 2. Session lifecycle with mock subsystems ────────────────────
+
+    #[tokio::test]
+    async fn test_lifecycle_load_with_mock_resolver_succeeds() {
+        let mgr = session_manager_with_mocks();
+        let id = mgr.load("https://example.com/video.mp4").await.unwrap();
+
+        let session = mgr.load_session(id).unwrap();
+        assert_eq!(session.state, PlayerState::Playing);
+        assert_eq!(
+            session.resolved_url,
+            Some("https://example.com/video.mp4?direct=1".to_string())
+        );
+    }
+
+    #[tokio::test]
+    async fn test_lifecycle_load_returns_already_active_if_called_twice() {
+        let mgr = session_manager_with_mocks();
+        let _ = mgr.load("https://example.com/video1.mp4").await.unwrap();
+        let result = mgr.load("https://example.com/video2.mp4").await;
+        assert!(matches!(result.unwrap_err(), SessionError::AlreadyActive));
+    }
+
+    #[tokio::test]
+    async fn test_lifecycle_pause_after_load() {
+        let mgr = session_manager_with_mocks();
+        let id = mgr.load("https://example.com/video.mp4").await.unwrap();
+
+        mgr.pause().await.unwrap();
+        let session = mgr.load_session(id).unwrap();
+        assert_eq!(session.state, PlayerState::Paused);
+    }
+
+    #[tokio::test]
+    async fn test_lifecycle_resume_after_pause() {
+        let mgr = session_manager_with_mocks();
+        let id = mgr.load("https://example.com/video.mp4").await.unwrap();
+
+        mgr.pause().await.unwrap();
+        assert_eq!(mgr.load_session(id).unwrap().state, PlayerState::Paused);
+
+        mgr.resume().await.unwrap();
+        assert_eq!(mgr.load_session(id).unwrap().state, PlayerState::Playing);
+    }
+
+    #[tokio::test]
+    async fn test_lifecycle_stop_transitions_to_idle() {
+        let mgr = session_manager_with_mocks();
+        let id = mgr.load("https://example.com/video.mp4").await.unwrap();
+
+        // Before stop, session exists and is Playing.
+        assert_eq!(mgr.load_session(id).unwrap().state, PlayerState::Playing);
+
+        mgr.stop().await.unwrap();
+
+        // After stop, session is deleted from DB and no active session.
+        assert!(mgr.load_session(id).is_err());
+        assert!(mgr.current_status().await.is_err());
+    }
+
+    #[tokio::test]
+    async fn test_lifecycle_seek_during_playing() {
+        let mgr = session_manager_with_mocks();
+        let id = mgr.load("https://example.com/video.mp4").await.unwrap();
+
+        mgr.seek(45000).await.unwrap();
+
+        let session = mgr.load_session(id).unwrap();
+        // After seek from Playing, should return to Playing.
+        assert_eq!(session.state, PlayerState::Playing);
+    }
+
+    #[tokio::test]
+    async fn test_lifecycle_set_volume_updates_volume() {
+        let mgr = session_manager_with_mocks();
+        let id = mgr.load("https://example.com/video.mp4").await.unwrap();
+
+        mgr.set_volume(42).await.unwrap();
+
+        let session = mgr.load_session(id).unwrap();
+        assert_eq!(session.volume, 42);
+    }
+
+    // ── 3. Session persistence ───────────────────────────────────────
+
+    #[tokio::test]
+    async fn test_persistence_session_stored_in_sqlite() {
+        let mgr = session_manager_with_mocks();
+        let id = mgr.load("https://example.com/video.mp4").await.unwrap();
+
+        // Verify the session can be loaded from the database.
+        let loaded = mgr.load_session(id).unwrap();
+        assert_eq!(loaded.id, id);
+        assert_eq!(loaded.source_url, "https://example.com/video.mp4");
+        assert_eq!(loaded.state, PlayerState::Playing);
+        assert_eq!(loaded.volume, 100);
+    }
+
+    #[tokio::test]
+    async fn test_persistence_current_status_returns_active_session() {
+        let mgr = session_manager_with_mocks();
+        let id = mgr.load("https://example.com/video.mp4").await.unwrap();
+
+        let status = mgr.current_status().await.unwrap();
+        assert_eq!(status.id, id);
+        assert_eq!(status.state, PlayerState::Playing);
+    }
+
+    #[tokio::test]
+    async fn test_persistence_after_stop_current_status_no_active() {
+        let mgr = session_manager_with_mocks();
+        let _ = mgr.load("https://example.com/video.mp4").await.unwrap();
+
+        mgr.stop().await.unwrap();
+
+        let result = mgr.current_status().await;
+        assert!(result.is_err());
+        assert!(matches!(result.unwrap_err(), SessionError::NoActiveSession));
+    }
+
+    // ── 4. Crash recovery ───────────────────────────────────────────
+
+    #[test]
+    fn test_crash_recovery_recover_crashed_sessions() {
+        // Use a file-based DB so a second SessionManager can see the same data.
+        let tmp_dir = tempfile::tempdir().unwrap();
+        let db_path = tmp_dir.path().join("crash_recovery.db");
+        let db_path_str = db_path.to_str().unwrap();
+
+        // First manager: create a session and manually set state to "playing".
+        let mgr1 = SessionManager::new(db_path_str).unwrap();
+        let mut session = MediaSession::new("https://example.com/video.mp4".into());
+        session.state = PlayerState::Playing;
+        let sid = session.id;
+        mgr1.insert_session(&session).unwrap();
+
+        // Verify it's in playing state.
+        assert_eq!(mgr1.load_session(sid).unwrap().state, PlayerState::Playing);
+
+        // Simulate a crash: drop the first manager without stopping the session.
+        drop(mgr1);
+
+        // Second manager: should recover crashed sessions to idle on startup.
+        let mgr2 = SessionManager::new(db_path_str).unwrap();
+        let recovered = mgr2.load_session(sid).unwrap();
+        assert_eq!(recovered.state, PlayerState::Idle);
+    }
+
+    #[test]
+    fn test_crash_recovery_multiple_crashed_states() {
+        let tmp_dir = tempfile::tempdir().unwrap();
+        let db_path = tmp_dir.path().join("crash_multi.db");
+        let db_path_str = db_path.to_str().unwrap();
+
+        let mgr1 = SessionManager::new(db_path_str).unwrap();
+
+        // Insert sessions in various active states.
+        let mut resolving = MediaSession::new("https://example.com/r.mp4".into());
+        resolving.state = PlayerState::Resolving;
+        let rid = resolving.id;
+        mgr1.insert_session(&resolving).unwrap();
+
+        let mut buffering = MediaSession::new("https://example.com/b.mp4".into());
+        buffering.state = PlayerState::Buffering;
+        let bid = buffering.id;
+        mgr1.insert_session(&buffering).unwrap();
+
+        let mut seeking = MediaSession::new("https://example.com/s.mp4".into());
+        seeking.state = PlayerState::Seeking;
+        let sid = seeking.id;
+        mgr1.insert_session(&seeking).unwrap();
+
+        // Error and idle sessions should NOT be touched.
+        let mut error_sess = MediaSession::new("https://example.com/e.mp4".into());
+        error_sess.state = PlayerState::Error;
+        let eid = error_sess.id;
+        mgr1.insert_session(&error_sess).unwrap();
+
+        drop(mgr1);
+
+        let mgr2 = SessionManager::new(db_path_str).unwrap();
+
+        // All active states should be recovered to Idle.
+        assert_eq!(mgr2.load_session(rid).unwrap().state, PlayerState::Idle);
+        assert_eq!(mgr2.load_session(bid).unwrap().state, PlayerState::Idle);
+        assert_eq!(mgr2.load_session(sid).unwrap().state, PlayerState::Idle);
+        // Error session should remain Error.
+        assert_eq!(mgr2.load_session(eid).unwrap().state, PlayerState::Error);
+    }
+
+    // ── 5. Stale session cleanup ─────────────────────────────────────
+
+    #[test]
+    fn test_stale_session_cleanup_on_new_manager() {
+        let tmp_dir = tempfile::tempdir().unwrap();
+        let db_path = tmp_dir.path().join("stale.db");
+        let db_path_str = db_path.to_str().unwrap();
+
+        // First manager: insert a stale session (25h old) and a recent one.
+        let mgr1 = SessionManager::new(db_path_str).unwrap();
+
+        let mut stale = MediaSession::new("https://example.com/old.mp4".into());
+        stale.updated_at = Utc::now() - chrono::Duration::hours(25);
+        let stale_id = stale.id;
+        mgr1.insert_session(&stale).unwrap();
+
+        let recent = MediaSession::new("https://example.com/recent.mp4".into());
+        let recent_id = recent.id;
+        mgr1.insert_session(&recent).unwrap();
+
+        drop(mgr1);
+
+        // Second manager: stale session should be cleaned up on startup.
+        let mgr2 = SessionManager::new(db_path_str).unwrap();
+        assert!(mgr2.load_session(stale_id).is_err(), "stale session should be deleted");
+        assert!(
+            mgr2.load_session(recent_id).is_ok(),
+            "recent session should still exist"
+        );
+    }
+
+    // ── 6. Watch channel (subscribe_state) ───────────────────────────
+
+    #[tokio::test]
+    async fn test_watch_channel_load_receives_update() {
+        let mgr = Arc::new(session_manager_with_mocks());
+        let mut rx = mgr.subscribe_state();
+
+        // Initially None (no session active).
+        assert!(rx.borrow().is_none());
+
+        // Load a URL — watch channel should update to Some(session).
+        let id = mgr.load("https://example.com/video.mp4").await.unwrap();
+
+        // Wait for watch channel propagation.
+        rx.changed().await.unwrap();
+        let state = rx.borrow().clone();
+        assert!(state.is_some());
+        let session = state.unwrap();
+        assert_eq!(session.id, id);
+        assert_eq!(session.state, PlayerState::Playing);
+    }
+
+    #[tokio::test]
+    async fn test_watch_channel_stop_receives_none() {
+        let mgr = Arc::new(session_manager_with_mocks());
+        let mut rx = mgr.subscribe_state();
+
+        let _ = mgr.load("https://example.com/video.mp4").await.unwrap();
+        // Wait for load to propagate.
+        rx.changed().await.unwrap();
+        assert!(rx.borrow().is_some());
+
+        mgr.stop().await.unwrap();
+        // Wait for stop to propagate.
+        rx.changed().await.unwrap();
+        assert!(rx.borrow().is_none());
+    }
+
+    // ── 7. Broadcast channel (subscribe) ─────────────────────────────
+
+    #[tokio::test]
+    async fn test_broadcast_receives_created_event_on_load() {
+        let mgr = session_manager_with_mocks();
+        let mut rx = mgr.subscribe();
+
+        let id = mgr.load("https://example.com/video.mp4").await.unwrap();
+
+        // Drain events and find Created.
+        let mut found_created = false;
+        while let Ok(event) = rx.try_recv() {
+            if let SessionEvent::Created { id: eid, url } = event {
+                assert_eq!(eid, id);
+                assert_eq!(url, "https://example.com/video.mp4");
+                found_created = true;
+            }
+        }
+        assert!(found_created, "should have received Created event");
+    }
+
+    #[tokio::test]
+    async fn test_broadcast_receives_paused_event() {
+        let mgr = session_manager_with_mocks();
+        let id = mgr.load("https://example.com/video.mp4").await.unwrap();
+
+        let mut rx = mgr.subscribe();
+        // Drain pending events from load.
+        while rx.try_recv().is_ok() {}
+
+        mgr.pause().await.unwrap();
+
+        let event = rx.try_recv().unwrap();
+        match event {
+            SessionEvent::Paused { id: eid } => assert_eq!(eid, id),
+            other => panic!("Expected Paused event, got {:?}", other),
+        }
+    }
+
+    #[tokio::test]
+    async fn test_broadcast_receives_stopped_event() {
+        let mgr = session_manager_with_mocks();
+        let id = mgr.load("https://example.com/video.mp4").await.unwrap();
+
+        let mut rx = mgr.subscribe();
+        // Drain pending events from load.
+        while rx.try_recv().is_ok() {}
+
+        mgr.stop().await.unwrap();
+
+        let event = rx.try_recv().unwrap();
+        match event {
+            SessionEvent::Stopped { id: eid } => assert_eq!(eid, id),
+            other => panic!("Expected Stopped event, got {:?}", other),
+        }
+    }
 }

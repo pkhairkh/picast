@@ -461,4 +461,278 @@ mod tests {
         assert!(ytdlp.subtitles.contains_key("en"));
         assert!(ytdlp.subtitles.contains_key("de"));
     }
+
+    // ── Comprehensive ytdlp tests ──────────────────────────────────────
+
+    #[test]
+    fn determine_category_hls_priority_over_dash() {
+        // If the format string contains both "hls" and "dash",
+        // HLS should be returned since it's checked first.
+        let ytdlp = YtdlpOutput {
+            webpage_url: None,
+            url: "https://example.com/stream".into(),
+            title: None,
+            duration: None,
+            thumbnail: None,
+            vcodec: Some("avc1".into()),
+            acodec: Some("mp4a".into()),
+            width: None,
+            height: None,
+            subtitles: Default::default(),
+            format: Some("hls-dash-1234".into()),
+        };
+        assert_eq!(determine_category(&ytdlp), UrlCategory::HlsManifest);
+    }
+
+    #[test]
+    fn determine_category_case_sensitive_format() {
+        // The format check is case-sensitive: "HLS" should NOT match.
+        let ytdlp = YtdlpOutput {
+            webpage_url: None,
+            url: "https://example.com/stream".into(),
+            title: None,
+            duration: None,
+            thumbnail: None,
+            vcodec: Some("avc1".into()),
+            acodec: Some("mp4a".into()),
+            width: None,
+            height: None,
+            subtitles: Default::default(),
+            format: Some("HLS-1234".into()),
+        };
+        // "HLS" doesn't match "hls" since contains() is case-sensitive.
+        assert_eq!(determine_category(&ytdlp), UrlCategory::DirectMedia);
+    }
+
+    #[test]
+    fn determine_category_dash_case_sensitive() {
+        // "DASH" should NOT match since contains() is case-sensitive.
+        let ytdlp = YtdlpOutput {
+            webpage_url: None,
+            url: "https://example.com/stream".into(),
+            title: None,
+            duration: None,
+            thumbnail: None,
+            vcodec: Some("avc1".into()),
+            acodec: Some("mp4a".into()),
+            width: None,
+            height: None,
+            subtitles: Default::default(),
+            format: Some("DASH-5678".into()),
+        };
+        assert_eq!(determine_category(&ytdlp), UrlCategory::DirectMedia);
+    }
+
+    #[test]
+    fn determine_mime_type_video_only() {
+        // Video codec present, audio codec is "none".
+        let ytdlp = YtdlpOutput {
+            webpage_url: None,
+            url: String::new(),
+            title: None,
+            duration: None,
+            thumbnail: None,
+            vcodec: Some("avc1".into()),
+            acodec: Some("none".into()),
+            width: None,
+            height: None,
+            subtitles: Default::default(),
+            format: None,
+        };
+        assert_eq!(determine_mime_type(&ytdlp), Some("video/mp4".into()));
+    }
+
+    #[test]
+    fn determine_mime_type_video_with_none_audio_codec() {
+        // Video present, no audio codec at all.
+        let ytdlp = YtdlpOutput {
+            webpage_url: None,
+            url: String::new(),
+            title: None,
+            duration: None,
+            thumbnail: None,
+            vcodec: Some("vp9".into()),
+            acodec: None,
+            width: None,
+            height: None,
+            subtitles: Default::default(),
+            format: None,
+        };
+        // acodec is None, so has_audio = false (is_some_and won't match on None).
+        // Result: (true, false) → video/mp4
+        assert_eq!(determine_mime_type(&ytdlp), Some("video/mp4".into()));
+    }
+
+    #[test]
+    fn determine_mime_type_audio_only_with_none_video() {
+        // No video codec at all, audio codec present.
+        let ytdlp = YtdlpOutput {
+            webpage_url: None,
+            url: String::new(),
+            title: None,
+            duration: None,
+            thumbnail: None,
+            vcodec: None,
+            acodec: Some("opus".into()),
+            width: None,
+            height: None,
+            subtitles: Default::default(),
+            format: None,
+        };
+        // vcodec is None, so has_video = false.
+        // Result: (false, true) → audio/mp4
+        assert_eq!(determine_mime_type(&ytdlp), Some("audio/mp4".into()));
+    }
+
+    #[test]
+    fn determine_mime_type_both_none() {
+        let ytdlp = YtdlpOutput {
+            webpage_url: None,
+            url: String::new(),
+            title: None,
+            duration: None,
+            thumbnail: None,
+            vcodec: None,
+            acodec: None,
+            width: None,
+            height: None,
+            subtitles: Default::default(),
+            format: None,
+        };
+        assert_eq!(determine_mime_type(&ytdlp), None);
+    }
+
+    #[test]
+    fn ytdlp_output_deserialize_minimal() {
+        // Only the required `url` field is present; everything else should default.
+        let json = r#"{"url": "https://example.com/video.mp4"}"#;
+        let ytdlp: YtdlpOutput = serde_json::from_str(json).unwrap();
+        assert_eq!(ytdlp.url, "https://example.com/video.mp4");
+        assert_eq!(ytdlp.webpage_url, None);
+        assert_eq!(ytdlp.title, None);
+        assert_eq!(ytdlp.duration, None);
+        assert_eq!(ytdlp.thumbnail, None);
+        assert_eq!(ytdlp.vcodec, None);
+        assert_eq!(ytdlp.acodec, None);
+        assert_eq!(ytdlp.width, None);
+        assert_eq!(ytdlp.height, None);
+        assert!(ytdlp.subtitles.is_empty());
+        assert_eq!(ytdlp.format, None);
+    }
+
+    #[test]
+    fn ytdlp_output_deserialize_missing_url_fails() {
+        // The `url` field is required. Without it, deserialization should fail.
+        let json = r#"{"title": "No URL"}"#;
+        let result = serde_json::from_str::<YtdlpOutput>(json);
+        assert!(result.is_err(), "deserialization should fail without required 'url' field");
+    }
+
+    #[test]
+    fn ytdlp_output_deserialize_with_extra_fields() {
+        // Extra fields should be silently ignored.
+        let json = r#"{
+            "url": "https://example.com/video.mp4",
+            "title": "Test",
+            "some_unknown_field": "ignored",
+            "another_extra": 42
+        }"#;
+        let ytdlp: YtdlpOutput = serde_json::from_str(json).unwrap();
+        assert_eq!(ytdlp.url, "https://example.com/video.mp4");
+        assert_eq!(ytdlp.title, Some("Test".into()));
+    }
+
+    #[test]
+    fn ytdlp_output_deserialize_negative_duration() {
+        // yt-dlp can return -1 for live streams or unknown duration.
+        let json = r#"{"url": "https://example.com/live", "duration": -1.0}"#;
+        let ytdlp: YtdlpOutput = serde_json::from_str(json).unwrap();
+        assert_eq!(ytdlp.duration, Some(-1.0));
+    }
+
+    #[test]
+    fn ytdlp_output_deserialize_zero_dimensions() {
+        let json = r#"{"url": "https://example.com/audio.mp3", "width": 0, "height": 0}"#;
+        let ytdlp: YtdlpOutput = serde_json::from_str(json).unwrap();
+        assert_eq!(ytdlp.width, Some(0));
+        assert_eq!(ytdlp.height, Some(0));
+    }
+
+    #[test]
+    fn ytdlp_timeout_constant() {
+        assert_eq!(YTDLP_TIMEOUT_SECS, 30, "default yt-dlp timeout should be 30 seconds");
+    }
+
+    #[test]
+    fn h264_format_string_components() {
+        // Verify the format string has the expected components.
+        assert!(H264_FORMAT_STRING.contains("bestvideo"));
+        assert!(H264_FORMAT_STRING.contains("bestaudio"));
+        assert!(H264_FORMAT_STRING.contains("avc1"));
+        assert!(H264_FORMAT_STRING.contains("height<=1080"));
+        assert!(H264_FORMAT_STRING.contains("best[height<=1080]"));
+    }
+
+    #[test]
+    fn subtitle_keys_extraction() {
+        // Verify subtitle language codes are correctly extracted as keys.
+        let json = r#"{
+            "url": "https://example.com/video.mp4",
+            "subtitles": {
+                "en": [{"url": "https://example.com/en.vtt"}],
+                "es": [{"url": "https://example.com/es.vtt"}],
+                "fr": [{"url": "https://example.com/fr.vtt"}],
+                "de": [{"url": "https://example.com/de.vtt"}],
+                "ja": [{"url": "https://example.com/ja.vtt"}]
+            }
+        }"#;
+        let ytdlp: YtdlpOutput = serde_json::from_str(json).unwrap();
+        let mut keys: Vec<String> = ytdlp.subtitles.keys().cloned().collect();
+        keys.sort();
+        assert_eq!(keys, vec!["de", "en", "es", "fr", "ja"]);
+    }
+
+    #[test]
+    fn subtitle_empty_hashmap() {
+        let json = r#"{"url": "https://example.com/video.mp4", "subtitles": {}}"#;
+        let ytdlp: YtdlpOutput = serde_json::from_str(json).unwrap();
+        assert!(ytdlp.subtitles.is_empty());
+    }
+
+    #[test]
+    fn determine_category_format_with_hls_substring() {
+        // Any format string containing "hls" should match.
+        let ytdlp = YtdlpOutput {
+            webpage_url: None,
+            url: "https://example.com/stream".into(),
+            title: None,
+            duration: None,
+            thumbnail: None,
+            vcodec: None,
+            acodec: None,
+            width: None,
+            height: None,
+            subtitles: Default::default(),
+            format: Some("hls-4320".into()),
+        };
+        assert_eq!(determine_category(&ytdlp), UrlCategory::HlsManifest);
+    }
+
+    #[test]
+    fn determine_category_format_with_dash_substring() {
+        let ytdlp = YtdlpOutput {
+            webpage_url: None,
+            url: "https://example.com/stream".into(),
+            title: None,
+            duration: None,
+            thumbnail: None,
+            vcodec: None,
+            acodec: None,
+            width: None,
+            height: None,
+            subtitles: Default::default(),
+            format: Some("dash-9876".into()),
+        };
+        assert_eq!(determine_category(&ytdlp), UrlCategory::DashManifest);
+    }
 }

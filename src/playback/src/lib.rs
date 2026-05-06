@@ -39,13 +39,24 @@ use events::PlaybackEvent;
 #[cfg(feature = "hw")]
 use pipeline::{GstPipeline, PipelineState};
 use serde::{Deserialize, Serialize};
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::Arc;
 use thiserror::Error;
 #[cfg(feature = "hw")]
 use tokio::sync::mpsc;
 #[cfg(feature = "hw")]
 use tokio::sync::Mutex;
+
+// ── Playback State ───────────────────────────────────────────────────
+
+/// Current state of the playback engine (used in mock mode).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum PlaybackState {
+    Stopped,
+    Playing,
+    Paused,
+}
 
 // ── Errors ───────────────────────────────────────────────────────────
 
@@ -149,8 +160,9 @@ impl Default for BufferHealth {
 /// element property changes. Events are pushed to an `mpsc` channel
 /// so the session layer can react asynchronously.
 ///
-/// When compiled without the `hw` feature, the engine is constructable
-/// but all playback operations return [`PlaybackError::HardwareUnavailable`].
+/// When compiled without the `hw` feature, the engine simulates a
+/// working playback pipeline so the HTTP → Session → Playback chain
+/// can be tested on x86.
 pub struct PlaybackEngine {
     /// Pipeline configuration.
     config: PipelineConfig,
@@ -162,6 +174,32 @@ pub struct PlaybackEngine {
     event_tx: mpsc::Sender<PlaybackEvent>,
     /// Whether the engine is currently playing.
     is_playing: Arc<AtomicBool>,
+
+    // ── Mock-mode state (only compiled without `hw` feature) ──────
+    /// Whether a URL is loaded in mock mode.
+    #[cfg(not(feature = "hw"))]
+    mock_loaded: AtomicBool,
+    /// Whether playback is active in mock mode.
+    #[cfg(not(feature = "hw"))]
+    mock_playing: AtomicBool,
+    /// Whether playback is paused in mock mode.
+    #[cfg(not(feature = "hw"))]
+    mock_paused: AtomicBool,
+    /// Current playback position in ms (mock mode).
+    #[cfg(not(feature = "hw"))]
+    mock_position_ms: AtomicU64,
+    /// Total duration in ms (mock mode, default 300000 = 5 min).
+    #[cfg(not(feature = "hw"))]
+    mock_duration_ms: AtomicU64,
+    /// Current volume 0.0–1.0 (mock mode).
+    #[cfg(not(feature = "hw"))]
+    mock_volume: std::sync::Mutex<f64>,
+    /// Buffer health (mock mode).
+    #[cfg(not(feature = "hw"))]
+    mock_buffer_health: std::sync::Mutex<BufferHealth>,
+    /// Currently loaded URL (mock mode).
+    #[cfg(not(feature = "hw"))]
+    mock_url: std::sync::Mutex<Option<String>>,
 }
 
 impl PlaybackEngine {
@@ -171,6 +209,9 @@ impl PlaybackEngine {
     /// idle state with no pipeline loaded.
     pub fn new(config: PipelineConfig) -> Result<Self, PlaybackError> {
         // GStreamer init is deferred to pipeline construction.
+        #[cfg(not(feature = "hw"))]
+        let initial_volume = config.volume;
+
         Ok(Self {
             config,
             #[cfg(feature = "hw")]
@@ -178,6 +219,22 @@ impl PlaybackEngine {
             #[cfg(feature = "hw")]
             event_tx: mpsc::channel(64).0,
             is_playing: Arc::new(AtomicBool::new(false)),
+            #[cfg(not(feature = "hw"))]
+            mock_loaded: AtomicBool::new(false),
+            #[cfg(not(feature = "hw"))]
+            mock_playing: AtomicBool::new(false),
+            #[cfg(not(feature = "hw"))]
+            mock_paused: AtomicBool::new(false),
+            #[cfg(not(feature = "hw"))]
+            mock_position_ms: AtomicU64::new(0),
+            #[cfg(not(feature = "hw"))]
+            mock_duration_ms: AtomicU64::new(300_000),
+            #[cfg(not(feature = "hw"))]
+            mock_volume: std::sync::Mutex::new(initial_volume),
+            #[cfg(not(feature = "hw"))]
+            mock_buffer_health: std::sync::Mutex::new(BufferHealth::default()),
+            #[cfg(not(feature = "hw"))]
+            mock_url: std::sync::Mutex::new(None),
         })
     }
 
@@ -188,6 +245,9 @@ impl PlaybackEngine {
     ) -> Result<Self, PlaybackError> {
         #[cfg(feature = "hw")]
         let event_tx = mpsc::channel(_channel_size).0;
+        #[cfg(not(feature = "hw"))]
+        let initial_volume = config.volume;
+
         Ok(Self {
             config,
             #[cfg(feature = "hw")]
@@ -195,6 +255,22 @@ impl PlaybackEngine {
             #[cfg(feature = "hw")]
             event_tx,
             is_playing: Arc::new(AtomicBool::new(false)),
+            #[cfg(not(feature = "hw"))]
+            mock_loaded: AtomicBool::new(false),
+            #[cfg(not(feature = "hw"))]
+            mock_playing: AtomicBool::new(false),
+            #[cfg(not(feature = "hw"))]
+            mock_paused: AtomicBool::new(false),
+            #[cfg(not(feature = "hw"))]
+            mock_position_ms: AtomicU64::new(0),
+            #[cfg(not(feature = "hw"))]
+            mock_duration_ms: AtomicU64::new(300_000),
+            #[cfg(not(feature = "hw"))]
+            mock_volume: std::sync::Mutex::new(initial_volume),
+            #[cfg(not(feature = "hw"))]
+            mock_buffer_health: std::sync::Mutex::new(BufferHealth::default()),
+            #[cfg(not(feature = "hw"))]
+            mock_url: std::sync::Mutex::new(None),
         })
     }
 
@@ -289,15 +365,37 @@ impl PlaybackEngine {
         Ok(())
     }
 
-    /// Load a URL and transition to the Playing state (stub without hardware).
+    /// Load a URL and transition to the Playing state (mock mode).
     #[cfg(not(feature = "hw"))]
     pub async fn play(
         &self,
-        _url: &str,
+        url: &str,
         _socks_addr: &str,
         _isolation_username: &str,
     ) -> Result<(), PlaybackError> {
-        Err(PlaybackError::HardwareUnavailable)
+        // Store the URL
+        {
+            let mut guard = self.mock_url.lock().unwrap();
+            *guard = Some(url.to_string());
+        }
+        self.mock_loaded.store(true, Ordering::Relaxed);
+        self.mock_playing.store(true, Ordering::Relaxed);
+        self.mock_paused.store(false, Ordering::Relaxed);
+        self.mock_position_ms.store(0, Ordering::Relaxed);
+        self.is_playing.store(true, Ordering::Relaxed);
+
+        // Set buffer health to full (healthy)
+        {
+            let mut guard = self.mock_buffer_health.lock().unwrap();
+            *guard = BufferHealth {
+                fill_percent: 100,
+                buffered_seconds: 300.0,
+                estimated_fill_ms: None,
+                is_buffering: false,
+            };
+        }
+
+        Ok(())
     }
 
     /// Pause the pipeline.
@@ -308,10 +406,16 @@ impl PlaybackEngine {
         pipeline.pause()
     }
 
-    /// Pause the pipeline (stub without hardware).
+    /// Pause the pipeline (mock mode).
     #[cfg(not(feature = "hw"))]
     pub async fn pause(&self) -> Result<(), PlaybackError> {
-        Err(PlaybackError::HardwareUnavailable)
+        if !self.mock_loaded.load(Ordering::Relaxed) {
+            return Err(PlaybackError::NoPipeline);
+        }
+        self.mock_playing.store(false, Ordering::Relaxed);
+        self.mock_paused.store(true, Ordering::Relaxed);
+        self.is_playing.store(false, Ordering::Relaxed);
+        Ok(())
     }
 
     /// Resume after a pause.
@@ -322,10 +426,21 @@ impl PlaybackEngine {
         pipeline.resume()
     }
 
-    /// Resume after a pause (stub without hardware).
+    /// Resume after a pause (mock mode).
     #[cfg(not(feature = "hw"))]
     pub async fn resume(&self) -> Result<(), PlaybackError> {
-        Err(PlaybackError::HardwareUnavailable)
+        if !self.mock_loaded.load(Ordering::Relaxed) {
+            return Err(PlaybackError::NoPipeline);
+        }
+        if !self.mock_paused.load(Ordering::Relaxed) {
+            return Err(PlaybackError::InvalidState(
+                "cannot resume — not paused".into(),
+            ));
+        }
+        self.mock_playing.store(true, Ordering::Relaxed);
+        self.mock_paused.store(false, Ordering::Relaxed);
+        self.is_playing.store(true, Ordering::Relaxed);
+        Ok(())
     }
 
     /// Stop and tear down the pipeline.
@@ -341,10 +456,22 @@ impl PlaybackEngine {
         Ok(())
     }
 
-    /// Stop and tear down the pipeline (stub without hardware).
+    /// Stop and tear down the pipeline (mock mode).
     #[cfg(not(feature = "hw"))]
     pub async fn stop(&self) -> Result<(), PlaybackError> {
-        Err(PlaybackError::HardwareUnavailable)
+        self.mock_loaded.store(false, Ordering::Relaxed);
+        self.mock_playing.store(false, Ordering::Relaxed);
+        self.mock_paused.store(false, Ordering::Relaxed);
+        self.mock_position_ms.store(0, Ordering::Relaxed);
+        self.is_playing.store(false, Ordering::Relaxed);
+
+        // Clear the URL
+        {
+            let mut guard = self.mock_url.lock().unwrap();
+            *guard = None;
+        }
+
+        Ok(())
     }
 
     /// Seek to an absolute position in milliseconds.
@@ -355,10 +482,16 @@ impl PlaybackEngine {
         pipeline.seek(position_ms)
     }
 
-    /// Seek to an absolute position in milliseconds (stub without hardware).
+    /// Seek to an absolute position in milliseconds (mock mode).
     #[cfg(not(feature = "hw"))]
-    pub async fn seek(&self, _position_ms: u64) -> Result<(), PlaybackError> {
-        Err(PlaybackError::HardwareUnavailable)
+    pub async fn seek(&self, position_ms: u64) -> Result<(), PlaybackError> {
+        if !self.mock_loaded.load(Ordering::Relaxed) {
+            return Err(PlaybackError::NoPipeline);
+        }
+        let duration = self.mock_duration_ms.load(Ordering::Relaxed);
+        let clamped = position_ms.min(duration);
+        self.mock_position_ms.store(clamped, Ordering::Relaxed);
+        Ok(())
     }
 
     /// Set the playback volume (0.0–1.0).
@@ -369,10 +502,13 @@ impl PlaybackEngine {
         pipeline.set_volume(volume)
     }
 
-    /// Set the playback volume (stub without hardware).
+    /// Set the playback volume (mock mode).
     #[cfg(not(feature = "hw"))]
-    pub async fn set_volume(&self, _volume: f64) -> Result<(), PlaybackError> {
-        Err(PlaybackError::HardwareUnavailable)
+    pub async fn set_volume(&self, volume: f64) -> Result<(), PlaybackError> {
+        let clamped = volume.clamp(0.0, 1.0);
+        let mut guard = self.mock_volume.lock().unwrap();
+        *guard = clamped;
+        Ok(())
     }
 
     /// Return the current playback position in milliseconds.
@@ -383,10 +519,13 @@ impl PlaybackEngine {
         pipeline.position_ms()
     }
 
-    /// Return the current playback position in milliseconds (stub without hardware).
+    /// Return the current playback position in milliseconds (mock mode).
     #[cfg(not(feature = "hw"))]
     pub async fn position_ms(&self) -> Result<u64, PlaybackError> {
-        Err(PlaybackError::HardwareUnavailable)
+        if !self.mock_loaded.load(Ordering::Relaxed) {
+            return Err(PlaybackError::NoPipeline);
+        }
+        Ok(self.mock_position_ms.load(Ordering::Relaxed))
     }
 
     /// Return the total duration in milliseconds.
@@ -397,10 +536,13 @@ impl PlaybackEngine {
         pipeline.duration_ms()
     }
 
-    /// Return the total duration in milliseconds (stub without hardware).
+    /// Return the total duration in milliseconds (mock mode).
     #[cfg(not(feature = "hw"))]
     pub async fn duration_ms(&self) -> Result<Option<u64>, PlaybackError> {
-        Err(PlaybackError::HardwareUnavailable)
+        if !self.mock_loaded.load(Ordering::Relaxed) {
+            return Err(PlaybackError::NoPipeline);
+        }
+        Ok(Some(self.mock_duration_ms.load(Ordering::Relaxed)))
     }
 
     /// Query the current buffer health.
@@ -413,10 +555,11 @@ impl PlaybackEngine {
         }
     }
 
-    /// Query the current buffer health (stub without hardware).
+    /// Query the current buffer health (mock mode — always healthy).
     #[cfg(not(feature = "hw"))]
     pub async fn buffer_health(&self) -> BufferHealth {
-        BufferHealth::default()
+        let guard = self.mock_buffer_health.lock().unwrap();
+        *guard
     }
 
     /// Return a receiver for playback events.
@@ -445,6 +588,24 @@ impl PlaybackEngine {
     /// Whether the engine is currently playing.
     pub fn is_playing(&self) -> bool {
         self.is_playing.load(Ordering::Relaxed)
+    }
+
+    /// Return the current playback state (mock mode).
+    #[cfg(not(feature = "hw"))]
+    pub fn mock_state(&self) -> PlaybackState {
+        if self.mock_playing.load(Ordering::Relaxed) {
+            PlaybackState::Playing
+        } else if self.mock_paused.load(Ordering::Relaxed) {
+            PlaybackState::Paused
+        } else {
+            PlaybackState::Stopped
+        }
+    }
+
+    /// Set the mock duration in milliseconds (for testing).
+    #[cfg(not(feature = "hw"))]
+    pub fn mock_set_duration(&self, duration_ms: u64) {
+        self.mock_duration_ms.store(duration_ms, Ordering::Relaxed);
     }
 }
 
@@ -529,28 +690,257 @@ mod tests {
         assert!(engine.is_ok());
     }
 
+    // ── Mock-mode tests ───────────────────────────────────────────
+
     #[tokio::test]
-    async fn playback_engine_hw_unavailable_without_feature() {
+    async fn mock_play_pause_resume_stop_lifecycle() {
         let engine = PlaybackEngine::new(PipelineConfig::default()).unwrap();
 
-        // All playback methods should return HardwareUnavailable when hw feature is off.
-        let result = engine.play("https://example.com/video.mp4", "", "").await;
+        // Initially stopped
+        assert_eq!(engine.mock_state(), PlaybackState::Stopped);
+        assert!(!engine.is_playing());
+
+        // Play
+        engine
+            .play("https://example.com/video.mp4", "", "")
+            .await
+            .expect("mock play should succeed");
+        assert_eq!(engine.mock_state(), PlaybackState::Playing);
+        assert!(engine.is_playing());
+
+        // Pause
+        engine.pause().await.expect("mock pause should succeed");
+        assert_eq!(engine.mock_state(), PlaybackState::Paused);
+        assert!(!engine.is_playing());
+
+        // Resume
+        engine.resume().await.expect("mock resume should succeed");
+        assert_eq!(engine.mock_state(), PlaybackState::Playing);
+        assert!(engine.is_playing());
+
+        // Stop
+        engine.stop().await.expect("mock stop should succeed");
+        assert_eq!(engine.mock_state(), PlaybackState::Stopped);
+        assert!(!engine.is_playing());
+    }
+
+    #[tokio::test]
+    async fn mock_seek_updates_position() {
+        let engine = PlaybackEngine::new(PipelineConfig::default()).unwrap();
+
+        // Seek without a loaded URL should fail
+        let result = engine.seek(5000).await;
         assert!(result.is_err());
         match result.unwrap_err() {
-            PlaybackError::HardwareUnavailable => {},
-            other => panic!("Expected HardwareUnavailable, got {:?}", other),
+            PlaybackError::NoPipeline => {},
+            other => panic!("Expected NoPipeline, got {:?}", other),
         }
 
-        assert!(engine.pause().await.is_err());
-        assert!(engine.resume().await.is_err());
-        assert!(engine.stop().await.is_err());
-        assert!(engine.seek(0).await.is_err());
-        assert!(engine.set_volume(0.5).await.is_err());
+        // Load a URL
+        engine
+            .play("https://example.com/video.mp4", "", "")
+            .await
+            .unwrap();
+
+        // Seek to 5000 ms
+        engine.seek(5000).await.expect("mock seek should succeed");
+        let pos = engine.position_ms().await.expect("position_ms should succeed");
+        assert_eq!(pos, 5000);
+
+        // Seek beyond duration should clamp
+        engine.mock_set_duration(300_000);
+        engine.seek(999_999).await.expect("seek beyond duration should succeed");
+        let pos = engine.position_ms().await.expect("position_ms should succeed");
+        assert_eq!(pos, 300_000, "position should be clamped to duration");
+    }
+
+    #[tokio::test]
+    async fn mock_volume_setting() {
+        let engine = PlaybackEngine::new(PipelineConfig::default()).unwrap();
+
+        // Set volume (works even without a loaded URL)
+        engine.set_volume(0.5).await.expect("mock set_volume should succeed");
+        {
+            let vol = engine.mock_volume.lock().unwrap();
+            assert!((*vol - 0.5).abs() < f64::EPSILON, "volume should be 0.5");
+        }
+
+        // Clamp above 1.0
+        engine.set_volume(1.5).await.expect("set_volume should succeed");
+        {
+            let vol = engine.mock_volume.lock().unwrap();
+            assert!((*vol - 1.0).abs() < f64::EPSILON, "volume should be clamped to 1.0");
+        }
+
+        // Clamp below 0.0
+        engine.set_volume(-0.5).await.expect("set_volume should succeed");
+        {
+            let vol = engine.mock_volume.lock().unwrap();
+            assert!((*vol - 0.0).abs() < f64::EPSILON, "volume should be clamped to 0.0");
+        }
+    }
+
+    #[tokio::test]
+    async fn mock_position_and_duration_return_correct_values() {
+        let engine = PlaybackEngine::new(PipelineConfig::default()).unwrap();
+
+        // Without a loaded URL, should fail
         assert!(engine.position_ms().await.is_err());
         assert!(engine.duration_ms().await.is_err());
 
-        // buffer_health should return defaults without error.
+        // Load a URL
+        engine
+            .play("https://example.com/video.mp4", "", "")
+            .await
+            .unwrap();
+
+        // Position should be 0 right after play
+        let pos = engine.position_ms().await.expect("position_ms should succeed");
+        assert_eq!(pos, 0, "position should be 0 after play");
+
+        // Default duration is 300000 ms (5 min)
+        let dur = engine
+            .duration_ms()
+            .await
+            .expect("duration_ms should succeed");
+        assert_eq!(dur, Some(300_000), "default duration should be 300000 ms");
+
+        // Set custom duration
+        engine.mock_set_duration(600_000);
+        let dur = engine
+            .duration_ms()
+            .await
+            .expect("duration_ms should succeed");
+        assert_eq!(dur, Some(600_000), "duration should be updated to 600000 ms");
+    }
+
+    #[tokio::test]
+    async fn mock_buffer_health_returns_healthy() {
+        let engine = PlaybackEngine::new(PipelineConfig::default()).unwrap();
+
         let health = engine.buffer_health().await;
         assert_eq!(health.fill_percent, 100);
+        assert!(!health.is_buffering);
+
+        // After play, buffer health should be healthy
+        engine
+            .play("https://example.com/video.mp4", "", "")
+            .await
+            .unwrap();
+
+        let health = engine.buffer_health().await;
+        assert_eq!(health.fill_percent, 100);
+        assert!(!health.is_buffering);
+        assert!(health.estimated_fill_ms.is_none());
+    }
+
+    #[tokio::test]
+    async fn mock_operations_fail_when_no_url_loaded() {
+        let engine = PlaybackEngine::new(PipelineConfig::default()).unwrap();
+
+        // Without a loaded URL, these should return NoPipeline
+        let result = engine.pause().await;
+        assert!(result.is_err());
+        match result.unwrap_err() {
+            PlaybackError::NoPipeline => {},
+            other => panic!("Expected NoPipeline for pause, got {:?}", other),
+        }
+
+        let result = engine.resume().await;
+        assert!(result.is_err());
+        match result.unwrap_err() {
+            PlaybackError::NoPipeline => {},
+            other => panic!("Expected NoPipeline for resume, got {:?}", other),
+        }
+
+        let result = engine.seek(0).await;
+        assert!(result.is_err());
+        match result.unwrap_err() {
+            PlaybackError::NoPipeline => {},
+            other => panic!("Expected NoPipeline for seek, got {:?}", other),
+        }
+
+        let result = engine.position_ms().await;
+        assert!(result.is_err());
+        match result.unwrap_err() {
+            PlaybackError::NoPipeline => {},
+            other => panic!("Expected NoPipeline for position_ms, got {:?}", other),
+        }
+
+        let result = engine.duration_ms().await;
+        assert!(result.is_err());
+        match result.unwrap_err() {
+            PlaybackError::NoPipeline => {},
+            other => panic!("Expected NoPipeline for duration_ms, got {:?}", other),
+        }
+
+        // Stop should succeed even without a loaded URL (idempotent)
+        engine.stop().await.expect("stop should succeed without loaded URL");
+
+        // set_volume should succeed without a loaded URL (no pipeline check needed)
+        engine.set_volume(0.5).await.expect("set_volume should succeed without loaded URL");
+    }
+
+    #[tokio::test]
+    async fn mock_play_resets_position() {
+        let engine = PlaybackEngine::new(PipelineConfig::default()).unwrap();
+
+        // Load and seek to some position
+        engine
+            .play("https://example.com/video.mp4", "", "")
+            .await
+            .unwrap();
+        engine.seek(120_000).await.unwrap();
+        let pos = engine.position_ms().await.unwrap();
+        assert_eq!(pos, 120_000);
+
+        // Play again — position should reset to 0
+        engine
+            .play("https://example.com/other.mp4", "", "")
+            .await
+            .unwrap();
+        let pos = engine.position_ms().await.unwrap();
+        assert_eq!(pos, 0, "position should reset to 0 on play");
+    }
+
+    #[tokio::test]
+    async fn mock_resume_fails_when_not_paused() {
+        let engine = PlaybackEngine::new(PipelineConfig::default()).unwrap();
+
+        // Load and play
+        engine
+            .play("https://example.com/video.mp4", "", "")
+            .await
+            .unwrap();
+
+        // Resume while playing should fail
+        let result = engine.resume().await;
+        assert!(result.is_err());
+        match result.unwrap_err() {
+            PlaybackError::InvalidState(msg) => {
+                assert!(msg.contains("not paused"), "error message should mention 'not paused'");
+            },
+            other => panic!("Expected InvalidState, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn playback_state_serialization_roundtrip() {
+        let states = vec![PlaybackState::Stopped, PlaybackState::Playing, PlaybackState::Paused];
+        for state in states {
+            let json = serde_json::to_string(&state).expect("serialize");
+            let deserialized: PlaybackState = serde_json::from_str(&json).expect("deserialize");
+            assert_eq!(deserialized, state);
+        }
+    }
+
+    #[test]
+    fn playback_state_serde_rename() {
+        let json = serde_json::to_string(&PlaybackState::Playing).unwrap();
+        assert_eq!(json, "\"playing\"");
+        let json = serde_json::to_string(&PlaybackState::Paused).unwrap();
+        assert_eq!(json, "\"paused\"");
+        let json = serde_json::to_string(&PlaybackState::Stopped).unwrap();
+        assert_eq!(json, "\"stopped\"");
     }
 }

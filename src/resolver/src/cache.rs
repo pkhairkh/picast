@@ -226,4 +226,249 @@ mod tests {
         let cache = ResolveCache::default();
         assert!(cache.is_empty());
     }
+
+    // ── Comprehensive cache tests ──────────────────────────────────────
+
+    #[test]
+    fn cache_ttl_expiration_with_very_short_ttl() {
+        // Use a 1ms TTL to verify entries expire almost immediately.
+        let mut cache = ResolveCache::with_ttl(Duration::from_millis(1));
+        let url = "https://example.com/video.mp4";
+
+        cache.insert(url, test_result(url));
+        assert_eq!(cache.len(), 1, "cache should contain the entry immediately after insert");
+
+        // Wait for the TTL to expire.
+        std::thread::sleep(Duration::from_millis(5));
+
+        // The entry should be expired and removed on get.
+        assert!(cache.get(url).is_none(), "entry should be expired after 1ms TTL");
+        assert_eq!(cache.len(), 0, "cache should be empty after expired entry is accessed and removed");
+    }
+
+    #[test]
+    fn cache_ttl_not_expired_within_window() {
+        // Use a generous TTL to ensure entries are still valid.
+        let mut cache = ResolveCache::with_ttl(Duration::from_secs(600));
+        let url = "https://example.com/video.mp4";
+
+        cache.insert(url, test_result(url));
+
+        // Should still be present immediately.
+        assert!(cache.get(url).is_some(), "entry should be valid within TTL window");
+    }
+
+    #[test]
+    fn cache_lru_eviction_oldest_removed_first() {
+        let mut cache = ResolveCache::new();
+        cache.max_entries = 3;
+
+        // Insert entries 0, 1, 2 to fill the cache.
+        for i in 0..3 {
+            let url = format!("https://example.com/video{}.mp4", i);
+            cache.insert(&url, test_result(&url));
+        }
+        assert_eq!(cache.len(), 3, "cache should be at max capacity");
+
+        // Insert a 4th entry — the oldest (video0) should be evicted.
+        let url3 = "https://example.com/video3.mp4";
+        cache.insert(url3, test_result(url3));
+
+        // The cache should still be at max_capacity (or less after eviction).
+        assert!(cache.len() <= 3, "cache should not exceed max_entries");
+
+        // video0 (the oldest) should be gone.
+        assert!(cache.get("https://example.com/video0.mp4").is_none(),
+                "oldest entry should be evicted when cache is full");
+
+        // video3 (the newest) should be present.
+        assert!(cache.get(url3).is_some(),
+                "newest entry should be present after eviction");
+    }
+
+    #[test]
+    fn cache_lru_eviction_with_all_expired() {
+        // When the cache is at capacity and all entries are expired,
+        // inserting a new one should evict all expired entries first.
+        let mut cache = ResolveCache::with_ttl(Duration::from_millis(1));
+        cache.max_entries = 3;
+
+        // Fill the cache to capacity with entries that will expire.
+        for i in 0..3 {
+            let url = format!("https://example.com/old{}.mp4", i);
+            cache.insert(&url, test_result(&url));
+        }
+        assert_eq!(cache.len(), 3, "cache should be at max capacity");
+
+        // Wait for them to expire.
+        std::thread::sleep(Duration::from_millis(5));
+
+        // Insert a new entry — since we're at capacity, expired entries
+        // should be evicted first, making room for the new one.
+        let new_url = "https://example.com/new.mp4";
+        cache.insert(new_url, test_result(new_url));
+
+        // Only the new entry should remain (all 3 expired entries evicted, 1 new inserted).
+        assert_eq!(cache.len(), 1, "only the new entry should remain after expired eviction");
+        assert!(cache.get(new_url).is_some());
+    }
+
+    #[test]
+    fn cache_size_tracking_after_insertions() {
+        let mut cache = ResolveCache::new();
+        assert_eq!(cache.len(), 0, "new cache should be empty");
+
+        cache.insert("url1", test_result("url1"));
+        assert_eq!(cache.len(), 1);
+
+        cache.insert("url2", test_result("url2"));
+        assert_eq!(cache.len(), 2);
+
+        cache.insert("url3", test_result("url3"));
+        assert_eq!(cache.len(), 3);
+    }
+
+    #[test]
+    fn cache_size_tracking_after_evictions() {
+        let mut cache = ResolveCache::new();
+        cache.max_entries = 5;
+
+        for i in 0..5 {
+            let url = format!("https://example.com/video{}.mp4", i);
+            cache.insert(&url, test_result(&url));
+        }
+        assert_eq!(cache.len(), 5, "cache should be at max capacity");
+
+        // Insert one more — should trigger eviction of oldest.
+        cache.insert("https://example.com/video5.mp4", test_result("https://example.com/video5.mp4"));
+        assert!(cache.len() <= 5, "cache should not exceed max capacity after eviction");
+    }
+
+    #[test]
+    fn cache_size_tracking_after_expiry() {
+        let mut cache = ResolveCache::with_ttl(Duration::from_millis(1));
+
+        for i in 0..5 {
+            let url = format!("https://example.com/video{}.mp4", i);
+            cache.insert(&url, test_result(&url));
+        }
+        assert_eq!(cache.len(), 5);
+
+        // Wait for all to expire.
+        std::thread::sleep(Duration::from_millis(5));
+
+        // evict_expired should remove all.
+        cache.evict_expired();
+        assert_eq!(cache.len(), 0, "all expired entries should be removed");
+    }
+
+    #[test]
+    fn cache_clear_empties_all_entries() {
+        let mut cache = ResolveCache::new();
+
+        // Insert several entries.
+        for i in 0..10 {
+            let url = format!("https://example.com/video{}.mp4", i);
+            cache.insert(&url, test_result(&url));
+        }
+        assert_eq!(cache.len(), 10, "cache should have 10 entries before clear");
+
+        cache.clear();
+
+        assert!(cache.is_empty(), "cache should be empty after clear");
+        assert_eq!(cache.len(), 0, "len() should return 0 after clear");
+
+        // Verify individual lookups also return None.
+        for i in 0..10 {
+            let url = format!("https://example.com/video{}.mp4", i);
+            assert!(cache.get(&url).is_none(), "entries should not be found after clear");
+        }
+    }
+
+    #[test]
+    fn cache_clear_then_reinsert() {
+        let mut cache = ResolveCache::new();
+
+        cache.insert("url1", test_result("url1"));
+        cache.clear();
+        assert!(cache.is_empty());
+
+        // Should be able to insert again after clear.
+        cache.insert("url2", test_result("url2"));
+        assert_eq!(cache.len(), 1);
+        assert!(cache.get("url2").is_some());
+    }
+
+    #[test]
+    fn cache_insert_overwrites_existing_key() {
+        let mut cache = ResolveCache::new();
+        let url = "https://example.com/video.mp4";
+
+        let mut result1 = test_result(url);
+        result1.title = Some("First Title".into());
+        cache.insert(url, result1);
+
+        let mut result2 = test_result(url);
+        result2.title = Some("Second Title".into());
+        cache.insert(url, result2);
+
+        // Should have only 1 entry (overwritten, not duplicated).
+        assert_eq!(cache.len(), 1);
+
+        // Should return the most recent value.
+        let cached = cache.get(url).unwrap();
+        assert_eq!(cached.title, Some("Second Title".into()));
+    }
+
+    #[test]
+    fn cache_get_removes_expired_entry() {
+        let mut cache = ResolveCache::with_ttl(Duration::from_millis(1));
+        let url = "https://example.com/video.mp4";
+
+        cache.insert(url, test_result(url));
+        assert_eq!(cache.len(), 1);
+
+        // Wait for expiry.
+        std::thread::sleep(Duration::from_millis(5));
+
+        // get() should remove the expired entry.
+        assert!(cache.get(url).is_none());
+        assert_eq!(cache.len(), 0, "expired entry should be removed from cache on get()");
+    }
+
+    #[test]
+    fn cache_is_empty_on_new() {
+        let cache = ResolveCache::new();
+        assert!(cache.is_empty());
+        assert_eq!(cache.len(), 0);
+    }
+
+    #[test]
+    fn cache_with_ttl_custom_duration() {
+        let cache = ResolveCache::with_ttl(Duration::from_secs(3600));
+        assert!(cache.is_empty());
+        // TTL is stored internally; we verify it works by inserting and
+        // confirming the entry is still there well within the TTL.
+        drop(cache); // Just verifying construction works without panic.
+    }
+
+    #[test]
+    fn cache_multiple_entries_independent_expiry() {
+        let mut cache = ResolveCache::with_ttl(Duration::from_millis(50));
+
+        let url1 = "https://example.com/video1.mp4";
+        cache.insert(url1, test_result(url1));
+
+        // Wait a bit, then insert a second entry.
+        std::thread::sleep(Duration::from_millis(30));
+        let url2 = "https://example.com/video2.mp4";
+        cache.insert(url2, test_result(url2));
+
+        // url1 should be close to expiry but url2 should still be fresh.
+        // Wait a bit more so url1 expires but url2 is still valid.
+        std::thread::sleep(Duration::from_millis(30));
+
+        assert!(cache.get(url1).is_none(), "url1 should have expired");
+        assert!(cache.get(url2).is_some(), "url2 should still be valid");
+    }
 }

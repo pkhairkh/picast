@@ -364,7 +364,7 @@ effort. Tasks are ordered by execution sequence within each phase.
      illegal transitions (e.g., pause when already paused)
   5. Add `current_state()` method returning `PlayerState`
 
-### T-3.5 Seek implementation
+### T-3.5 Seek implementation ✅
 - **Crate:** `picast-playback`
 - **Depends on:** T-3.4
 - **Effort:** 1 day
@@ -390,7 +390,7 @@ effort. Tasks are ordered by execution sequence within each phase.
   3. `volume_element.set_property("volume", value as f64)`
   4. `get_volume()` reads the property back
 
-### T-3.7 Buffer health monitoring
+### T-3.7 Buffer health monitoring ✅
 - **Crate:** `picast-playback`
 - **Depends on:** T-3.2
 - **Effort:** 1.5 days
@@ -423,7 +423,7 @@ effort. Tasks are ordered by execution sequence within each phase.
   4. Log warning: "Falling back to software decode — higher CPU usage expected"
   5. Limit fallback to 720p30: add caps filter `video/x-raw, width<=1280, height<=720`
 
-### T-3.9 Pipeline error recovery
+### T-3.9 Pipeline error recovery ✅
 - **Crate:** `picast-playback`
 - **Depends on:** T-3.4
 - **Effort:** 1 day
@@ -439,7 +439,7 @@ effort. Tasks are ordered by execution sequence within each phase.
   4. Return error via `watch::Sender` or `oneshot` channel
   5. On `GST_MESSAGE_WARNING`: log with `tracing::warn!`
 
-### T-3.10 Position and duration queries
+### T-3.10 Position and duration queries ✅
 - **Crate:** `picast-playback`
 - **Depends on:** T-3.4
 - **Effort:** 0.5 day
@@ -1101,7 +1101,7 @@ effort. Tasks are ordered by execution sequence within each phase.
 
 ## Phase 9 — Testing & Quality Assurance
 
-### T-9.1 Unit test coverage for all crates
+### T-9.1 Unit test coverage for all crates ✅
 - **Crate:** all
 - **Depends on:** T-7.1
 - **Effort:** 3 days
