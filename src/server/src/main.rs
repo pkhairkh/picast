@@ -194,7 +194,16 @@ fn parse_cli_args() -> clap::ArgMatches {
 
 #[tokio::main]
 async fn main() -> Result<()> {
-    // ── 0. CLI arguments ──────────────────────────────────────────────
+    // ── 0a. Install rustls CryptoProvider ─────────────────────────────
+    // reqwest/rustls-tls pulls in `ring` while tokio-rustls 0.26 pulls
+    // in `aws-lc-rs`.  When both features are present rustls refuses to
+    // auto-select a provider, so we pick one explicitly before any TLS
+    // code runs.
+    rustls::crypto::ring::default_provider()
+        .install_default()
+        .expect("failed to install rustls ring CryptoProvider");
+
+    // ── 0b. CLI arguments ─────────────────────────────────────────────
     let cli = parse_cli_args();
 
     // If --config was given, set PICAST_CONFIG before loading config.
