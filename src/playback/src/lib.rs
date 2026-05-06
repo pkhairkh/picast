@@ -322,18 +322,22 @@ impl PlaybackEngine {
                     .name("glib-main-loop".into())
                     .spawn(|| {
                         let context = gstreamer::glib::MainContext::default();
-                        if context.acquire() {
-                            let main_loop = gstreamer::glib::MainLoop::new(Some(&context), false);
-                            tracing::info!(
-                                "GLib main loop started — bus watch callbacks will be dispatched"
-                            );
-                            main_loop.run();
-                        } else {
-                            tracing::error!(
-                                "Failed to acquire GLib main context — \
-                                 bus watch callbacks will NOT be dispatched. \
-                                 Pipeline errors and state changes will go unreported."
-                            );
+                        match context.acquire() {
+                            Ok(_guard) => {
+                                let main_loop = gstreamer::glib::MainLoop::new(Some(&context), false);
+                                tracing::info!(
+                                    "GLib main loop started — bus watch callbacks will be dispatched"
+                                );
+                                main_loop.run();
+                                // _guard is kept alive until main_loop.run() returns (never)
+                            },
+                            Err(_) => {
+                                tracing::error!(
+                                    "Failed to acquire GLib main context — \
+                                     bus watch callbacks will NOT be dispatched. \
+                                     Pipeline errors and state changes will go unreported."
+                                );
+                            }
                         }
                     })
                     .expect("Failed to spawn GLib main loop thread");
@@ -540,10 +544,10 @@ impl PlaybackEngine {
                     // Latency message — not forwarding in v1.
                 },
                 MessageView::Warning(w) => {
-                    let msg = w.error().to_string();
+                    let warn_msg = w.error().to_string();
                     tracing::warn!(
-                        warning = %msg,
-                        source = %msg.src().map(|s| s.path_string()).unwrap_or_default(),
+                        warning = %warn_msg,
+                        source = %msg.src().map(|s: &gstreamer::Object| s.path_string()).unwrap_or_default(),
                         "GStreamer warning"
                     );
                 },
@@ -700,22 +704,22 @@ impl PlaybackEngine {
                     is_playing.store(false, Ordering::Relaxed);
                 },
                 MessageView::Error(e) => {
-                    let msg = e.error().to_string();
+                    let err_msg = e.error().to_string();
                     let debug_info = e.debug().map(|d| d.to_string());
                     tracing::error!(
-                        error = %msg,
+                        error = %err_msg,
                         debug = ?debug_info,
-                        source = %msg.src().map(|s| s.path_string()).unwrap_or_default(),
+                        source = %msg.src().map(|s: &gstreamer::Object| s.path_string()).unwrap_or_default(),
                         "GStreamer error (SW decode fallback)"
                     );
-                    let _ = event_tx.send(PlaybackEvent::Error { message: msg, debug: debug_info });
+                    let _ = event_tx.send(PlaybackEvent::Error { message: err_msg, debug: debug_info });
                     is_playing.store(false, Ordering::Relaxed);
                 },
                 MessageView::Warning(w) => {
-                    let msg = w.error().to_string();
+                    let warn_msg = w.error().to_string();
                     tracing::warn!(
-                        warning = %msg,
-                        source = %msg.src().map(|s| s.path_string()).unwrap_or_default(),
+                        warning = %warn_msg,
+                        source = %msg.src().map(|s: &gstreamer::Object| s.path_string()).unwrap_or_default(),
                         "GStreamer warning (SW decode)"
                     );
                 },

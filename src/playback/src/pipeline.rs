@@ -330,7 +330,7 @@ impl GstPipeline {
 
         parsebin.connect_pad_added(move |_parsebin, pad| {
             let caps = pad.current_caps();
-            let media_type = caps.and_then(|c| c.structure(0).map(|s| s.name().to_string()));
+            let media_type = caps.as_ref().and_then(|c| c.structure(0).map(|s| s.name().to_string()));
 
             let is_video = media_type.as_ref().map(|t| t.starts_with("video/")).unwrap_or(false);
 
