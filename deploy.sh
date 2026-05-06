@@ -11,7 +11,10 @@
 set -euo pipefail
 
 REPO_DIR="$(cd "$(dirname "$0")" && pwd)"
-BINARY_NAME="picast-server"
+BINARY_NAME="picast"
+# The systemd service references /usr/local/bin/picast-server,
+# so we install under that name regardless of the Cargo bin name.
+INSTALL_AS="picast-server"
 INSTALL_DIR="/usr/local/bin"
 SERVICE_SRC="$REPO_DIR/deploy/picast.service"
 SERVICE_DST="/etc/systemd/system/picast.service"
@@ -43,9 +46,9 @@ fi
 
 # ── Install binary ────────────────────────────────────────────────────
 echo "[2/5] Installing binary to $INSTALL_DIR/..."
-sudo cp "$BINARY_SRC" "$INSTALL_DIR/$BINARY_NAME"
-sudo chmod 755 "$INSTALL_DIR/$BINARY_NAME"
-echo "      Installed $BINARY_NAME $(stat -c %s "$INSTALL_DIR/$BINARY_NAME" 2>/dev/null || stat -f %z "$INSTALL_DIR/$BINARY_NAME") bytes"
+sudo cp "$BINARY_SRC" "$INSTALL_DIR/$INSTALL_AS"
+sudo chmod 755 "$INSTALL_DIR/$INSTALL_AS"
+echo "      Installed $INSTALL_AS $(stat -c %s "$INSTALL_DIR/$INSTALL_AS" 2>/dev/null || stat -f %z "$INSTALL_DIR/$INSTALL_AS") bytes"
 
 # ── Install service ───────────────────────────────────────────────────
 echo "[3/5] Installing systemd service..."
@@ -70,7 +73,7 @@ sleep 1
 sudo systemctl --no-pager status picast || true
 echo ""
 echo "=== Deploy complete ==="
-echo "  Binary:  $INSTALL_DIR/$BINARY_NAME"
+echo "  Binary:  $INSTALL_DIR/$INSTALL_AS"
 echo "  Service: $SERVICE_DST"
 echo "  Status:  systemctl status picast"
 echo "  Logs:    journalctl -u picast -f"
