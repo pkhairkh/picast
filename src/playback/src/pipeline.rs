@@ -437,12 +437,18 @@ impl GstPipeline {
                 // reported on the bus *after* play() returns Ok, which means the
                 // SW fallback in PlaybackEngine never triggers.
                 //
-                // get_state() blocks until the state change succeeds or fails.
+                // state() blocks until the state change succeeds or fails.
                 // On failure, it returns Err and we can read the specific error
                 // from the bus. A generous timeout (30s) accounts for slow
                 // network sources that need time to buffer the first frames.
-                match self.pipeline.get_state(gstreamer::ClockTime::from_seconds(30)) {
-                    Ok((success, current, pending)) => {
+                //
+                // Note: gstreamer-rs 0.23 names this method `state()`, not
+                // `get_state()`. It returns a 3-tuple:
+                //   (Result<StateChangeSuccess, StateChangeError>, current, pending)
+                let (state_result, current, pending) =
+                    self.pipeline.state(gstreamer::ClockTime::from_seconds(30));
+                match state_result {
+                    Ok(success) => {
                         tracing::info!(
                             ?success,
                             ?current,
