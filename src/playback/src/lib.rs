@@ -322,23 +322,29 @@ impl PlaybackEngine {
                     .name("glib-main-loop".into())
                     .spawn(|| {
                         let context = gstreamer::glib::MainContext::default();
-                        match context.acquire() {
-                            Ok(_guard) => {
-                                let main_loop = gstreamer::glib::MainLoop::new(Some(&context), false);
-                                tracing::info!(
-                                    "GLib main loop started — bus watch callbacks will be dispatched"
-                                );
-                                main_loop.run();
-                                // _guard is kept alive until main_loop.run() returns (never)
-                            },
+                        // Bind the acquire guard to a named variable declared AFTER context,
+                        // so Rust's reverse-order drop drops the guard before context.
+                        // This avoids E0597: the temporary from context.acquire() in a
+                        // match tail-expression would outlive context.
+                        let guard = match context.acquire() {
+                            Ok(g) => g,
                             Err(_) => {
                                 tracing::error!(
                                     "Failed to acquire GLib main context — \
                                      bus watch callbacks will NOT be dispatched. \
                                      Pipeline errors and state changes will go unreported."
                                 );
+                                return;
                             }
-                        }
+                        };
+                        let main_loop = gstreamer::glib::MainLoop::new(Some(&context), false);
+                        tracing::info!(
+                            "GLib main loop started — bus watch callbacks will be dispatched"
+                        );
+                        main_loop.run();
+                        // guard is dropped first (reverse declaration order), then context.
+                        // In practice main_loop.run() never returns, so neither is dropped.
+                        let _ = guard;
                     })
                     .expect("Failed to spawn GLib main loop thread");
             });
