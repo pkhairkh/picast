@@ -9,6 +9,12 @@ User=picast
 Group=picast
 SupplementaryGroups=video render audio
 
+# CAP_SYS_ADMIN is needed to call drmSetMaster() when the console
+# framebuffer holds DRM master.  Without this, PiCast cannot acquire
+# DRM master and kmssink will fail to do modesetting.
+AmbientCapabilities=CAP_SYS_ADMIN
+CapabilityBoundingSet=CAP_SYS_ADMIN
+
 Environment=RUST_LOG=picast=info
 Environment=HOME=/var/lib/picast
 Environment=XDG_CACHE_HOME=/var/lib/picast/.cache

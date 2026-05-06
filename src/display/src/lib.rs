@@ -270,34 +270,70 @@ impl DisplayManager {
     /// Acquire the primary CRTC and configure it for video output.
     ///
     /// This method:
-    /// 1. Finds the first connected HDMI connector with a preferred mode.
-    /// 2. Selects the best CRTC for that connector.
-    /// 3. Saves the current CRTC state for restoration.
-    /// 4. Performs an atomic modeset to activate the display.
+    /// 1. Tries to acquire DRM master (best-effort — continues without it).
+    /// 2. Finds the first connected HDMI connector with a preferred mode.
+    /// 3. Selects the best CRTC for that connector.
+    /// 4. Saves the current CRTC state for restoration (only if master).
     ///
     /// Must be called before any video output can occur.
+    ///
+    /// DRM master is **not required** for resource enumeration — the
+    /// `get_connector`, `get_crtc`, and `get_plane` ioctls are read-only
+    /// and work for any process that has the device open. Master is only
+    /// needed for modesetting (`set_crtc`, `atomic_commit`), which kmssink
+    /// handles independently when it starts playback.
+    ///
+    /// If we cannot get DRM master (e.g. the console framebuffer holds it
+    /// and we lack CAP_SYS_ADMIN), we log a warning and proceed. kmssink
+    /// will attempt to acquire master itself when it transitions to Playing;
+    /// if it also fails, the GStreamer pipeline will fail, and our HW→SW
+    /// fallback will kick in.
     pub fn acquire(&mut self) -> Result<(), DisplayError> {
         let fd = self
             .drm_fd
             .as_ref()
             .ok_or_else(|| DisplayError::DeviceOpen("DRM device not open".into()))?;
 
-        // Acquire DRM master — required for modesetting ioctls.
-        // Without this, all set_crtc / atomic_commit calls fail with EPERM.
+        // Try to acquire DRM master with retry — another process (console
+        // framebuffer, gmediarender) may still hold it.  We try up to 3 times
+        // with 200ms backoff to handle the case where gmediarender just exited
+        // and the kernel hasn't released the master status yet.
         //
-        // We acquire master temporarily to enumerate resources and save CRTC
-        // state, then drop it so that kmssink (GStreamer) can acquire master
-        // when it starts playback. Only one FD can hold DRM master at a time;
-        // holding it would block kmssink from doing modesetting, causing
-        // "Element failed to change its state" errors.
-        fd.acquire_master_lock().map_err(|e| {
-            DisplayError::MasterAcquire(format!(
-                "set_master failed: {} (are you root?)",
-                e
-            ))
-        })?;
-        tracing::info!(fd = fd.as_raw_fd(), "acquired DRM master (temporary)");
+        // If we cannot get master, we continue anyway — resource enumeration
+        // works without it, and kmssink will try to get master itself during
+        // playback. This is important because PiCast runs as a non-root user
+        // (via systemd) and may not have CAP_SYS_ADMIN to revoke master from
+        // the console.
+        let mut has_master = false;
+        for attempt in 1..=3 {
+            match fd.acquire_master_lock() {
+                Ok(()) => {
+                    tracing::info!(fd = fd.as_raw_fd(), "acquired DRM master (temporary)");
+                    has_master = true;
+                    break;
+                },
+                Err(e) => {
+                    if attempt < 3 {
+                        tracing::warn!(
+                            attempt = attempt,
+                            error = %e,
+                            "DRM master acquisition failed — retrying in 200ms"
+                        );
+                        std::thread::sleep(std::time::Duration::from_millis(200));
+                    } else {
+                        tracing::warn!(
+                            error = %e,
+                            "DRM master acquisition failed after 3 attempts — \
+                             proceeding without master (kmssink will try during playback). \
+                             If the console framebuffer holds master, add \
+                             AmbientCapabilities=CAP_SYS_ADMIN to the systemd unit"
+                        );
+                    }
+                },
+            }
+        }
 
+        // Set client capabilities — these don't require DRM master.
         for cap in [drm::ClientCapability::UniversalPlanes, drm::ClientCapability::Atomic] {
             if let Err(e) = fd.set_client_capability(cap, true) {
                 tracing::debug!(capability = ?cap, error = %e, "DRM client capability not enabled");
@@ -401,32 +437,41 @@ impl DisplayManager {
         let crtc = self.crtcs.first().ok_or(DisplayError::NoCrtc)?.clone();
 
         // Save current CRTC state for restoration on release().
-        let crtc_handle = control::from_u32::<control::crtc::Handle>(crtc.crtc_id)
-            .ok_or_else(|| DisplayError::Modeset(format!("invalid CRTC id {}", crtc.crtc_id)))?;
-        let crtc_info = fd.get_crtc(crtc_handle).ok();
-        self.saved_crtc = Some(SavedCrtcState {
-            crtc_id: crtc.crtc_id,
-            fb_id: crtc_info.as_ref().and_then(|i| i.framebuffer().map(|fb| fb.into())),
-            mode: crtc_info.as_ref().and_then(|i| i.mode()),
-            x: 0,
-            y: 0,
-        });
+        // Only possible if we have DRM master — get_crtc() for saving works
+        // without master, but set_crtc() for restoration requires master.
+        if has_master {
+            let crtc_handle = control::from_u32::<control::crtc::Handle>(crtc.crtc_id)
+                .ok_or_else(|| DisplayError::Modeset(format!("invalid CRTC id {}", crtc.crtc_id)))?;
+            let crtc_info = fd.get_crtc(crtc_handle).ok();
+            self.saved_crtc = Some(SavedCrtcState {
+                crtc_id: crtc.crtc_id,
+                fb_id: crtc_info.as_ref().and_then(|i| i.framebuffer().map(|fb| fb.into())),
+                mode: crtc_info.as_ref().and_then(|i| i.mode()),
+                x: 0,
+                y: 0,
+            });
+        } else {
+            tracing::info!("skipping CRTC state save — no DRM master");
+        }
 
         self.active_crtc = Some(crtc.clone());
 
         tracing::info!(
             crtc_id = crtc.crtc_id,
             mode = ?connector.preferred_mode,
+            has_master = has_master,
             "acquired CRTC for display"
         );
 
         // Drop DRM master so kmssink (GStreamer) can acquire it for playback.
         // If we hold master, kmssink's set_state(Playing) will fail because
         // only one FD can be DRM master at a time.
-        if let Err(e) = fd.release_master_lock() {
-            tracing::warn!(error = %e, "failed to drop DRM master after saving CRTC state");
-        } else {
-            tracing::info!("released DRM master — kmssink can now acquire it");
+        if has_master {
+            if let Err(e) = fd.release_master_lock() {
+                tracing::warn!(error = %e, "failed to drop DRM master after saving CRTC state");
+            } else {
+                tracing::info!("released DRM master — kmssink can now acquire it");
+            }
         }
 
         Ok(())
