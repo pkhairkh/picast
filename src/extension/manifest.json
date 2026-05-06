@@ -36,10 +36,7 @@
   ],
 
   "host_permissions": [
-    "http://*.local/*"
-  ],
-
-  "optional_host_permissions": [
+    "http://*.local/*",
     "http://*/*"
   ],
 
