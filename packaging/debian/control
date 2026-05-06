@@ -1,0 +1,26 @@
+Source: picast
+Section: multimedia
+Priority: optional
+Maintainer: PiCast Team <picast@example.com>
+Build-Depends: debhelper (>= 12), cargo, rustc, libgstreamer1.0-dev, libgstreamer-plugins-base1.0-dev, libgstreamer-plugins-bad1.0-dev, libdrm-dev, libgbm-dev, libegl-dev, libgles2-dev, libsqlite3-dev, libssl-dev, gcc-aarch64-linux-gnu [amd64]
+Standards-Version: 4.5.1
+
+Package: picast
+Version: 0.1.0
+Architecture: arm64
+Depends: tor, gstreamer1.0-plugins-base, gstreamer1.0-plugins-good, gstreamer1.0-plugins-bad, gstreamer1.0-plugins-ugly, gstreamer1.0-libav, yt-dlp, gmediarender, libsqlite3-0, iptables, dnsmasq, avahi-daemon
+Recommends: iptables-persistent
+Suggests: picast-extension
+Installed-Size: 15000
+Description: Tor-routed media casting appliance for Raspberry Pi
+ PiCast turns a Raspberry Pi into a secure, Tor-routed media casting
+ appliance. It supports casting from browsers, VLC, and DLNA/UPnP
+ renderers, routing all media traffic through Tor for privacy.
+ .
+ Features include:
+  - Tor SOCKS5 proxy integration with stream isolation
+  - GStreamer-based hardware-accelerated playback (DRM/KMS)
+  - HTTP API and WebSocket for real-time control
+  - DLNA/UPnP MediaRenderer support
+  - yt-dlp URL resolution for YouTube and 1000+ sites
+  - iptables firewall with default-deny policy

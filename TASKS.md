@@ -6,7 +6,7 @@ effort. Tasks are ordered by execution sequence within each phase.
 
 **Status legend:** `[ ]` not started · `[~]` in progress · `[x]` done
 
-**Last verified:** 2026-05-06 — `cargo check --workspace` ✅ · `cargo test --workspace` (344 tests) ✅ · `cargo clippy --workspace -- -D warnings` ✅ · `cargo fmt --check` ✅
+**Last verified:** 2026-05-06 — `cargo check --workspace` ✅ · `cargo test --workspace` (344 tests) ✅ · `cargo clippy --workspace -- -D warnings` ✅ · `cargo fmt --check` ✅ · T-9.3/T-9.4/T-9.7/T-9.8/T-10.1/T-10.2/T-10.4 implemented
 
 ---
 
@@ -1154,7 +1154,7 @@ effort. Tasks are ordered by execution sequence within each phase.
   6. `session.seek(60_000).await?` → verify position
   7. `session.stop().await?` → verify `status == Idle`
 
-### T-9.3 Pi hardware smoke test script
+### T-9.3 Pi hardware smoke test script ✅
 - **Crate:** `scripts/`
 - **Depends on:** T-7.7
 - **Effort:** 1 day
@@ -1170,7 +1170,7 @@ effort. Tasks are ordered by execution sequence within each phase.
   6. Test pause/seek/stop
   7. Verify HDMI: `modetest -M vc4` shows active planes
 
-### T-9.4 Network isolation verification
+### T-9.4 Network isolation verification ✅
 - **Crate:** `config/`
 - **Depends on:** T-7.1
 - **Effort:** 0.5 day
@@ -1213,7 +1213,7 @@ effort. Tasks are ordered by execution sequence within each phase.
   3. Before/after: `du -h /var/lib/picast/sessions.db`
   4. Monitor RSS trend
 
-### T-9.7 Security audit checklist
+### T-9.7 Security audit checklist ✅
 - **Crate:** all
 - **Depends on:** T-9.4
 - **Effort:** 1 day
@@ -1230,7 +1230,7 @@ effort. Tasks are ordered by execution sequence within each phase.
   6. Verify: no unnecessary listening ports (only 8585, 8586, 49152, 9050)
   7. Verify: systemd service has `ProtectSystem`, `NoNewPrivileges`, etc.
 
-### T-9.8 CI pipeline finalization
+### T-9.8 CI pipeline finalization ✅
 - **Crate:** `.github/`
 - **Depends on:** T-9.1
 - **Effort:** 1 day
@@ -1250,7 +1250,7 @@ effort. Tasks are ordered by execution sequence within each phase.
 
 ## Phase 10 — Distribution & Documentation
 
-### T-10.1 Setup script overhaul
+### T-10.1 Setup script overhaul ✅
 - **Crate:** `scripts/`
 - **Depends on:** T-7.3
 - **Effort:** 1 day
@@ -1268,7 +1268,7 @@ effort. Tasks are ordered by execution sequence within each phase.
   6. Install `config/iptables.rules` → apply on boot
   7. Create `picast` user, add to `video` and `render` groups
 
-### T-10.2 Debian package
+### T-10.2 Debian package ✅
 - **Crate:** `scripts/`
 - **Depends on:** T-10.1
 - **Effort:** 2 days
@@ -1300,7 +1300,7 @@ effort. Tasks are ordered by execution sequence within each phase.
   7. Compress: `xz -z picast.img`
   8. Test: flash → boot → verify API responds
 
-### T-10.4 README.md rewrite
+### T-10.4 README.md rewrite ✅
 - **Crate:** root
 - **Depends on:** T-10.1
 - **Effort:** 0.5 day

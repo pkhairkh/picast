@@ -1,0 +1,51 @@
+#!/bin/bash
+# PiCast post-remove script
+set -e
+
+case "$1" in
+    purge)
+        # Disable and remove systemd service
+        if command -v systemctl >/dev/null 2>&1; then
+            systemctl disable picast 2>/dev/null || true
+        fi
+        if [ -f /etc/systemd/system/picast.service ]; then
+            rm -f /etc/systemd/system/picast.service
+            if command -v systemctl >/dev/null 2>&1; then
+                systemctl daemon-reload
+            fi
+        fi
+
+        # Remove picast user
+        if id -u picast >/dev/null 2>&1; then
+            userdel picast 2>/dev/null || true
+            echo "picast: Removed system user"
+        fi
+
+        # Remove data directory
+        if [ -d /var/lib/picast ]; then
+            rm -rf /var/lib/picast
+            echo "picast: Removed data directory /var/lib/picast"
+        fi
+
+        # Remove temp directory
+        if [ -d /tmp/picast ]; then
+            rm -rf /tmp/picast
+        fi
+
+        # Remove config directory
+        if [ -d /etc/picast ]; then
+            rm -rf /etc/picast
+            echo "picast: Removed config directory /etc/picast"
+        fi
+        ;;
+
+    remove|upgrade|failed-upgrade|abort-install|abort-upgrade|disappear)
+        # On non-purge removal, keep user and data
+        ;;
+
+    *)
+        echo "postrm called with unknown argument \`$1'" >&2
+        ;;
+esac
+
+exit 0

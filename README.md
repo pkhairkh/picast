@@ -1,10 +1,54 @@
 # PiCast
 
+[![CI](https://github.com/pkhairkh/picast/actions/workflows/ci.yml/badge.svg)](https://github.com/pkhairkh/picast/actions/workflows/ci.yml)
+[![License: MIT](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
+[![Rust 1.75+](https://img.shields.io/badge/rust-1.75%2B-orange.svg)](https://www.rust-lang.org/)
+
 **Tor-routed, zero-copy media casting appliance for Raspberry Pi 4B+**
 
-PiCast turns your Pi 4 into a networked media receiver that fetches and plays video through the Tor network, using the Pi's dedicated H.264 hardware decoder with a zero-copy DMA-BUF pipeline directly to HDMI. No display server, no browser, no DRM — just pure hardware-accelerated playback on your TV.
+PiCast turns your Raspberry Pi 4 into a privacy-focused media receiver that fetches and plays video through the Tor network, using the Pi's dedicated H.264 hardware decoder with a zero-copy DMA-BUF pipeline directly to HDMI — no display server, no browser, no DRM, just pure hardware-accelerated playback on your TV at ~3% CPU and ~5W.
 
-## How It Works
+## Quick Start
+
+```bash
+curl -sSL https://raw.githubusercontent.com/pkhairkh/picast/main/scripts/setup.sh | sudo bash
+```
+
+This one command installs all dependencies, builds PiCast, configures Tor and firewall rules, and installs the systemd service. After it completes:
+
+1. **Install the browser extension** — [Chrome Web Store](#) or [Firefox Add-ons](#) (Manifest V3)
+2. **Cast your first video** — open a YouTube video, click the PiCast extension icon, then press **Cast**
+3. Your TV connected to the Pi starts playing within seconds
+
+## Hardware Requirements
+
+| Requirement | Specification |
+|-------------|---------------|
+| Board | Raspberry Pi 4B+ (4 GB recommended) |
+| Display | HDMI monitor or TV |
+| Storage | 8 GB+ microSD card |
+| Network | Ethernet (Wi-Fi not recommended) |
+| Power | 5 V / 3 A USB-C |
+
+## What PiCast Does
+
+- Resolves video URLs from 1,800+ sites via **yt-dlp** through Tor
+- Fetches media streams through **Tor SOCKS5** with per-domain circuit isolation
+- Decodes H.264 in hardware using **V4L2 M2M** at 1080p60
+- Displays on HDMI via **DRM/KMS** zero-copy pipeline — no X11, no Wayland
+- Accepts cast commands from browser extension, VLC, DLNA apps, or HTTP API
+
+## Features
+
+- **Tor routing** — all resolution and fetching routes through Tor; DNS never leaks
+- **Zero-copy H.264** — DMA-BUF from V4L2 decoder through HVS to HDMI; CPU stays out of the display path
+- **No display server** — DRM/KMS direct-to-HDMI; no compositor, no browser, minimal attack surface
+- **Multi-protocol input** — HTTP API, WebSocket, UPnP/DLNA, and browser extension (Chrome & Firefox)
+- **Adaptive bitrate** — Tor-aware ABR controller monitors buffer health and switches quality automatically
+- **Subtitle support** — SRT, VTT, and auto-generated subtitles via yt-dlp
+- **Software fallback** — VP9/AV1 decoded in software (720p30) when hardware H.264 isn't available
+
+## Architecture
 
 ```
 Any device on LAN                    Raspberry Pi 4
@@ -21,114 +65,82 @@ Any device on LAN                    Raspberry Pi 4
                                      └──────────────────────┘
 ```
 
-1. **Send a URL** from any device — browser extension, VLC, DLNA app, or HTTP API
-2. **Pi resolves it** via yt-dlp through Tor (1,800+ sites supported)
-3. **Pi fetches and decodes** the stream using H.264 hardware decode (V4L2 M2M)
-4. **Pi displays** on HDMI via DRM/KMS zero-copy pipeline (~3% CPU, ~5W)
+## Configuration
 
-## Key Properties
+PiCast reads configuration from environment variables or a `.env` file:
 
-| Property | Implementation |
-|----------|---------------|
-| **Privacy** | All content resolution and media fetching routes through Tor |
-| **Efficiency** | Zero-copy DMA-BUF from V4L2 decoder to HVS to HDMI — no CPU in the display path |
-| **Minimalism** | No X11, no Wayland, no compositor, no browser — DRM/KMS direct |
-| **Compatibility** | UPnP/DLNA (VLC, Home Assistant), HTTP API, browser extension |
-| **Adaptive** | Tor-aware ABR controller monitors buffer fill, switches quality automatically |
+| Variable | Default | Description |
+|----------|---------|-------------|
+| `PICAST_HTTP_PORT` | `8585` | HTTP API listen port |
+| `PICAST_WS_PORT` | `8586` | WebSocket listen port |
+| `PICAST_TOR_MODE` | `enabled` | `enabled`, `disabled`, or `optional` |
+| `PICAST_TOR_SOCKS_PORT` | `9050` | Tor SOCKS5 proxy port |
+| `PICAST_TOR_CONTROL_PORT` | `9051` | Tor control port |
+| `PICAST_VOLUME` | `80` | Default volume (0–100) |
 
-## Supported Content
+## Troubleshooting
 
-- **Sites**: YouTube, Vimeo, Twitch, PeerTube, Odysee, Rumble, and 1,800+ more via yt-dlp
-- **Codecs**: H.264 hardware (1080p60), VP9/AV1 software fallback
-- **Protocols**: HLS, DASH, progressive HTTP
-- **Subtitles**: SRT, VTT, auto-generated (via yt-dlp)
-- **Not supported**: DRM content (Netflix, Disney+), HEVC hardware (deferred to v2)
+| Problem | Solution |
+|---------|----------|
+| **No video on HDMI** | Verify `dtoverlay=vc4-kms-v3d` in `/boot/config.txt` and reboot |
+| **Tor won't connect** | Check `sudo systemctl status tor` and ensure port 9050 is open |
+| **yt-dlp fails to resolve** | Update yt-dlp: `sudo yt-dlp -U` — site extractors change frequently |
+| **High CPU during playback** | Software fallback is active; check `vc4-kms-v3d` overlay is loaded |
+| **Extension can't find Pi** | Ensure Pi and browser are on the same LAN; check `PICAST_HTTP_PORT` |
+| **Choppy playback over Tor** | Normal for high-bitrate streams; the ABR controller will downshift quality |
 
-## Quick Start
+## Development
 
 ```bash
-# Flash Raspberry Pi OS Lite 64-bit (bookworm)
-# Enable overlays in /boot/config.txt:
-#   dtoverlay=vc4-kms-v3d
+# Clone and build (works on x86_64 without Pi hardware)
+git clone https://github.com/pkhairkh/picast.git
+cd picast
+cargo build --workspace
 
-# Install dependencies
-sudo apt install -y tor gstreamer1.0-plugins-{base,bad,good,ugly} \
-  gstreamer1.0-tools gmediarender yt-dlp
+# Run tests
+cargo test --workspace
 
-# Build PiCast
-cargo build --release
+# Lint
+cargo clippy --workspace -- -D warnings
+cargo fmt --check
 
-# Configure Tor
-sudo cp config/torrc /etc/tor/torrc
-sudo systemctl restart tor
-
-# Configure firewall
-sudo cp config/iptables.rules /etc/iptables/rules.v4
-
-# Run
-sudo -u picast ./target/release/picast
-
-# Or install as a service
-sudo cp config/picast.service /etc/systemd/system/
-sudo systemctl enable --now picast
+# Cross-compile for Pi (requires aarch64-linux-gnu-gcc)
+cargo build --target aarch64-unknown-linux-gnu --release
 ```
+
+See [CONTRIBUTING.md](CONTRIBUTING.md) for the full development workflow.
 
 ## Project Structure
 
 ```
 picast/
-├── AGENT.md              # AI agent instructions (read this first)
-├── ARCHITECTURE.md       # Full system architecture document
-├── SPECIFICATION.md      # API contracts, format matrix, config specs
-├── DECISIONS.md          # Architecture Decision Records
-├── CHANGELOG.md          # Version history
-├── CONTRIBUTING.md       # Development workflow and conventions
-├── SECURITY.md           # Vulnerability reporting and threat model
 ├── src/
-│   ├── server/           # Main binary + integration tests
-│   ├── protocols/        # HTTP API, WebSocket, DLNA
-│   ├── session/          # State machine, queue, ABR
-│   ├── resolver/         # URL classification, yt-dlp subprocess
-│   ├── playback/         # GStreamer pipeline management
-│   ├── display/          # DRM/KMS plane control
-│   ├── tor/              # SOCKS5 proxy, stream isolation
-│   └── extension/        # Browser extension (Manifest V3)
-├── .github/              # CI/CD, issue templates, PR template
-├── config/               # systemd unit, torrc, iptables rules
-├── docs/                 # Detailed per-module documentation + ADRs
-└── scripts/              # Setup and development scripts
+│   ├── server/        Main binary + integration tests
+│   ├── protocols/     HTTP API, WebSocket, DLNA
+│   ├── session/       State machine, queue, ABR
+│   ├── resolver/      URL classification, yt-dlp subprocess
+│   ├── playback/      GStreamer pipeline management
+│   ├── display/       DRM/KMS plane control
+│   ├── tor/           SOCKS5 proxy, stream isolation
+│   └── extension/     Browser extension (Manifest V3)
+├── config/            systemd unit, torrc, iptables rules
+├── scripts/           Setup and development scripts
+└── docs/              Per-module documentation and ADRs
 ```
 
 ## Documentation
 
 | Document | Description |
 |----------|-------------|
-| [AGENT.md](AGENT.md) | AI agent onboarding — read this first |
 | [ARCHITECTURE.md](ARCHITECTURE.md) | Complete system architecture |
 | [SPECIFICATION.md](SPECIFICATION.md) | API contracts and technical specs |
 | [DECISIONS.md](DECISIONS.md) | Architecture Decision Records |
 | [CONTRIBUTING.md](CONTRIBUTING.md) | Development workflow and conventions |
 | [SECURITY.md](SECURITY.md) | Vulnerability reporting and threat model |
 | [CHANGELOG.md](CHANGELOG.md) | Version history |
-| [docs/ROADMAP.md](docs/ROADMAP.md) | Development roadmap v0.1.0 → v2.0.0 |
-| [docs/GLOSSARY.md](docs/GLOSSARY.md) | Technical term definitions |
-| [docs/decisions/](docs/decisions/) | Individual ADR files |
-| [docs/hardware/](docs/hardware/) | BCM2711, V4L2, HVS deep dives |
-| [docs/protocols/](docs/protocols/) | HTTP, WebSocket, DLNA specs |
-| [docs/playback/](docs/playback/) | GStreamer pipelines, ABR, DRM/KMS |
-| [docs/tor/](docs/tor/) | Tor integration, stream isolation |
-| [docs/extension/](docs/extension/) | Browser extension design |
-
-## Hardware Requirements
-
-| Requirement | Specification |
-|-------------|--------------|
-| Board | Raspberry Pi 4B+ (any RAM variant, 4GB recommended) |
-| Display | Any HDMI monitor/TV |
-| Network | Ethernet (Wi-Fi not recommended) |
-| Power | 5V/3A USB-C |
-| Storage | 8GB+ microSD |
+| [AGENT.md](AGENT.md) | AI agent onboarding |
+| [docs/](docs/) | Per-module deep dives |
 
 ## License
 
-MIT
+[MIT](LICENSE)
