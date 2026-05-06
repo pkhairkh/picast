@@ -231,10 +231,32 @@ impl GstPipeline {
         };
 
         // ── Audio elements ──────────────────────────────────────────
+        //
+        // Audio chain: audio_queue → avdec_aac → audioconvert → audioresample → volume → alsasink
+        //
+        // The audio decoder is essential: parsebin outputs *encoded* audio
+        // (e.g. `audio/mpeg, mpegversion=4` for AAC), but audioconvert
+        // only handles *raw* PCM.  Without a decoder, caps negotiation
+        // fails with "Noformat" and the unlinked pad kills the pipeline
+        // with "not-linked (-1)".
+        //
+        // avdec_aac handles AAC (the most common codec in MP4 containers
+        // from video CDNs).  If the Pi doesn't have gst-libav installed,
+        // fdkaacdec is tried as a fallback.  If neither is available,
+        // audio playback is skipped (video still works).
         let audio_queue = ElementFactory::make("queue")
             .property("max-size-buffers", 3u32)
             .build()
             .map_err(|e| PlaybackError::PipelineCreation(format!("audio_queue: {}", e)))?;
+
+        let audio_decoder = ElementFactory::make("avdec_aac")
+            .build()
+            .or_else(|_| ElementFactory::make("fdkaacdec").build())
+            .map_err(|e| {
+                tracing::warn!("no AAC decoder available (avdec_aac or fdkaacdec) — audio will be disabled: {}", e);
+                // Non-fatal: we'll add a fakesink instead
+                e
+            }).ok();
 
         let audioconvert = ElementFactory::make("audioconvert")
             .build()
@@ -254,11 +276,15 @@ impl GstPipeline {
         })?;
 
         // ── Assemble pipeline ───────────────────────────────────────
+        let mut all_elements: Vec<&Element> = vec![
+            &src, &queue2, &parsebin, &video_bin,
+            &audio_queue, &audioconvert, &audioresample, &volume, &audiosink,
+        ];
+        if let Some(ref dec) = audio_decoder {
+            all_elements.push(dec);
+        }
         pipeline
-            .add_many([
-                &src, &queue2, &parsebin, &video_bin,
-                &audio_queue, &audioconvert, &audioresample, &volume, &audiosink,
-            ])
+            .add_many(&all_elements)
             .map_err(|e| PlaybackError::PipelineCreation(format!("add elements: {}", e)))?;
 
         // Link: src → queue2 → parsebin
@@ -266,13 +292,25 @@ impl GstPipeline {
             PlaybackError::PipelineCreation(format!("link src→queue2→parsebin: {}", e))
         })?;
 
-        // Link audio: audio_queue → audioconvert → audioresample → volume → audiosink
-        Element::link_many([&audio_queue, &audioconvert, &audioresample, &volume, &audiosink])
-            .map_err(|e| PlaybackError::PipelineCreation(format!("link audio chain: {}", e)))?;
+        // Link audio chain.
+        // If we have an audio decoder: audio_queue → avdec_aac → audioconvert → audioresample → volume → alsasink
+        // If no decoder available:        audio_queue → audioconvert → audioresample → volume → alsasink
+        //   (will fail caps negotiation for encoded audio, but the fakesink
+        //    fallback in the pad-added handler prevents pipeline death)
+        if let Some(ref dec) = audio_decoder {
+            Element::link_many([&audio_queue, dec, &audioconvert, &audioresample, &volume, &audiosink])
+                .map_err(|e| PlaybackError::PipelineCreation(format!("link audio chain (with decoder): {}", e)))?;
+            tracing::info!("audio chain: audio_queue → avdec_aac → audioconvert → audioresample → volume → alsasink");
+        } else {
+            Element::link_many([&audio_queue, &audioconvert, &audioresample, &volume, &audiosink])
+                .map_err(|e| PlaybackError::PipelineCreation(format!("link audio chain (no decoder): {}", e)))?;
+            tracing::warn!("audio chain has no decoder — encoded audio streams will be dropped");
+        }
 
         // ── Dynamic pad linking (parsebin → video/audio) ────────────
         let video_bin_weak = video_bin.downgrade();
         let audio_queue_weak = audio_queue.downgrade();
+        let pipeline_weak = pipeline.downgrade();
 
         parsebin.connect_pad_added(move |_parsebin, pad| {
             let caps = pad.current_caps();
@@ -304,10 +342,48 @@ impl GstPipeline {
                         tracing::debug!("audio pad already linked, skipping");
                         return;
                     }
-                    if let Err(e) = pad.link(&sink_pad) {
-                        tracing::error!("failed to link parsebin audio pad: {:?}", e);
-                    } else {
-                        tracing::debug!("linked parsebin → audio_queue");
+                    match pad.link(&sink_pad) {
+                        Ok(_) => tracing::debug!("linked parsebin → audio_queue"),
+                        Err(e) => {
+                            // Audio pad can't link to the audio chain (e.g. unsupported
+                            // codec, missing decoder).  An unlinked pad causes GStreamer
+                            // to stop the pipeline with "not-linked (-1)", which also
+                            // kills the video stream.  To prevent this, we add a
+                            // fakesink that silently discards the audio data, allowing
+                            // the video to play without audio.
+                            tracing::warn!(
+                                error = ?e,
+                                "failed to link parsebin audio pad to audio chain — \
+                                 adding fakesink so video can still play"
+                            );
+                            if let Some(pipe) = pipeline_weak.upgrade() {
+                                match ElementFactory::make("fakesink")
+                                    .property("sync", false)
+                                    .property("silent", true)
+                                    .build()
+                                {
+                                    Ok(fakesink) => {
+                                        let fakesink_name = fakesink.name().to_string();
+                                        if let Err(add_err) = pipe.add(&fakesink) {
+                                            tracing::warn!(error = %add_err, "failed to add audio fakesink to pipeline");
+                                        } else if let Err(link_err) = pad.link(&fakesink.static_pad("sink").expect("fakesink should have a sink pad")) {
+                                            tracing::warn!(error = ?link_err, "failed to link audio pad to fakesink");
+                                        } else {
+                                            // The fakesink must be set to at least READY
+                                            // before data flows, otherwise it will error.
+                                            let _ = fakesink.set_state(State::Ready);
+                                            tracing::info!(
+                                                fakesink = %fakesink_name,
+                                                "audio fakesink added — video will play without audio"
+                                            );
+                                        }
+                                    },
+                                    Err(mk_err) => {
+                                        tracing::warn!(error = %mk_err, "failed to create audio fakesink");
+                                    },
+                                }
+                            }
+                        },
                     }
                 }
             }
