@@ -262,10 +262,23 @@ async fn main() -> Result<()> {
     info!("Tor background monitor started");
 
     // 4b. Display
+    //
+    // Create the display manager and acquire DRM resources immediately.
+    // This enumerates connectors/CRTCs/planes and caches them, then closes
+    // the DRM fd so kmssink can open it fresh and become DRM master.
+    // The connector_id is passed to the PlaybackEngine so kmssink uses
+    // the correct HDMI output explicitly rather than relying on auto-detect.
     #[cfg(feature = "hw")]
-    let display_manager: Arc<tokio::sync::Mutex<picast_display::DisplayManager>> = {
-        let dm = picast_display::DisplayManager::new(&config.display.drm_device)?;
-        Arc::new(tokio::sync::Mutex::new(dm))
+    let (display_manager, connector_id) = {
+        let mut dm = picast_display::DisplayManager::new(&config.display.drm_device)?;
+        if let Err(e) = dm.acquire() {
+            warn!(error = %e, "display acquire failed at startup — kmssink will auto-detect display");
+        }
+        let conn_id = dm.active_connector_id();
+        if let Some(id) = conn_id {
+            info!(connector_id = id, "display acquired — will pass to playback engine");
+        }
+        (Arc::new(tokio::sync::Mutex::new(dm)), conn_id)
     };
     #[cfg(not(feature = "hw"))]
     let display_manager: Arc<tokio::sync::Mutex<picast_display::DisplayManager>> = {
@@ -273,17 +286,28 @@ async fn main() -> Result<()> {
         let dm = picast_display::DisplayManager::new(&config.display.drm_device)?;
         Arc::new(tokio::sync::Mutex::new(dm))
     };
+    #[cfg(not(feature = "hw"))]
+    let connector_id: Option<u32> = None;
     info!(device = %config.display.drm_device, "Display manager created");
 
     // 4c. Playback
+    //
+    // Create the playback engine with display info from the DisplayManager.
+    // Passing connector_id explicitly ensures kmssink renders to the correct
+    // HDMI output — auto-detect can misdetect on multi-output setups.
+    let mut pipeline_config = picast_playback::PipelineConfig::default();
+    if let Some(conn_id) = connector_id {
+        pipeline_config.connector_id = Some(conn_id);
+        info!(connector_id = conn_id, "playback engine configured with explicit connector ID");
+    }
     #[cfg(feature = "hw")]
     let playback_engine: Arc<picast_playback::PlaybackEngine> = {
-        Arc::new(picast_playback::PlaybackEngine::new(picast_playback::PipelineConfig::default())?)
+        Arc::new(picast_playback::PlaybackEngine::new(pipeline_config)?)
     };
     #[cfg(not(feature = "hw"))]
     let playback_engine: Arc<picast_playback::PlaybackEngine> = {
         info!("hw feature disabled — playback engine running in mock mode");
-        Arc::new(picast_playback::PlaybackEngine::new(picast_playback::PipelineConfig::default())?)
+        Arc::new(picast_playback::PlaybackEngine::new(pipeline_config)?)
     };
     info!("Playback engine created");
 

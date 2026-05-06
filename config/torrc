@@ -10,6 +10,12 @@ SocksPort 9050 IsolateSOCKSAuth
 # Used by GStreamer when per-IP isolation is preferred
 SocksPort 9051 IsolateDestAddr
 
+# Port 29050: PiCast-exclusive SOCKS5 port with per-site isolation.
+# Isolates PiCast's Tor circuits from other SOCKS users on the system
+# so that video streaming traffic gets dedicated circuits and does not
+# compete with (or get throttled by) other Tor traffic.
+SocksPort 29050 IsolateSOCKSAuth
+
 ## ─── Streaming Optimizations ────────────────────────────────
 # Keep circuits alive longer (10 min default is too aggressive for video)
 MaxCircuitDirtiness 600

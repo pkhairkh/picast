@@ -287,9 +287,26 @@ impl GstPipeline {
             .build()
             .map_err(|e| PlaybackError::PipelineCreation(format!("volume: {}", e)))?;
 
-        let audiosink = ElementFactory::make(&config.audio_sink).build().map_err(|e| {
-            PlaybackError::PipelineCreation(format!("{}: {}", config.audio_sink, e))
-        })?;
+        // audio sink (alsasink) — set async=false so it does NOT block the
+        // pipeline's state change waiting for the first audio buffer to preroll.
+        //
+        // Without this, the pre-linked audio chain (audio_queue → decoder →
+        // audioconvert → audioresample → volume → alsasink) blocks the entire
+        // pipeline at Paused when parsebin hasn't linked an audio pad yet (no
+        // audio stream, codec mismatch → fakesink fallback, or CDN 403).  GStreamer
+        // requires ALL sinks to preroll before transitioning to Playing; alsasink
+        // waiting for a buffer that never arrives keeps the whole pipeline stuck.
+        //
+        // With async=false, alsasink completes its Ready→Paused transition
+        // immediately without waiting for data.  When audio buffers eventually
+        // arrive, they play normally.  If no audio data ever arrives, alsasink
+        // sits idle without blocking the video path.
+        let audiosink = ElementFactory::make(&config.audio_sink)
+            .property("async", false)
+            .build()
+            .map_err(|e| {
+                PlaybackError::PipelineCreation(format!("{}: {}", config.audio_sink, e))
+            })?;
 
         // ── Assemble pipeline ───────────────────────────────────────
         let mut all_elements: Vec<&Element> = vec![

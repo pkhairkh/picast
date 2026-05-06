@@ -502,28 +502,30 @@ impl PlaybackEngine {
                         );
                     }
 
-                    if new_state == State::Playing {
+                    // Only emit application-level events for the pipeline
+                    // element itself, not for sub-elements.  Sub-element
+                    // state changes are logged above but should not trigger
+                    // PlaybackEvent broadcasts — they fire constantly during
+                    // preroll and would confuse the session layer.
+                    let src_name = msg.src().map(|s| s.path_string()).unwrap_or_default();
+                    let is_pipeline = src_name.contains("pipeline0");
+
+                    if new_state == State::Playing && is_pipeline {
                         let _ = event_tx.send(PlaybackEvent::Playing);
                         is_playing.store(true, Ordering::Relaxed);
-                    } else if new_state == State::Paused && pending == State::VoidPending {
+                    } else if new_state == State::Paused && pending == State::VoidPending && is_pipeline {
                         // Pipeline reached Paused with no pending state change.
-                        // This means the original async set_state(Playing) was
-                        // interrupted (e.g. by a CDN error) or GStreamer didn't
-                        // automatically continue the Paused→Playing transition.
-                        // Explicitly push to Playing to ensure video starts.
+                        // This means the pipeline is genuinely Paused (e.g. the
+                        // user called pause(), or an error interrupted playback).
                         //
-                        // We only do this for the PIPELINE element (not
-                        // sub-elements) and only when pending=VoidPending
-                        // (meaning no state change is already in progress).
-                        let src_name = msg.src().map(|s| s.path_string()).unwrap_or_default();
-                        if src_name.contains("pipeline0") {
-                            tracing::info!(
-                                "pipeline reached Paused with no pending transition — explicitly pushing to Playing"
-                            );
-                            if let Some(pipe) = pipeline_weak.upgrade() {
-                                let _ = pipe.set_state(State::Playing);
-                            }
-                        }
+                        // Do NOT auto-push to Playing here — that would cancel
+                        // user-initiated pauses.  Instead, the diagnostic task
+                        // at 5s provides a safety nudge for the initial startup
+                        // case where GStreamer didn't automatically complete the
+                        // Ready→Paused→Playing transition.
+                        tracing::info!(
+                            "pipeline reached Paused with no pending transition — genuine pause"
+                        );
                         let _ = event_tx.send(PlaybackEvent::Paused);
                         is_playing.store(false, Ordering::Relaxed);
                     }
@@ -612,7 +614,15 @@ impl PlaybackEngine {
                 // at 15s to identify which element is blocking preroll.
                 let pipeline_weak_diag = guard.as_ref().unwrap().pipeline().downgrade();
                 tokio::spawn(async move {
-                    // First check at 5s — quick status
+                    // First check at 5s — nudge pipeline to Playing if stuck at Paused.
+                    // This is a safety net for cases where GStreamer completed preroll
+                    // (all elements reached Paused) but didn't automatically transition
+                    // to Playing — which can happen when alsasink is async=false and
+                    // completes its state change before receiving data, or when the
+                    // async state change sequence gets interrupted.
+                    //
+                    // Calling set_state(Playing) on a pipeline that's already Playing
+                    // or already pending=Playing is a no-op, so this is always safe.
                     tokio::time::sleep(std::time::Duration::from_secs(5)).await;
                     if let Some(pipe) = pipeline_weak_diag.upgrade() {
                         let (result, current, pending) = pipe.state(gstreamer::ClockTime::from_mseconds(0));
@@ -622,6 +632,14 @@ impl PlaybackEngine {
                             pending = ?pending,
                             "pipeline state check after 5s"
                         );
+                        if current != State::Playing {
+                            tracing::warn!(
+                                current = ?current,
+                                pending = ?pending,
+                                "pipeline NOT playing after 5s — nudging to Playing"
+                            );
+                            let _ = pipe.set_state(State::Playing);
+                        }
                     }
 
                     // Second check at 15s — detailed per-element state dump
@@ -789,19 +807,19 @@ impl PlaybackEngine {
                         );
                     }
 
-                    if new_state == State::Playing {
+                    // Only emit application-level events for the pipeline element.
+                    let src_name = msg.src().map(|s| s.path_string()).unwrap_or_default();
+                    let is_pipeline = src_name.contains("pipeline0");
+
+                    if new_state == State::Playing && is_pipeline {
                         let _ = event_tx.send(PlaybackEvent::Playing);
                         is_playing.store(true, Ordering::Relaxed);
-                    } else if new_state == State::Paused && pending == State::VoidPending {
-                        let src_name = msg.src().map(|s| s.path_string()).unwrap_or_default();
-                        if src_name.contains("pipeline0") {
-                            tracing::info!(
-                                "pipeline reached Paused with no pending transition (SW) — explicitly pushing to Playing"
-                            );
-                            if let Some(pipe) = pipeline_weak.upgrade() {
-                                let _ = pipe.set_state(State::Playing);
-                            }
-                        }
+                    } else if new_state == State::Paused && pending == State::VoidPending && is_pipeline {
+                        // Genuine pause — do NOT auto-push to Playing.
+                        // See primary bus watch handler for rationale.
+                        tracing::info!(
+                            "pipeline reached Paused with no pending transition (SW) — genuine pause"
+                        );
                         let _ = event_tx.send(PlaybackEvent::Paused);
                         is_playing.store(false, Ordering::Relaxed);
                     }

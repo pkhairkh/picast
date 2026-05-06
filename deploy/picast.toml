@@ -6,8 +6,8 @@ tls_cert_path = "/etc/picast/tls/picast.pem"
 tls_key_path = "/etc/picast/tls/picast-key.pem"
 
 [tor]
-socks_addr = "127.0.0.1:9050"
-control_port = 9051
+socks_addr = "127.0.0.1:29050"
+control_port = 9052
 cookie_path = "/run/tor/control.authcookie"
 
 [display]

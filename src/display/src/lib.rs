@@ -289,6 +289,32 @@ impl DisplayManager {
     /// if it also fails, the GStreamer pipeline will fail, and our HW→SW
     /// fallback will kick in.
     pub fn acquire(&mut self) -> Result<(), DisplayError> {
+        // Idempotent: if we already acquired and cached connector/CRTC info,
+        // return Ok immediately.  After the first acquire(), the DRM fd is
+        // closed so kmssink can open it fresh.  A second call from the
+        // session manager must not fail just because the fd is gone.
+        if self.active_crtc.is_some() && !self.connectors.is_empty() {
+            tracing::debug!("display already acquired — skipping re-acquire");
+            return Ok(());
+        }
+
+        // If the fd was closed by a previous acquire() (to let kmssink
+        // become the first DRM opener), re-open the device now.
+        if self.drm_fd.is_none() {
+            tracing::info!("re-opening DRM device for re-acquire");
+            let file = OpenOptions::new()
+                .read(true)
+                .write(true)
+                .open(&self.device_path)
+                .map_err(|e| {
+                    DisplayError::DeviceOpen(format!(
+                        "re-open {} for re-acquire: {}",
+                        self.device_path, e
+                    ))
+                })?;
+            self.drm_fd = Some(Card(file));
+        }
+
         let fd = self
             .drm_fd
             .as_ref()
