@@ -24,10 +24,7 @@ const CLEANUP_AGE: Duration = Duration::from_secs(3600);
 
 /// Return the current time as Unix epoch seconds.
 fn now_epoch_secs() -> i64 {
-    SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .unwrap_or_default()
-        .as_secs() as i64
+    SystemTime::now().duration_since(UNIX_EPOCH).unwrap_or_default().as_secs() as i64
 }
 
 /// SQLite-backed URL resolution cache.
@@ -91,8 +88,9 @@ impl ResolveCache {
                 height         INTEGER,
                 subtitle_tracks TEXT,
                 resolved_at    INTEGER NOT NULL
-            );"
-        ).expect("failed to create cache table");
+            );",
+        )
+        .expect("failed to create cache table");
 
         Self { conn: Mutex::new(conn), ttl }
     }
@@ -105,7 +103,8 @@ impl ResolveCache {
     pub fn insert(&self, _url: &str, result: ResolveResult) {
         let conn = self.conn.lock().unwrap();
         let now = now_epoch_secs();
-        let subtitle_json = serde_json::to_string(&result.subtitle_tracks).unwrap_or_else(|_| "[]".into());
+        let subtitle_json =
+            serde_json::to_string(&result.subtitle_tracks).unwrap_or_else(|_| "[]".into());
 
         // Convert u64/u32 fields to i64/i32 for SQLite compatibility.
         let content_length: Option<i64> = result.content_length.map(|v| v as i64);
@@ -154,18 +153,18 @@ impl ResolveCache {
         let ttl_secs = self.ttl.as_secs() as i64;
         let cutoff = now - ttl_secs;
 
-        let mut stmt = conn.prepare(
-            "SELECT source_url, direct_url, category, mime_type, content_length,
+        let mut stmt = conn
+            .prepare(
+                "SELECT source_url, direct_url, category, mime_type, content_length,
                     used_tor, title, duration, thumbnail, vcodec, acodec,
                     width, height, subtitle_tracks
              FROM resolved_urls
              WHERE source_url = ?
-               AND resolved_at > ?"
-        ).ok()?;
+               AND resolved_at > ?",
+            )
+            .ok()?;
 
-        let result = stmt.query_row(params![url, cutoff], |row| {
-            Ok(row_to_resolve_result(row))
-        });
+        let result = stmt.query_row(params![url, cutoff], |row| Ok(row_to_resolve_result(row)));
 
         match result {
             Ok(r) => Some(r),
@@ -184,10 +183,7 @@ impl ResolveCache {
         let ttl_secs = self.ttl.as_secs() as i64;
         let cutoff = now - ttl_secs;
 
-        match conn.execute(
-            "DELETE FROM resolved_urls WHERE resolved_at < ?",
-            params![cutoff],
-        ) {
+        match conn.execute("DELETE FROM resolved_urls WHERE resolved_at < ?", params![cutoff]) {
             Ok(deleted) => {
                 if deleted > 0 {
                     tracing::debug!(deleted = deleted, "evicted expired cache entries");
@@ -220,10 +216,7 @@ impl ResolveCache {
         let now = now_epoch_secs();
         let cleanup_secs = CLEANUP_AGE.as_secs() as i64;
         let cutoff = now - cleanup_secs;
-        let _ = conn.execute(
-            "DELETE FROM resolved_urls WHERE resolved_at < ?",
-            params![cutoff],
-        );
+        let _ = conn.execute("DELETE FROM resolved_urls WHERE resolved_at < ?", params![cutoff]);
     }
 }
 
@@ -239,7 +232,8 @@ fn row_to_resolve_result(row: &rusqlite::Row<'_>) -> ResolveResult {
         serde_json::from_str(&subtitle_tracks_str).unwrap_or_default();
 
     // Convert i64/i32 back to u64/u32 for ResolveResult fields.
-    let content_length: Option<u64> = row.get::<_, Option<i64>>(4).unwrap_or(None).map(|v| v as u64);
+    let content_length: Option<u64> =
+        row.get::<_, Option<i64>>(4).unwrap_or(None).map(|v| v as u64);
     let duration: Option<u64> = row.get::<_, Option<i64>>(7).unwrap_or(None).map(|v| v as u64);
     let width: Option<u32> = row.get::<_, Option<i32>>(11).unwrap_or(None).map(|v| v as u32);
     let height: Option<u32> = row.get::<_, Option<i32>>(12).unwrap_or(None).map(|v| v as u32);
@@ -386,10 +380,22 @@ mod tests {
         assert_eq!(cache.len(), 5);
 
         // Verify each category roundtrips correctly.
-        assert_eq!(cache.get("https://example.com/v.mp4").unwrap().category, UrlCategory::DirectMedia);
-        assert_eq!(cache.get("https://example.com/stream.m3u8").unwrap().category, UrlCategory::HlsManifest);
-        assert_eq!(cache.get("https://example.com/stream.mpd").unwrap().category, UrlCategory::DashManifest);
-        assert_eq!(cache.get("https://youtube.com/watch?v=abc").unwrap().category, UrlCategory::WebPage);
+        assert_eq!(
+            cache.get("https://example.com/v.mp4").unwrap().category,
+            UrlCategory::DirectMedia
+        );
+        assert_eq!(
+            cache.get("https://example.com/stream.m3u8").unwrap().category,
+            UrlCategory::HlsManifest
+        );
+        assert_eq!(
+            cache.get("https://example.com/stream.mpd").unwrap().category,
+            UrlCategory::DashManifest
+        );
+        assert_eq!(
+            cache.get("https://youtube.com/watch?v=abc").unwrap().category,
+            UrlCategory::WebPage
+        );
         assert_eq!(cache.get("http://xyz.onion/v.mp4").unwrap().category, UrlCategory::Onion);
     }
 
@@ -442,7 +448,10 @@ mod tests {
         let cache = ResolveCache::with_ttl(Duration::from_secs(1));
 
         // Insert an entry.
-        cache.insert("https://example.com/video1.mp4", test_result("https://example.com/video1.mp4"));
+        cache.insert(
+            "https://example.com/video1.mp4",
+            test_result("https://example.com/video1.mp4"),
+        );
         assert_eq!(cache.len(), 1);
 
         // Wait well beyond the TTL for it to expire.
@@ -466,7 +475,10 @@ mod tests {
         std::thread::sleep(Duration::from_millis(2500));
 
         // The entry should not be returned even without explicit eviction.
-        assert!(cache.get("https://example.com/video.mp4").is_none(), "expired entry should not be returned");
+        assert!(
+            cache.get("https://example.com/video.mp4").is_none(),
+            "expired entry should not be returned"
+        );
     }
 
     #[test]

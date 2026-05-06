@@ -248,8 +248,10 @@ async fn main() -> Result<()> {
     let http_server =
         picast_protocols::HttpApiServer::new(&config.server.http_addr, session.clone());
     let ws_server = picast_protocols::WebSocketServer::new(&config.server.ws_addr, session.clone());
-    let dlna_renderer =
-        picast_protocols::DlnaRenderer::new(&config.dlna.friendly_name, &config.tor.socks_addr);
+    let dlna_renderer = Arc::new(picast_protocols::DlnaRenderer::new(
+        &config.dlna.friendly_name,
+        &config.tor.socks_addr,
+    ));
 
     info!("all components initialised");
 
@@ -282,10 +284,18 @@ async fn main() -> Result<()> {
     });
 
     // Start DLNA renderer (non-blocking, may fail if gmediarender not installed).
+    let dlna_start = dlna_renderer.clone();
     let dlna_handle = tokio::spawn(async move {
-        if let Err(e) = dlna_renderer.start().await {
+        if let Err(e) = dlna_start.start().await {
             warn!(error = %e, "DLNA renderer failed to start — DLNA casting will be unavailable");
         }
+    });
+
+    // Start DLNA session sync — mirrors PiCast session state to gmediarender.
+    let dlna_sync = dlna_renderer.clone();
+    let dlna_event_rx = session.subscribe();
+    let dlna_sync_handle = tokio::spawn(async move {
+        picast_protocols::run_dlna_sync(dlna_sync, dlna_event_rx).await;
     });
 
     // ── 8. Run until shutdown ─────────────────────────────────────────
@@ -300,8 +310,14 @@ async fn main() -> Result<()> {
         let _ = http_handle.await;
         let _ = ws_handle.await;
         let _ = dlna_handle.await;
+        let _ = dlna_sync_handle.await;
     })
     .await;
+
+    // Stop DLNA renderer subprocess.
+    if let Err(e) = dlna_renderer.stop().await {
+        warn!(error = %e, "DLNA renderer shutdown error");
+    }
 
     // Shutdown Tor if we own it.
     if let Err(e) = tor_manager.shutdown().await {

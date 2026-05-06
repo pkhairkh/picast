@@ -12,6 +12,6 @@ pub mod dlna;
 pub mod http;
 pub mod ws;
 
-pub use dlna::DlnaRenderer;
+pub use dlna::{run_dlna_sync, DlnaRenderer};
 pub use http::HttpApiServer;
 pub use ws::WebSocketServer;

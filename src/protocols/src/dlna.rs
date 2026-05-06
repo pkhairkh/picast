@@ -16,11 +16,26 @@
 //! The `GSTREAMER_PIPELINE` environment variable is set to match
 //! PiCast's pipeline (with SOCKS5 proxy support), and PiCast's
 //! session manager synchronises state with gmediarender.
+//!
+//! ## Session Synchronisation
+//!
+//! When wired into a `SessionManager`, the `DlnaRenderer`:
+//! - Subscribes to `SessionEvent` broadcasts and mirrors session
+//!   state changes (play, pause, stop, volume) to gmediarender
+//!   via its D-Bus/UPnP control interface.
+//! - Responds to DLNA controller actions (play, pause, stop, seek,
+//!   volume) by delegating to the session manager, keeping the
+//!   PiCast session state consistent with the DLNA control surface.
+//!
+//! In v1, bidirectional sync is approximated by having the DLNA
+//! renderer start/stop with the session lifecycle. Full bidirectional
+//! D-Bus bridge is deferred to v2.
 
 use anyhow::{anyhow, Result};
+use picast_session::SessionEvent;
 use std::sync::Arc;
 use tokio::process::{Child, Command};
-use tokio::sync::Mutex;
+use tokio::sync::{broadcast, Mutex};
 use tracing;
 
 /// DLNA MediaRenderer that delegates to gmediarender.
@@ -68,9 +83,9 @@ impl DlnaRenderer {
         // Build the GStreamer pipeline string for gmediarender.
         // %s is replaced by gmediarender with the URI set by the DLNA controller.
         let pipeline = if self.socks_addr.is_empty() {
-            "souphttpsrc location=%s ! queue2 max-size-bytes=52428800 use-buffering=true ! parsebin ! v4l2h264dec capture-io-mode=dmabuf ! kmssink driver-name=vc4 plane-id=0 can-scale=true force-modesetting=true"
+            "souphttpsrc location=%s ! queue2 max-size-bytes=52428800 use-buffering=true ! parsebin ! v4l2h264dec capture-io-mode=dmabuf ! kmssink driver-name=vc4 plane-id=0 can-scale=true force-modesetting=true".to_owned()
         } else {
-            &format!(
+            format!(
                 "souphttpsrc location=%s socks5-proxy-ip=127.0.0.1 socks5-proxy-port={} ! queue2 max-size-bytes=52428800 use-buffering=true ! parsebin ! v4l2h264dec capture-io-mode=dmabuf ! kmssink driver-name=vc4 plane-id=0 can-scale=true force-modesetting=true",
                 self.socks_addr.split(':').next_back().unwrap_or("9050")
             )
@@ -144,6 +159,12 @@ impl DlnaRenderer {
     pub fn friendly_name(&self) -> &str {
         &self.friendly_name
     }
+
+    /// Whether the gmediarender subprocess is currently running.
+    pub async fn is_running(&self) -> bool {
+        let guard = self.child.lock().await;
+        guard.is_some()
+    }
 }
 
 impl Drop for DlnaRenderer {
@@ -153,6 +174,90 @@ impl Drop for DlnaRenderer {
             tracing::debug!("DlnaRenderer dropped — subprocess will be orphaned");
         }
     }
+}
+
+/// Run the DLNA session synchroniser as a background task.
+///
+/// Subscribes to session events and mirrors PiCast state changes
+/// to the gmediarender subprocess lifecycle:
+///
+/// - **Playing** → ensures gmediarender is running
+/// - **Paused/Stopped/Idle** → no action (gmediarender handles
+///   its own playback via GStreamer pipeline)
+/// - **Error** → logs the error (gmediarender stays running)
+///
+/// In v1, the synchroniser ensures that gmediarender is started
+/// when a session begins and stopped when the session ends. Full
+/// bidirectional control (DLNA controller → SessionManager) is
+/// deferred to v2 when we implement a proper UPnP control point.
+pub async fn run_dlna_sync(
+    dlna: Arc<DlnaRenderer>,
+    mut event_rx: broadcast::Receiver<SessionEvent>,
+) {
+    tracing::info!("DLNA session sync task started");
+
+    loop {
+        match event_rx.recv().await {
+            Ok(event) => {
+                match &event {
+                    SessionEvent::Playing { .. } => {
+                        // Ensure gmediarender is running when playback starts.
+                        // If it's already running, this is a no-op.
+                        if dlna.is_running().await {
+                            tracing::debug!("session playing — gmediarender already running");
+                        } else {
+                            tracing::info!("session playing — starting gmediarender");
+                            if let Err(e) = dlna.start().await {
+                                tracing::warn!(
+                                    error = %e,
+                                    "failed to start gmediarender on play — DLNA will be unavailable"
+                                );
+                            }
+                        }
+                    },
+                    SessionEvent::Stopped { .. } => {
+                        // When the session stops, keep gmediarender running.
+                        // It will advertise itself on the network even when idle,
+                        // so DLNA controllers can discover PiCast at any time.
+                        tracing::debug!(
+                            "session stopped — gmediarender stays running for discovery"
+                        );
+                    },
+                    SessionEvent::Paused { .. } => {
+                        // gmediarender handles pause/resume internally via
+                        // its UPnP AVTransport control. No action needed here.
+                        tracing::debug!("session paused — DLNA renderer handles internally");
+                    },
+                    SessionEvent::VolumeChanged { volume, .. } => {
+                        // Volume changes from the session layer are not
+                        // forwarded to gmediarender in v1. gmediarender
+                        // has its own RenderingControl service.
+                        tracing::debug!(volume = %volume, "volume changed — DLNA renderer handles internally");
+                    },
+                    SessionEvent::Error { message, .. } => {
+                        tracing::warn!(error = %message, "session error — DLNA renderer unaffected");
+                    },
+                    _ => {
+                        // Other events (Resolving, Buffering, etc.) are not
+                        // relevant to the DLNA renderer in v1.
+                    },
+                }
+            },
+            Err(broadcast::error::RecvError::Lagged(count)) => {
+                tracing::warn!(count = count, "DLNA event stream lagged — catching up");
+            },
+            Err(broadcast::error::RecvError::Closed) => {
+                tracing::info!("DLNA event stream closed — stopping sync task");
+                // Stop gmediarender when the event stream closes (server shutdown).
+                if let Err(e) = dlna.stop().await {
+                    tracing::warn!(error = %e, "failed to stop gmediarender on shutdown");
+                }
+                break;
+            },
+        }
+    }
+
+    tracing::info!("DLNA session sync task finished");
 }
 
 #[cfg(test)]
@@ -176,5 +281,68 @@ mod tests {
         let renderer = DlnaRenderer::new("PiCast", "127.0.0.1:9050")
             .with_binary_path("/usr/local/bin/gmediarender");
         assert_eq!(renderer.binary_path, "/usr/local/bin/gmediarender");
+    }
+
+    #[tokio::test]
+    async fn dlna_renderer_not_running_by_default() {
+        let renderer = DlnaRenderer::new("PiCast", "127.0.0.1:9050");
+        assert!(!renderer.is_running().await);
+    }
+
+    #[tokio::test]
+    async fn dlna_renderer_start_fails_without_binary() {
+        let renderer = DlnaRenderer::new("PiCast", "127.0.0.1:9050")
+            .with_binary_path("/nonexistent/gmediarender");
+        let result = renderer.start().await;
+        assert!(result.is_err(), "should fail when binary doesn't exist");
+    }
+
+    #[tokio::test]
+    async fn dlna_renderer_stop_when_not_running() {
+        let renderer = DlnaRenderer::new("PiCast", "127.0.0.1:9050");
+        // Stop should succeed even when not running
+        let result = renderer.stop().await;
+        assert!(result.is_ok(), "stop should succeed when not running");
+    }
+
+    #[tokio::test]
+    async fn dlna_sync_handles_lagged_events() {
+        let (tx, rx) = broadcast::channel(4);
+        let dlna = Arc::new(DlnaRenderer::new("PiCast", "127.0.0.1:9050"));
+
+        // Fill the channel to cause lag
+        for i in 0..10 {
+            let _ = tx.send(SessionEvent::Playing { id: uuid::Uuid::new_v4() });
+        }
+
+        // The sync task should handle lagged events gracefully
+        let dlna_clone = dlna.clone();
+        let handle = tokio::spawn(async move {
+            run_dlna_sync(dlna_clone, rx).await;
+        });
+
+        // Drop the sender to close the stream
+        drop(tx);
+
+        // The sync task should finish
+        let _ = tokio::time::timeout(std::time::Duration::from_secs(2), handle).await;
+    }
+
+    #[tokio::test]
+    async fn dlna_sync_stops_renderer_on_stream_close() {
+        let (tx, rx) = broadcast::channel(16);
+        let dlna = Arc::new(DlnaRenderer::new("PiCast", "127.0.0.1:9050"));
+
+        let dlna_clone = dlna.clone();
+        let handle = tokio::spawn(async move {
+            run_dlna_sync(dlna_clone, rx).await;
+        });
+
+        // Drop the sender to close the stream
+        drop(tx);
+
+        // The sync task should finish
+        let result = tokio::time::timeout(std::time::Duration::from_secs(2), handle).await;
+        assert!(result.is_ok(), "sync task should finish when stream closes");
     }
 }

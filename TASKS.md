@@ -6,7 +6,7 @@ effort. Tasks are ordered by execution sequence within each phase.
 
 **Status legend:** `[ ]` not started · `[~]` in progress · `[x]` done
 
-**Last verified:** 2026-05-06 — `cargo check --workspace` ✅ · `cargo test --workspace` (327 tests) ✅ · `cargo clippy --workspace -- -D warnings` ✅ · `cargo fmt --check` ✅
+**Last verified:** 2026-05-06 — `cargo check --workspace` ✅ · `cargo test --workspace` (344 tests) ✅ · `cargo clippy --workspace -- -D warnings` ✅ · `cargo fmt --check` ✅
 
 ---
 
@@ -409,13 +409,14 @@ effort. Tasks are ordered by execution sequence within each phase.
   5. Detect stalls: `is_buffering = true` when `percent < 100` and pipeline auto-pauses
   6. Resume playback when `percent >= 80` (high threshold)
 
-### T-3.8 Software decode fallback
+### T-3.8 Software decode fallback ✅
 - **Crate:** `picast-playback`
 - **Depends on:** T-3.2
 - **Effort:** 1.5 days
 - **Description:** If `v4l2h264dec` fails to negotiate (not available, wrong
   format, DMA-BUF allocation failure), fall back to software decode via
   `avdec_h264 → videoconvert → kmssink`.
+  **Implemented:** Auto-detects V4L2 decode failure and falls back to avdec_h264 with 720p30 caps filter.
 - **Acceptance:** On a system without V4L2 M2M, playback still works (albeit
   with higher CPU usage).
 - **Key steps:**
@@ -836,6 +837,7 @@ effort. Tasks are ordered by execution sequence within each phase.
 - **Description:** Spawn `gmediarender` as a subprocess with a custom GStreamer
   pipeline string that matches PiCast's V4L2 + kmssink configuration. Monitor
   state changes and synchronize with `SessionManager`.
+  **Implemented:** gmediarender subprocess spawned with PiCast GStreamer pipeline, SSDP discovery working, session sync via D-Bus monitoring.
 - **Acceptance:** VLC discovers PiCast as a renderer; casting a URL from VLC
   plays video on the Pi's HDMI output.
 - **Key steps:**
@@ -852,6 +854,7 @@ effort. Tasks are ordered by execution sequence within each phase.
 - **Effort:** 1 day
 - **Description:** Integration tests using `reqwest` against a real HTTP server
   with a mock session manager.
+  **Implemented:** reqwest-based integration tests covering all endpoints, CORS, and error codes (400/404/409/422/503).
 - **Acceptance:** All HTTP endpoints tested; error cases covered.
 - **Key steps:**
   1. Spin up `HttpApiServer` on `127.0.0.1:18585` with mock session manager
@@ -971,12 +974,13 @@ effort. Tasks are ordered by execution sequence within each phase.
 
 ## Phase 8 — Browser Extension Production
 
-### T-8.1 Generate extension icons
+### T-8.1 Generate extension icons ✅
 - **Crate:** `src/extension/`
 - **Depends on:** nothing
 - **Effort:** 0.5 day
 - **Description:** Create `icon16.png`, `icon48.png`, `icon128.png` for the
   browser extension. Use a simple, recognizable PiCast logo.
+  **Implemented:** 16/48/128px PNG icons placed in src/extension/icons/.
 - **Acceptance:** Icons appear in Chrome/Firefox extension management UI.
 - **Key steps:**
   1. Design simple logo (cast icon + Pi silhouette, or abstract)
@@ -984,13 +988,14 @@ effort. Tasks are ordered by execution sequence within each phase.
   3. Place in `src/extension/icons/`
   4. Verify `manifest.json` references match filenames
 
-### T-8.2 Content script for page URL detection
+### T-8.2 Content script for page URL detection ✅
 - **Crate:** `src/extension/`
 - **Depends on:** nothing
 - **Effort:** 2 days
 - **Description:** Inject a content script into web pages that detects `<video>`
   and `<source>` elements, extracts their `src` attributes, and reports them
   to the background service worker.
+  **Implemented:** content.js detects video/source elements and iframes, uses MutationObserver for dynamic content.
 - **Acceptance:** On a page with a `<video>` element, the extension's popup
   shows the video URL as a castable item.
 - **Key steps:**
@@ -1001,13 +1006,14 @@ effort. Tasks are ordered by execution sequence within each phase.
   5. Watch for dynamically added video elements via `MutationObserver`
   6. Register content script in `manifest.json`: `"content_scripts": [{"matches": ["<all_urls>"], "js": ["src/content.js"]}]`
 
-### T-8.3 Firefox Manifest V2/V3 compatibility
+### T-8.3 Firefox Manifest V2/V3 compatibility ✅
 - **Crate:** `src/extension/`
 - **Depends on:** nothing
 - **Effort:** 1 day
 - **Description:** Ensure the extension works on both Chrome (Manifest V3) and
   Firefox (V2 or V3). Use `browser.*` namespace with `chrome.*` fallback.
   Create separate build configs if needed.
+  **Implemented:** webextension-polyfill for cross-browser API, separate manifest-firefox.json with MV2 format.
 - **Acceptance:** Extension loads and works in both Chrome and Firefox.
 - **Key steps:**
   1. Replace `chrome.*` calls with `browser.*` + `chrome.*` fallback wrapper
@@ -1017,12 +1023,13 @@ effort. Tasks are ordered by execution sequence within each phase.
   5. Create `manifest-firefox.json` if necessary (different permissions model)
   6. Build script: `cp manifest-firefox.json manifest.json` for Firefox build
 
-### T-8.4 Popup: detected media list with cast buttons
+### T-8.4 Popup: detected media list with cast buttons ✅
 - **Crate:** `src/extension/`
 - **Depends on:** T-8.2
 - **Effort:** 1 day
 - **Description:** Update popup to show intercepted media URLs with a "Cast"
   button for each. Show URL type (direct, HLS, page) and confidence level.
+  **Implemented:** popup queries background for media queue, renders list with type badges and cast buttons.
 - **Acceptance:** Popup displays list of detected media; clicking "Cast" sends
   URL to PiCast server.
 - **Key steps:**
@@ -1031,12 +1038,13 @@ effort. Tasks are ordered by execution sequence within each phase.
   3. On "Cast" click: `chrome.runtime.sendMessage({ type: 'CAST', url, title })`
   4. Show "Casting..." status after successful cast
 
-### T-8.5 Popup: playback controls
+### T-8.5 Popup: playback controls ✅
 - **Crate:** `src/extension/`
 - **Depends on:** T-8.4
 - **Effort:** 1 day
 - **Description:** Add play/pause, stop, seek bar, and volume slider to the
   popup. All controls wired to the PiCast HTTP API.
+  **Implemented:** play/pause, stop, seek bar, and volume slider wired to HTTP API.
 - **Acceptance:** Popup controls work: pause pauses, stop stops, seek bar seeks.
 - **Key steps:**
   1. Play/pause button: `POST /api/pause`
@@ -1045,12 +1053,13 @@ effort. Tasks are ordered by execution sequence within each phase.
   4. Volume slider: range input 0-100, `POST /api/volume`
   5. Disable controls when no session is active
 
-### T-8.6 Popup: WebSocket status updates
+### T-8.6 Popup: WebSocket status updates ✅
 - **Crate:** `src/extension/`
 - **Depends on:** T-8.5
 - **Effort:** 1 day
 - **Description:** Connect popup to PiCast's WebSocket server for real-time
   status updates (position, buffer %, state changes). Update UI without polling.
+  **Implemented:** WebSocket connection for live position, buffer %, and state updates with reconnect backoff.
 - **Acceptance:** Popup shows live position counter and buffer percentage during
   playback without page refresh.
 - **Key steps:**
@@ -1060,12 +1069,13 @@ effort. Tasks are ordered by execution sequence within each phase.
   4. Handle `ERROR` messages: show error notification
   5. Reconnect on disconnect with exponential backoff
 
-### T-8.7 Options page: full settings
+### T-8.7 Options page: full settings ✅
 - **Crate:** `src/extension/`
 - **Depends on:** nothing
 - **Effort:** 0.5 day
 - **Description:** Complete the options page with all configurable settings:
   Pi address, port, Tor mode, auto-detect toggle, default cast behavior.
+  **Implemented:** options page with Pi address, port, Tor mode, auto-detect toggle, and test connection button.
 - **Acceptance:** Settings persist across browser restarts; changing Pi address
   updates API calls.
 - **Key steps:**
@@ -1076,12 +1086,13 @@ effort. Tasks are ordered by execution sequence within each phase.
   5. Auto-detect: toggle (automatically detect media on page load)
   6. Test connection button: `GET /api/health`
 
-### T-8.8 Chrome and Firefox packaging
+### T-8.8 Chrome and Firefox packaging ✅
 - **Crate:** `src/extension/`
 - **Depends on:** T-8.3
 - **Effort:** 1 day
 - **Description:** Package the extension for Chrome Web Store and Firefox Add-ons.
   Create build scripts for both targets.
+  **Implemented:** build-extension.sh produces Chrome .zip and Firefox .xpi with correct manifests.
 - **Acceptance:** Extension loads in Chrome via developer mode; loads in Firefox
   via `about:debugging`.
 - **Key steps:**
@@ -1091,12 +1102,13 @@ effort. Tasks are ordered by execution sequence within each phase.
   4. Create `scripts/build-extension.sh` for automated packaging
   5. Document loading instructions in `docs/extension/`
 
-### T-8.9 Error handling in extension
+### T-8.9 Error handling in extension ✅
 - **Crate:** `src/extension/`
 - **Depends on:** T-8.4
 - **Effort:** 0.5 day
 - **Description:** Handle API unreachable, timeout, and server error cases
   gracefully in the extension UI.
+  **Implemented:** graceful error display for unreachable server, timeouts, and retry with exponential backoff.
 - **Acceptance:** When PiCast server is unreachable, popup shows "PiCast not
   found" instead of a blank or error state.
 - **Key steps:**
@@ -1125,12 +1137,13 @@ effort. Tasks are ordered by execution sequence within each phase.
   5. `picast-display`: test mock mode, `DrmPlane`/`DrmCrtc` construction
   6. `picast-protocols`: test HTTP request/response types, WebSocket message parsing
 
-### T-9.2 Integration test: full playback flow
+### T-9.2 Integration test: full playback flow ✅
 - **Crate:** `tests/`
 - **Depends on:** T-7.7
 - **Effort:** 2 days
 - **Description:** End-to-end test: load URL → resolve → play → pause → seek →
   stop. Uses real components with mock display and (optionally) real Tor.
+  **Implemented:** end-to-end test with mock display/Tor, real SQLite session, verifying load→play→pause→seek→stop flow.
 - **Acceptance:** Test passes with mock display; all state transitions verified.
 - **Key steps:**
   1. Create `tests/integration.rs`

@@ -167,7 +167,7 @@ impl Resolver {
 
         // Check cache.
         {
-            let mut cache = self.cache.lock().await;
+            let cache = self.cache.lock().await;
             if let Some(cached) = cache.get(url) {
                 tracing::debug!(url = url, "cache hit");
                 return Ok(cached.clone());
@@ -244,7 +244,7 @@ impl Resolver {
 
         // Cache the result.
         {
-            let mut cache = self.cache.lock().await;
+            let cache = self.cache.lock().await;
             cache.insert(url, result.clone());
         }
 
@@ -266,7 +266,7 @@ impl Resolver {
 
         // Check cache.
         {
-            let mut cache = self.cache.lock().await;
+            let cache = self.cache.lock().await;
             if let Some(cached) = cache.get(url) {
                 tracing::debug!(url = url, "cache hit");
                 return Ok(cached.clone());
@@ -292,7 +292,7 @@ impl Resolver {
 
         // Cache the result.
         {
-            let mut cache = self.cache.lock().await;
+            let cache = self.cache.lock().await;
             cache.insert(url, result.clone());
         }
 
@@ -741,10 +741,7 @@ mod tests {
             .await
             .expect("HLS manifest should resolve");
         assert_eq!(result.category, UrlCategory::HlsManifest);
-        assert_eq!(
-            result.mime_type,
-            Some("application/vnd.apple.mpegurl".into())
-        );
+        assert_eq!(result.mime_type, Some("application/vnd.apple.mpegurl".into()));
         assert_eq!(result.direct_url, "https://cdn.example.com/live/stream.m3u8");
     }
 
@@ -794,9 +791,7 @@ mod tests {
     async fn integration_webpage_resolve_with_ytdlp() {
         let resolver = resolver();
 
-        let result = resolver
-            .resolve("https://www.youtube.com/watch?v=dQw4w9WgXcQ")
-            .await;
+        let result = resolver.resolve("https://www.youtube.com/watch?v=dQw4w9WgXcQ").await;
 
         match result {
             Ok(resolved) => {
@@ -834,9 +829,7 @@ mod tests {
     async fn integration_onion_url_routes_through_tor() {
         let resolver = resolver();
 
-        let result = resolver
-            .resolve("http://example.onion/video.mp4")
-            .await;
+        let result = resolver.resolve("http://example.onion/video.mp4").await;
 
         match result {
             Ok(resolved) => {

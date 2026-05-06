@@ -2,8 +2,17 @@
  * PiCast Popup Script
  *
  * Manages the popup UI: cast button, playback controls, detected
- * media list, and real-time status display. Communicates with the
- * background service worker via chrome.runtime.sendMessage.
+ * media list, and real-time status display.
+ *
+ * ## Status Update Strategy
+ *
+ * The popup receives real-time status updates via the background
+ * service worker, which maintains a WebSocket connection to the
+ * PiCast server. When the WebSocket is unavailable, the popup
+ * falls back to HTTP polling every 3 seconds.
+ *
+ * - WebSocket: instant push of MEDIA_STATUS, RESOLVE_PROGRESS, ERROR
+ * - HTTP polling: GET /api/status every 3 seconds (fallback)
  */
 
 "use strict";
@@ -39,6 +48,8 @@ const settingsBtn = $("settingsBtn");
 let currentState = "idle";
 let currentPosition = 0;
 let currentDuration = null;
+let wsConnected = false;
+let pollingTimer = null;
 
 // ─── Helpers ───────────────────────────────────────────────────────
 
@@ -67,7 +78,7 @@ function updatePlaybackUI(state, positionMs, durationMs) {
   currentDuration = durationMs;
 
   // Status dot.
-  statusDot.className = `status-dot ${currentState === "playing" ? "playing" : currentState === "paused" ? "paused" : currentState === "buffering" || currentState === "resolving" ? "buffering" : "connected"}`;
+  statusDot.className = `status-dot ${currentState === "playing" ? "playing" : currentState === "paused" ? "paused" : currentState === "buffering" || currentState === "resolving" ? "buffering" : wsConnected ? "connected" : "disconnected"}`;
   statusDot.title = currentState;
 
   // Controls.
@@ -92,8 +103,8 @@ function updatePlaybackUI(state, positionMs, durationMs) {
   // Status text.
   const stateLabels = {
     idle: "Ready to cast",
-    resolving: "Resolving content…",
-    buffering: "Buffering…",
+    resolving: "Resolving content\u2026",
+    buffering: "Buffering\u2026",
     playing: "Playing",
     paused: "Paused",
     error: "Error",
@@ -117,6 +128,35 @@ async function sendMessage(type, data = {}) {
       resolve(response);
     });
   });
+}
+
+// ─── WebSocket Status Management ──────────────────────────────────
+
+/**
+ * Check if the background service worker has an active WebSocket
+ * connection and update the UI accordingly.
+ */
+async function checkWsStatus() {
+  try {
+    const response = await sendMessage("WS_STATUS");
+    wsConnected = response?.connected || false;
+    if (!wsConnected) {
+      statusDot.className = "status-dot disconnected";
+    }
+  } catch {
+    wsConnected = false;
+  }
+}
+
+/**
+ * Request a WebSocket reconnection from the background worker.
+ */
+async function requestReconnect() {
+  try {
+    await sendMessage("WS_RECONNECT");
+  } catch {
+    // Background worker may be restarting
+  }
 }
 
 // ─── Load Current Tab URL ──────────────────────────────────────────
@@ -151,7 +191,7 @@ async function loadDetectedMedia() {
 
         const urlSpan = document.createElement("span");
         urlSpan.textContent = item.url.length > 60
-          ? item.url.substring(0, 60) + "…"
+          ? item.url.substring(0, 60) + "\u2026"
           : item.url;
 
         div.appendChild(typeSpan);
@@ -170,7 +210,7 @@ async function loadDetectedMedia() {
   }
 }
 
-// ─── Refresh Status ────────────────────────────────────────────────
+// ─── Refresh Status (HTTP fallback) ────────────────────────────────
 
 async function refreshStatus() {
   try {
@@ -199,6 +239,38 @@ async function refreshStatus() {
   }
 }
 
+/**
+ * Start HTTP polling as a fallback when WebSocket is not available.
+ * The polling timer is cleared when the WebSocket connection is active.
+ */
+function startPolling() {
+  stopPolling();
+  pollingTimer = setInterval(refreshStatus, 3000);
+}
+
+function stopPolling() {
+  if (pollingTimer) {
+    clearInterval(pollingTimer);
+    pollingTimer = null;
+  }
+}
+
+/**
+ * Adjust the update strategy based on WebSocket connection state.
+ *
+ * When WebSocket is connected, rely on push events and stop polling.
+ * When disconnected, fall back to HTTP polling every 3 seconds.
+ */
+function updateConnectionStrategy() {
+  if (wsConnected) {
+    stopPolling();
+    // Do a single refresh to ensure we're in sync
+    refreshStatus();
+  } else {
+    startPolling();
+  }
+}
+
 // ─── Event Handlers ────────────────────────────────────────────────
 
 // Cast button.
@@ -210,13 +282,17 @@ castBtn.addEventListener("click", async () => {
   }
 
   castBtn.disabled = true;
-  castBtn.textContent = "Casting…";
-  setStatus("Sending cast request…");
+  castBtn.textContent = "Casting\u2026";
+  setStatus("Sending cast request\u2026");
 
   try {
     await sendMessage("CAST", { url });
     setStatus("Cast request sent!", "success");
-    setTimeout(refreshStatus, 2000);
+    // Don't need to poll — WebSocket will push status updates
+    // Fall back to a single refresh after 2s if WS is not connected
+    if (!wsConnected) {
+      setTimeout(refreshStatus, 2000);
+    }
   } catch (err) {
     setStatus(`Error: ${err.message}`, "error");
   } finally {
@@ -233,32 +309,32 @@ castBtn.addEventListener("click", async () => {
 // Use current tab URL.
 tabBtn.addEventListener("click", loadCurrentTab);
 
-// Playback controls.
+// Playback controls — use WebSocket commands through background worker.
 pauseBtn.addEventListener("click", async () => {
   try { await sendMessage("PAUSE"); } catch {}
-  setTimeout(refreshStatus, 500);
+  if (!wsConnected) setTimeout(refreshStatus, 500);
 });
 
 resumeBtn.addEventListener("click", async () => {
   try { await sendMessage("RESUME"); } catch {}
-  setTimeout(refreshStatus, 500);
+  if (!wsConnected) setTimeout(refreshStatus, 500);
 });
 
 stopBtn.addEventListener("click", async () => {
   try { await sendMessage("STOP"); } catch {}
-  setTimeout(refreshStatus, 500);
+  if (!wsConnected) setTimeout(refreshStatus, 500);
 });
 
 seekBackBtn.addEventListener("click", async () => {
   const newPos = Math.max(0, currentPosition - 10000);
   try { await sendMessage("SEEK", { position_ms: newPos }); } catch {}
-  setTimeout(refreshStatus, 500);
+  if (!wsConnected) setTimeout(refreshStatus, 500);
 });
 
 seekFwdBtn.addEventListener("click", async () => {
   const newPos = currentPosition + 10000;
   try { await sendMessage("SEEK", { position_ms: newPos }); } catch {}
-  setTimeout(refreshStatus, 500);
+  if (!wsConnected) setTimeout(refreshStatus, 500);
 });
 
 // Volume.
@@ -274,17 +350,43 @@ settingsBtn.addEventListener("click", () => {
 });
 
 // ─── Listen for live status updates from background ────────────────
+//
+// The background service worker forwards WebSocket events from the
+// PiCast server. These arrive instantly via the persistent WS
+// connection, giving real-time UI updates without polling latency.
 
 chrome.runtime.onMessage.addListener((message) => {
   if (message.type === "STATUS_UPDATE") {
+    // WebSocket push — update UI immediately
     const s = message.status;
     updatePlaybackUI(s.state, s.position_ms, s.duration_ms);
+
+    if (s.volume != null) {
+      volumeSlider.value = s.volume;
+      volumeLabel.textContent = `${s.volume}%`;
+    }
   }
+
+  if (message.type === "WS_STATUS") {
+    const wasConnected = wsConnected;
+    wsConnected = message.connected;
+
+    if (wasConnected !== wsConnected) {
+      updateConnectionStrategy();
+    }
+
+    // Update the status dot to reflect connection state
+    if (!wsConnected && currentState === "idle") {
+      statusDot.className = "status-dot disconnected";
+    }
+  }
+
   if (message.type === "ERROR") {
     setStatus(`Error: ${message.message}`, "error");
   }
+
   if (message.type === "RESOLVE_PROGRESS") {
-    setStatus(`Resolving… ${message.percent}%`);
+    setStatus(`Resolving\u2026 ${message.percent}%`);
   }
 });
 
@@ -292,7 +394,7 @@ chrome.runtime.onMessage.addListener((message) => {
 
 loadCurrentTab();
 loadDetectedMedia();
+checkWsStatus().then(() => {
+  updateConnectionStrategy();
+});
 refreshStatus();
-
-// Poll status every 3 seconds.
-setInterval(refreshStatus, 3000);

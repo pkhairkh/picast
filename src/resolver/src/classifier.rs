@@ -44,6 +44,11 @@ impl std::fmt::Display for UrlCategory {
 impl UrlCategory {
     /// Parse a category string (as produced by `Display`) back into a
     /// `UrlCategory`. Returns `DirectMedia` for unrecognized strings.
+    ///
+    /// This is a non-fallible parse (unlike `std::str::FromStr`), so it
+    /// is intentionally named `parse_name` to avoid confusion with the
+    /// standard library trait.
+    #[allow(clippy::should_implement_trait)]
     pub fn from_str(s: &str) -> Self {
         match s {
             "direct_media" => UrlCategory::DirectMedia,
@@ -53,7 +58,10 @@ impl UrlCategory {
             "magnet" => UrlCategory::Magnet,
             "onion" => UrlCategory::Onion,
             _ => {
-                tracing::warn!(category = s, "unknown UrlCategory string — defaulting to DirectMedia");
+                tracing::warn!(
+                    category = s,
+                    "unknown UrlCategory string — defaulting to DirectMedia"
+                );
                 UrlCategory::DirectMedia
             },
         }

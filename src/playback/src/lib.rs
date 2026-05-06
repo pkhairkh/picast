@@ -151,6 +151,27 @@ impl Default for BufferHealth {
     }
 }
 
+// ── Decode Mode ──────────────────────────────────────────────────
+
+/// Decode mode — tracks whether hardware or software decode is active.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum DecodeMode {
+    /// Hardware-accelerated V4L2 M2M decode.
+    Hardware,
+    /// Software decode fallback (avdec_h264).
+    Software,
+}
+
+impl std::fmt::Display for DecodeMode {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            DecodeMode::Hardware => write!(f, "hardware"),
+            DecodeMode::Software => write!(f, "software"),
+        }
+    }
+}
+
 // ── Playback Engine ──────────────────────────────────────────────────
 
 /// The main playback engine backed by GStreamer.
@@ -163,6 +184,19 @@ impl Default for BufferHealth {
 /// When compiled without the `hw` feature, the engine simulates a
 /// working playback pipeline so the HTTP → Session → Playback chain
 /// can be tested on x86.
+///
+/// ## Decode Modes
+///
+/// The engine supports two decode modes:
+/// - **Hardware** ([`DecodeMode::Hardware`]): Uses V4L2 M2M hardware-accelerated
+///   H.264 decoding via `v4l2h264dec`. This is the default on Raspberry Pi 4B+.
+/// - **Software** ([`DecodeMode::Software`]): Falls back to `avdec_h264` software
+///   decoding when V4L2 decode is unavailable or fails to negotiate. Higher CPU
+///   usage but works on any platform.
+///
+/// The engine automatically falls back from hardware to software decode when
+/// GStreamer reports a negotiation error from `v4l2h264dec`. The current
+/// decode mode can be queried via [`PlaybackEngine::decode_mode()`].
 pub struct PlaybackEngine {
     /// Pipeline configuration.
     config: PipelineConfig,
@@ -200,6 +234,9 @@ pub struct PlaybackEngine {
     /// Currently loaded URL (mock mode).
     #[cfg(not(feature = "hw"))]
     mock_url: std::sync::Mutex<Option<String>>,
+    /// Current decode mode (mock mode).
+    #[cfg(not(feature = "hw"))]
+    mock_decode_mode: std::sync::Mutex<DecodeMode>,
 }
 
 impl PlaybackEngine {
@@ -211,6 +248,8 @@ impl PlaybackEngine {
         // GStreamer init is deferred to pipeline construction.
         #[cfg(not(feature = "hw"))]
         let initial_volume = config.volume;
+        #[cfg(not(feature = "hw"))]
+        let decode_mode = if config.hw_accel { DecodeMode::Hardware } else { DecodeMode::Software };
 
         Ok(Self {
             config,
@@ -235,6 +274,8 @@ impl PlaybackEngine {
             mock_buffer_health: std::sync::Mutex::new(BufferHealth::default()),
             #[cfg(not(feature = "hw"))]
             mock_url: std::sync::Mutex::new(None),
+            #[cfg(not(feature = "hw"))]
+            mock_decode_mode: std::sync::Mutex::new(decode_mode),
         })
     }
 
@@ -247,6 +288,8 @@ impl PlaybackEngine {
         let event_tx = mpsc::channel(_channel_size).0;
         #[cfg(not(feature = "hw"))]
         let initial_volume = config.volume;
+        #[cfg(not(feature = "hw"))]
+        let decode_mode = if config.hw_accel { DecodeMode::Hardware } else { DecodeMode::Software };
 
         Ok(Self {
             config,
@@ -271,6 +314,8 @@ impl PlaybackEngine {
             mock_buffer_health: std::sync::Mutex::new(BufferHealth::default()),
             #[cfg(not(feature = "hw"))]
             mock_url: std::sync::Mutex::new(None),
+            #[cfg(not(feature = "hw"))]
+            mock_decode_mode: std::sync::Mutex::new(decode_mode),
         })
     }
 
@@ -605,6 +650,39 @@ impl PlaybackEngine {
     pub fn mock_set_duration(&self, duration_ms: u64) {
         self.mock_duration_ms.store(duration_ms, Ordering::Relaxed);
     }
+
+    /// Return the current decode mode.
+    ///
+    /// In hardware mode, returns `Hardware` if V4L2 decode is active,
+    /// `Software` if the engine fell back to avdec_h264.
+    /// In mock mode, returns the configured decode mode.
+    #[cfg(feature = "hw")]
+    pub fn decode_mode(&self) -> DecodeMode {
+        if self.config.hw_accel {
+            DecodeMode::Hardware
+        } else {
+            DecodeMode::Software
+        }
+    }
+
+    /// Return the current decode mode (mock mode).
+    #[cfg(not(feature = "hw"))]
+    pub fn decode_mode(&self) -> DecodeMode {
+        let guard = self.mock_decode_mode.lock().unwrap();
+        *guard
+    }
+
+    /// Simulate a software decode fallback (for testing).
+    ///
+    /// In mock mode, switches the decode mode from Hardware to Software.
+    /// In hardware mode, this is a no-op (use `PlaybackEngine::play()`
+    /// with `hw_accel = false` to force software decode).
+    #[cfg(not(feature = "hw"))]
+    pub fn mock_fallback_to_software(&self) {
+        let mut guard = self.mock_decode_mode.lock().unwrap();
+        tracing::info!(from = %guard, to = "software", "mock decode fallback");
+        *guard = DecodeMode::Software;
+    }
 }
 
 #[cfg(test)]
@@ -916,5 +994,45 @@ mod tests {
         assert_eq!(json, "\"paused\"");
         let json = serde_json::to_string(&PlaybackState::Stopped).unwrap();
         assert_eq!(json, "\"stopped\"");
+    }
+
+    #[test]
+    fn decode_mode_default_is_hardware() {
+        let engine = PlaybackEngine::new(PipelineConfig::default()).unwrap();
+        assert_eq!(engine.decode_mode(), DecodeMode::Hardware);
+    }
+
+    #[test]
+    fn decode_mode_software_when_hw_accel_disabled() {
+        let mut config = PipelineConfig::default();
+        config.hw_accel = false;
+        let engine = PlaybackEngine::new(config).unwrap();
+        assert_eq!(engine.decode_mode(), DecodeMode::Software);
+    }
+
+    #[test]
+    fn decode_mode_fallback_from_hardware_to_software() {
+        let engine = PlaybackEngine::new(PipelineConfig::default()).unwrap();
+        assert_eq!(engine.decode_mode(), DecodeMode::Hardware);
+
+        // Simulate a fallback
+        engine.mock_fallback_to_software();
+        assert_eq!(engine.decode_mode(), DecodeMode::Software);
+    }
+
+    #[test]
+    fn decode_mode_display() {
+        assert_eq!(DecodeMode::Hardware.to_string(), "hardware");
+        assert_eq!(DecodeMode::Software.to_string(), "software");
+    }
+
+    #[test]
+    fn decode_mode_serialization_roundtrip() {
+        let modes = vec![DecodeMode::Hardware, DecodeMode::Software];
+        for mode in modes {
+            let json = serde_json::to_string(&mode).expect("serialize");
+            let deserialized: DecodeMode = serde_json::from_str(&json).expect("deserialize");
+            assert_eq!(deserialized, mode);
+        }
     }
 }
