@@ -15,9 +15,11 @@ SupplementaryGroups=video render audio
 # DRM master, preventing other processes from acquiring it.  drmSetMaster
 # returns EBUSY even with CAP_SYS_ADMIN in current Linux kernels (6.x),
 # so the only way to release master is to unbind fbcon first.
+# The "+" prefix runs this as root (overriding User=picast) because
+# writing to /sys/class/vtconsole requires root even with CAP_SYS_ADMIN.
 # The "-" prefix makes failure non-fatal (e.g. on vkms or systems
 # without fbcon).
-ExecStartPre=-/bin/sh -c 'for vt in /sys/class/vtconsole/vtcon*/bind; do [ -f "$vt" ] && echo 0 > "$vt" 2>/dev/null; done; true'
+ExecStartPre=+-/bin/sh -c 'for vt in /sys/class/vtconsole/vtcon*/bind; do [ -f "$vt" ] && echo 0 > "$vt" 2>/dev/null; done; true'
 
 # CAP_SYS_ADMIN is kept for potential future use (e.g. DRM auth
 # magic).  It does NOT allow stealing DRM master from the console —
@@ -29,11 +31,12 @@ Environment=RUST_LOG=picast=info
 Environment=HOME=/var/lib/picast
 Environment=XDG_CACHE_HOME=/var/lib/picast/.cache
 Environment=TMPDIR=/tmp/picast
-# GStreamer debug: level 5 (DEBUG) for kmssink and v4l2h264dec (the two
-# elements most likely to block preroll), level 3 (FIXME) for state changes.
-# Without this, GStreamer silently fails to preroll and we have no way to
-# tell which element is blocking the Ready→Paused transition.
-Environment=GST_DEBUG=kmssink:5,v4l2h264dec:5,GST_STATES:3
+# GStreamer debug for diagnosing preroll/playback failures.
+# kmssink:5 = DEBUG (DRM master, plane selection, buffer rendering)
+# v4l2h264dec:5 = DEBUG (HW decode caps negotiation)
+# GST_STATES:5 = DEBUG (state change transitions)
+# souphttpsrc:3 = FIXME (HTTP errors like 403)
+Environment=GST_DEBUG=kmssink:5,v4l2h264dec:5,GST_STATES:5,souphttpsrc:3
 Environment=GST_DEBUG_FILE=/tmp/picast/gst-debug.log
 ExecStart=/usr/local/bin/picast-server --config /etc/picast/picast.toml
 NotifyAccess=all

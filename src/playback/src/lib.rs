@@ -475,6 +475,9 @@ impl PlaybackEngine {
         let event_tx = self.event_tx.clone();
         let is_playing = self.is_playing.clone();
         let bus = pipeline.pipeline().bus().expect("pipeline should have a bus");
+        // We need a weak reference to push the Paused→Playing transition
+        // after preroll completes (see StateChanged handler below).
+        let pipeline_weak = pipeline.pipeline().downgrade();
 
         let bus_watch = bus.add_watch(move |_bus, msg| {
             use gstreamer::MessageView;
@@ -502,7 +505,25 @@ impl PlaybackEngine {
                     if new_state == State::Playing {
                         let _ = event_tx.send(PlaybackEvent::Playing);
                         is_playing.store(true, Ordering::Relaxed);
-                    } else if new_state == State::Paused {
+                    } else if new_state == State::Paused && pending == State::VoidPending {
+                        // Pipeline reached Paused with no pending state change.
+                        // This means the original async set_state(Playing) was
+                        // interrupted (e.g. by a CDN error) or GStreamer didn't
+                        // automatically continue the Paused→Playing transition.
+                        // Explicitly push to Playing to ensure video starts.
+                        //
+                        // We only do this for the PIPELINE element (not
+                        // sub-elements) and only when pending=VoidPending
+                        // (meaning no state change is already in progress).
+                        let src_name = msg.src().map(|s| s.path_string()).unwrap_or_default();
+                        if src_name.contains("pipeline0") {
+                            tracing::info!(
+                                "pipeline reached Paused with no pending transition — explicitly pushing to Playing"
+                            );
+                            if let Some(pipe) = pipeline_weak.upgrade() {
+                                let _ = pipe.set_state(State::Playing);
+                            }
+                        }
                         let _ = event_tx.send(PlaybackEvent::Paused);
                         is_playing.store(false, Ordering::Relaxed);
                     }
@@ -747,6 +768,7 @@ impl PlaybackEngine {
         let event_tx = self.event_tx.clone();
         let is_playing = self.is_playing.clone();
         let bus = pipeline.pipeline().bus().expect("pipeline should have a bus");
+        let pipeline_weak = pipeline.pipeline().downgrade();
 
         let bus_watch = bus.add_watch(move |_bus, msg| {
             use gstreamer::MessageView;
@@ -770,7 +792,16 @@ impl PlaybackEngine {
                     if new_state == State::Playing {
                         let _ = event_tx.send(PlaybackEvent::Playing);
                         is_playing.store(true, Ordering::Relaxed);
-                    } else if new_state == State::Paused {
+                    } else if new_state == State::Paused && pending == State::VoidPending {
+                        let src_name = msg.src().map(|s| s.path_string()).unwrap_or_default();
+                        if src_name.contains("pipeline0") {
+                            tracing::info!(
+                                "pipeline reached Paused with no pending transition (SW) — explicitly pushing to Playing"
+                            );
+                            if let Some(pipe) = pipeline_weak.upgrade() {
+                                let _ = pipe.set_state(State::Playing);
+                            }
+                        }
                         let _ = event_tx.send(PlaybackEvent::Paused);
                         is_playing.store(false, Ordering::Relaxed);
                     }

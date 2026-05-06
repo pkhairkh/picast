@@ -480,9 +480,29 @@ impl GstPipeline {
                 ))
             })?;
 
+        // Build kmssink.  The fd and driver-name properties are mutually
+        // exclusive in kmssink: setting both causes a warning "Can't set
+        // fd... driver-name already set" and fd is silently ignored.
+        // Strategy: if we have a valid DRM fd from the DisplayManager,
+        // use it (and skip driver-name).  Otherwise, use driver-name to
+        // let kmssink find and open the device itself.
         let mut kmssink_builder = ElementFactory::make(&config.video_sink)
-            .property_from_str("driver-name", "vc4")
             .property("can-scale", true);
+
+        if let Some(drm_fd) = config.drm_fd {
+            if drm_fd >= 0 {
+                // Use the pre-opened DRM fd.  Don't set driver-name —
+                // kmssink will use our fd instead of opening the device.
+                kmssink_builder = kmssink_builder.property("fd", drm_fd);
+                tracing::info!(fd = drm_fd, "kmssink: using provided DRM fd (not setting driver-name)");
+            } else {
+                kmssink_builder = kmssink_builder.property_from_str("driver-name", "vc4");
+                tracing::info!("kmssink: using driver-name=vc4 (no valid fd provided)");
+            }
+        } else {
+            kmssink_builder = kmssink_builder.property_from_str("driver-name", "vc4");
+            tracing::info!("kmssink: using driver-name=vc4 (no fd provided)");
+        }
 
         // Only set plane-id if explicitly configured (> 0).
         // When plane-id is 0 (default), kmssink auto-detects the best
@@ -502,17 +522,6 @@ impl GstPipeline {
             if conn_id > 0 {
                 kmssink_builder = kmssink_builder.property("connector-id", conn_id as i32);
                 tracing::info!(connector_id = conn_id, "kmssink: using explicit connector-id");
-            }
-        }
-
-        // If the DisplayManager passed us a DRM fd, tell kmssink to use
-        // it instead of opening the device itself.  This avoids the race
-        // where our process still holds the device open (even without
-        // master) and kmssink can't acquire master as a subsequent opener.
-        if let Some(drm_fd) = config.drm_fd {
-            if drm_fd >= 0 {
-                kmssink_builder = kmssink_builder.property("fd", drm_fd);
-                tracing::info!(fd = drm_fd, "kmssink: using provided DRM fd");
             }
         }
 
@@ -559,8 +568,18 @@ impl GstPipeline {
             .map_err(|e| PlaybackError::PipelineCreation(format!("videoconvert: {}", e)))?;
 
         let mut kmssink_builder = ElementFactory::make(&config.video_sink)
-            .property_from_str("driver-name", "vc4")
             .property("can-scale", true);
+
+        // fd and driver-name are mutually exclusive in kmssink.
+        if let Some(drm_fd) = config.drm_fd {
+            if drm_fd >= 0 {
+                kmssink_builder = kmssink_builder.property("fd", drm_fd);
+            } else {
+                kmssink_builder = kmssink_builder.property_from_str("driver-name", "vc4");
+            }
+        } else {
+            kmssink_builder = kmssink_builder.property_from_str("driver-name", "vc4");
+        }
 
         // Only set plane-id if explicitly configured (> 0).
         if config.plane_id > 0 {
