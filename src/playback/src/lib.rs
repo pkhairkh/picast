@@ -618,37 +618,49 @@ impl PlaybackEngine {
                         // which one is stuck and blocking preroll.
                         if current != State::Playing {
                             tracing::warn!("pipeline NOT playing after 15s — dumping per-element state:");
-                            let bin = pipe.dynamic_cast::<gstreamer::Bin>().unwrap();
-                            for element in bin.iterate_elements().iter::<gstreamer::Element>() {
-                                match element {
-                                    Ok(e) => {
-                                        let (res, st, pend) = e.state(gstreamer::ClockTime::from_mseconds(0));
-                                        tracing::warn!(
-                                            element = %e.name(),
-                                            type_ = %e.factory().map(|f| f.name().to_string()).unwrap_or_default(),
-                                            state = ?st,
-                                            pending = ?pend,
-                                            result = ?res,
-                                            "element state"
-                                        );
-                                        // Also check elements inside bins (e.g. video bin)
-                                        if let Ok(sub_bin) = e.dynamic_cast::<gstreamer::Bin>() {
-                                            for sub in sub_bin.iterate_elements().iter::<gstreamer::Element>() {
-                                                if let Ok(se) = sub {
-                                                    let (sr, sst, sp) = se.state(gstreamer::ClockTime::from_mseconds(0));
-                                                    tracing::warn!(
-                                                        element = %se.name(),
-                                                        type_ = %se.factory().map(|f| f.name().to_string()).unwrap_or_default(),
-                                                        state = ?sst,
-                                                        pending = ?sp,
-                                                        result = ?sr,
-                                                        "  sub-element state"
-                                                    );
+                            if let Ok(bin) = pipe.dynamic_cast::<gstreamer::Bin>() {
+                                let mut elem_iter = bin.iterate_elements();
+                                loop {
+                                    match elem_iter.next() {
+                                        Ok(Some(e)) => {
+                                            let (res, st, pend) = e.state(gstreamer::ClockTime::from_mseconds(0));
+                                            let factory_name = e.factory()
+                                                .map(|f: gstreamer::ElementFactory| f.name().to_string())
+                                                .unwrap_or_default();
+                                            tracing::warn!(
+                                                element = %e.name(),
+                                                type_ = %factory_name,
+                                                state = ?st,
+                                                pending = ?pend,
+                                                result = ?res,
+                                                "element state"
+                                            );
+                                            // Also check elements inside bins (e.g. video bin)
+                                            if let Ok(sub_bin) = e.dynamic_cast::<gstreamer::Bin>() {
+                                                let mut sub_iter = sub_bin.iterate_elements();
+                                                loop {
+                                                    match sub_iter.next() {
+                                                        Ok(Some(se)) => {
+                                                            let (sr, sst, sp) = se.state(gstreamer::ClockTime::from_mseconds(0));
+                                                            let sub_factory = se.factory()
+                                                                .map(|f: gstreamer::ElementFactory| f.name().to_string())
+                                                                .unwrap_or_default();
+                                                            tracing::warn!(
+                                                                element = %se.name(),
+                                                                type_ = %sub_factory,
+                                                                state = ?sst,
+                                                                pending = ?sp,
+                                                                result = ?sr,
+                                                                "  sub-element state"
+                                                            );
+                                                        },
+                                                        Ok(None) | Err(_) => break,
+                                                    }
                                                 }
                                             }
-                                        }
-                                    },
-                                    Err(_) => {},
+                                        },
+                                        Ok(None) | Err(_) => break,
+                                    }
                                 }
                             }
 
