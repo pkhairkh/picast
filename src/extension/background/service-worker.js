@@ -126,11 +126,11 @@ async function getConfig() {
 }
 
 function picastHttpBase(config) {
-  return `http://${config.piHost}:${config.httpPort}`;
+  return `https://${config.piHost}:${config.httpPort}`;
 }
 
 function picastWsUrl(config) {
-  return `ws://${config.piHost}:${config.wsPort}/ws`;
+  return `wss://${config.piHost}:${config.wsPort}/ws`;
 }
 
 // ─── URL Validation ──────────────────────────────────────────────
@@ -836,7 +836,7 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
  * This avoids Firefox CSP/CORS issues with fetch() from extension pages.
  */
 async function testConnectionFromBackground(host, port) {
-  const url = `http://${host}:${port}/api/health`;
+  const url = `https://${host}:${port}/api/health`;
   const controller = new AbortController();
   const timeout = setTimeout(() => controller.abort(), 5000);
 

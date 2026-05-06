@@ -75,6 +75,19 @@ pub struct ServerConfig {
     /// Session database path.
     #[serde(default = "default_db_path")]
     pub db_path: String,
+    /// Path to TLS certificate (PEM). If set, HTTPS/WSS is enabled.
+    #[serde(default)]
+    pub tls_cert_path: String,
+    /// Path to TLS private key (PEM). If set, HTTPS/WSS is enabled.
+    #[serde(default)]
+    pub tls_key_path: String,
+}
+
+impl ServerConfig {
+    /// Returns true if both cert and key paths are set, enabling TLS.
+    pub fn tls_enabled(&self) -> bool {
+        !self.tls_cert_path.is_empty() && !self.tls_key_path.is_empty()
+    }
 }
 
 impl Default for ServerConfig {
@@ -83,6 +96,8 @@ impl Default for ServerConfig {
             http_addr: default_http_addr(),
             ws_addr: default_ws_addr(),
             db_path: default_db_path(),
+            tls_cert_path: String::new(),
+            tls_key_path: String::new(),
         }
     }
 }
@@ -276,6 +291,12 @@ impl AppConfig {
             } else {
                 tracing::warn!(value = %v, "PICAST_DLNA_PORT is not a valid port number");
             }
+        }
+        if let Ok(v) = std::env::var("PICAST_TLS_CERT") {
+            self.server.tls_cert_path = v;
+        }
+        if let Ok(v) = std::env::var("PICAST_TLS_KEY") {
+            self.server.tls_key_path = v;
         }
         if let Ok(v) = std::env::var("PICAST_LOG_LEVEL") {
             self.logging.level = v;

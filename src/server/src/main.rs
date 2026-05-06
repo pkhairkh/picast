@@ -309,9 +309,40 @@ async fn main() -> Result<()> {
     info!(db = %config.server.db_path, "Session manager created (subsystems wired)");
 
     // ── 6. Protocol servers ───────────────────────────────────────────
-    let http_server =
+
+    // Load TLS acceptor if cert/key are configured.
+    let tls_acceptor = if config.server.tls_enabled() {
+        match picast_protocols::load_tls_acceptor(
+            &config.server.tls_cert_path,
+            &config.server.tls_key_path,
+        ) {
+            Ok(Some(acceptor)) => {
+                info!("TLS enabled — serving HTTPS and WSS");
+                Some(acceptor)
+            }
+            Ok(None) => {
+                warn!("TLS cert/key paths set but acceptor returned None — falling back to plain HTTP/WS");
+                None
+            }
+            Err(e) => {
+                warn!(error = %e, "Failed to load TLS cert/key — falling back to plain HTTP/WS");
+                None
+            }
+        }
+    } else {
+        info!("TLS not configured — serving plain HTTP and WS");
+        None
+    };
+
+    let mut http_server =
         picast_protocols::HttpApiServer::new(&config.server.http_addr, session.clone());
-    let ws_server = picast_protocols::WebSocketServer::new(&config.server.ws_addr, session.clone());
+    let mut ws_server = picast_protocols::WebSocketServer::new(&config.server.ws_addr, session.clone());
+
+    if let Some(acceptor) = tls_acceptor {
+        http_server = http_server.with_tls(acceptor.clone());
+        ws_server = ws_server.with_tls(acceptor);
+    }
+
     let dlna_renderer = Arc::new(picast_protocols::DlnaRenderer::new(
         &config.dlna.friendly_name,
         &config.tor.socks_addr,

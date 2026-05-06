@@ -10,8 +10,10 @@
 
 pub mod dlna;
 pub mod http;
+pub mod tls;
 pub mod ws;
 
 pub use dlna::{run_dlna_sync, DlnaRenderer};
 pub use http::HttpApiServer;
+pub use tls::load_tls_acceptor;
 pub use ws::WebSocketServer;

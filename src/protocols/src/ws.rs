@@ -48,6 +48,7 @@ use std::sync::Arc;
 use std::time::Duration;
 use tokio::net::TcpListener;
 use tokio::sync::{broadcast, Semaphore};
+use tokio_rustls::TlsAcceptor;
 use tokio_tungstenite::tungstenite::Message;
 
 /// Maximum number of concurrent WebSocket clients.
@@ -103,6 +104,8 @@ pub struct WebSocketServer {
     session: Arc<SessionManager>,
     /// Connection limiter — at most `MAX_CONNECTIONS` concurrent clients.
     connection_limit: Arc<Semaphore>,
+    /// Optional TLS acceptor — if set, serves WSS.
+    tls_acceptor: Option<Arc<TlsAcceptor>>,
 }
 
 impl WebSocketServer {
@@ -112,15 +115,24 @@ impl WebSocketServer {
             listen_addr: listen_addr.to_owned(),
             session,
             connection_limit: Arc::new(Semaphore::new(MAX_CONNECTIONS)),
+            tls_acceptor: None,
         }
+    }
+
+    /// Set a TLS acceptor to enable WSS.
+    pub fn with_tls(mut self, acceptor: TlsAcceptor) -> Self {
+        self.tls_acceptor = Some(Arc::new(acceptor));
+        self
     }
 
     /// Start accepting WebSocket connections.
     ///
     /// Runs indefinitely until the `shutdown` future resolves.
+    /// If a TLS acceptor is configured, serves WSS; otherwise plain WS.
     pub async fn start(&self, shutdown: impl std::future::Future<Output = ()>) -> Result<()> {
         let listener = TcpListener::bind(&self.listen_addr).await?;
-        tracing::info!(addr = %self.listen_addr, "WebSocket server listening");
+        let scheme = if self.tls_acceptor.is_some() { "WSS" } else { "WS" };
+        tracing::info!(addr = %self.listen_addr, scheme = scheme, "WebSocket server listening");
 
         let mut shutdown = std::pin::pin!(shutdown);
 
@@ -130,6 +142,7 @@ impl WebSocketServer {
                     let (stream, remote) = accept_result?;
                     let session = self.session.clone();
                     let connection_limit = self.connection_limit.clone();
+                    let tls = self.tls_acceptor.clone();
 
                     tokio::spawn(async move {
                         // Try to acquire a connection permit before upgrading.
@@ -147,15 +160,14 @@ impl WebSocketServer {
                                     max_frame_size: Some(1_048_576),
                                     ..Default::default()
                                 };
-                                if let Ok(ws_stream) = tokio_tungstenite::accept_async_with_config(stream, Some(ws_config)).await {
-                                    let (mut sender, _) = ws_stream.split();
+                                if let Ok(mut ws_err) = accept_ws(tls.as_deref(), stream, Some(ws_config)).await {
                                     let err = ServerEvent::Error {
                                         message: format!("too many connections (max {})", MAX_CONNECTIONS),
                                     };
                                     if let Ok(json) = serde_json::to_string(&err) {
-                                        let _ = sender.send(Message::Text(json)).await;
+                                        let _ = ws_err.send(Message::Text(json)).await;
                                     }
-                                    let _ = sender.send(Message::Close(None)).await;
+                                    let _ = ws_err.send(Message::Close(None)).await;
                                 }
                                 return;
                             }
@@ -166,8 +178,7 @@ impl WebSocketServer {
                             max_frame_size: Some(1_048_576),    // 1 MB
                             ..Default::default()
                         };
-                        let ws_stream = tokio_tungstenite::accept_async_with_config(stream, Some(ws_config)).await;
-                        match ws_stream {
+                        match accept_ws(tls.as_deref(), stream, Some(ws_config)).await {
                             Ok(ws_stream) => {
                                 tracing::debug!(remote = %remote, "WebSocket client connected");
                                 if let Err(e) = handle_client(ws_stream, session, permit).await {
@@ -181,7 +192,7 @@ impl WebSocketServer {
                     });
                 }
                 _ = shutdown.as_mut() => {
-                    tracing::info!("WebSocket server shutting down");
+                    tracing::info!("{} WebSocket server shutting down", scheme);
                     break;
                 }
             }
@@ -191,23 +202,77 @@ impl WebSocketServer {
     }
 }
 
+async fn accept_ws(
+    tls_acceptor: Option<&TlsAcceptor>,
+    stream: tokio::net::TcpStream,
+    config: Option<tokio_tungstenite::tungstenite::protocol::WebSocketConfig>,
+) -> Result<WsStream> {
+    if let Some(acceptor) = tls_acceptor {
+        accept_wss_stream(stream, acceptor, config).await
+    } else {
+        accept_ws_stream_plain(stream, config).await
+    }
+}
+
+/// Accept a WebSocket connection over TLS.
+async fn accept_wss_stream(
+    stream: tokio::net::TcpStream,
+    tls_acceptor: &TlsAcceptor,
+    config: Option<tokio_tungstenite::tungstenite::protocol::WebSocketConfig>,
+) -> Result<WsStream> {
+    let tls_stream = tls_acceptor.accept(stream).await.map_err(|e| anyhow!("TLS handshake failed: {}", e))?;
+    let ws_stream = tokio_tungstenite::accept_async_with_config(tls_stream, config).await?;
+    Ok(WsStream::Tls(ws_stream))
+}
+
+/// Accept a plain WebSocket connection (no TLS).
+async fn accept_ws_stream_plain(
+    stream: tokio::net::TcpStream,
+    config: Option<tokio_tungstenite::tungstenite::protocol::WebSocketConfig>,
+) -> Result<WsStream> {
+    let ws_stream = tokio_tungstenite::accept_async_with_config(stream, config).await?;
+    Ok(WsStream::Plain(ws_stream))
+}
+
+/// Type-erased WebSocket stream that supports both plain WS and WSS.
+enum WsStream {
+    Tls(tokio_tungstenite::WebSocketStream<tokio_rustls::server::TlsStream<tokio::net::TcpStream>>),
+    Plain(tokio_tungstenite::WebSocketStream<tokio::net::TcpStream>),
+}
+
+impl WsStream {
+    async fn next(&mut self) -> Option<Result<Message, tungstenite::Error>> {
+        match self {
+            WsStream::Tls(s) => s.next().await,
+            WsStream::Plain(s) => s.next().await,
+        }
+    }
+
+    async fn send(&mut self, msg: Message) -> Result<(), tungstenite::Error> {
+        match self {
+            WsStream::Tls(s) => s.send(msg).await,
+            WsStream::Plain(s) => s.send(msg).await,
+        }
+    }
+}
+
 /// Handle a single WebSocket client connection.
 ///
 /// Reads commands from the client and forwards session events.
 /// The `_permit` parameter holds the semaphore permit for the
 /// connection's lifetime — dropping it releases the slot.
 async fn handle_client(
-    ws_stream: tokio_tungstenite::WebSocketStream<tokio::net::TcpStream>,
+    ws_stream: WsStream,
     session: Arc<SessionManager>,
     _permit: tokio::sync::SemaphorePermit<'_>
 ) -> Result<()> {
-    let (mut ws_sender, mut ws_receiver) = ws_stream.split();
+    let mut ws = ws_stream;
     let mut event_rx = session.subscribe();
 
     // Send connected event.
     let connected = ServerEvent::Connected;
     let connected_json = serde_json::to_string(&connected)?;
-    ws_sender.send(Message::Text(connected_json)).await?;
+    ws.send(Message::Text(connected_json)).await?;
 
     // Ping interval.
     let mut ping_interval = tokio::time::interval(Duration::from_secs(30));
@@ -215,7 +280,7 @@ async fn handle_client(
     loop {
         tokio::select! {
             // Read from WebSocket client.
-            msg = ws_receiver.next() => {
+            msg = ws.next() => {
                 match msg {
                     Some(Ok(Message::Text(text))) => {
                         match serde_json::from_str::<ClientCommand>(&text) {
@@ -225,7 +290,7 @@ async fn handle_client(
                                         message: e.to_string(),
                                     };
                                     let err_json = serde_json::to_string(&err_event)?;
-                                    ws_sender.send(Message::Text(err_json)).await?;
+                                    ws.send(Message::Text(err_json)).await?;
                                 }
                             }
                             Err(e) => {
@@ -233,7 +298,7 @@ async fn handle_client(
                                     message: format!("invalid command: {}", e),
                                 };
                                 let err_json = serde_json::to_string(&err_event)?;
-                                ws_sender.send(Message::Text(err_json)).await?;
+                                ws.send(Message::Text(err_json)).await?;
                             }
                         }
                     }
@@ -251,7 +316,7 @@ async fn handle_client(
                                 if let Err(e) = handle_command(&session, cmd).await {
                                     let err_event = ServerEvent::Error { message: e.to_string() };
                                     let err_json = serde_json::to_string(&err_event)?;
-                                    ws_sender.send(Message::Text(err_json)).await?;
+                                    ws.send(Message::Text(err_json)).await?;
                                 }
                             }
                         }
@@ -289,7 +354,7 @@ async fn handle_client(
                         let server_event = map_session_event(&session_event, current_session.as_ref());
                         if let Some(event) = server_event {
                             let json = serde_json::to_string(&event)?;
-                            ws_sender.send(Message::Text(json)).await?;
+                            ws.send(Message::Text(json)).await?;
                         }
                     }
                     Err(broadcast::error::RecvError::Lagged(count)) => {
@@ -303,7 +368,7 @@ async fn handle_client(
 
             // Ping.
             _ = ping_interval.tick() => {
-                if ws_sender.send(Message::Ping(vec![])).await.is_err() {
+                if ws.send(Message::Ping(vec![])).await.is_err() {
                     break;
                 }
             }

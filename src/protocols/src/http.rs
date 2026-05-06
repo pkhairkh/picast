@@ -23,6 +23,7 @@ use hyper::{Method, Request, Response, StatusCode};
 use picast_session::{MediaSession, SessionManager};
 use serde::{Deserialize, Serialize};
 use std::sync::Arc;
+use tokio_rustls::TlsAcceptor;
 use tracing;
 
 /// Type alias for the HTTP response body.
@@ -96,33 +97,44 @@ pub struct HttpApiServer {
     listen_addr: String,
     /// Reference to the session manager.
     session: Arc<SessionManager>,
+    /// Optional TLS acceptor — if set, serves HTTPS.
+    tls_acceptor: Option<Arc<TlsAcceptor>>,
 }
 
 impl HttpApiServer {
     /// Create a new HTTP server bound to `listen_addr`.
     pub fn new(listen_addr: &str, session: Arc<SessionManager>) -> Self {
-        Self { listen_addr: listen_addr.to_owned(), session }
+        Self { listen_addr: listen_addr.to_owned(), session, tls_acceptor: None }
+    }
+
+    /// Set a TLS acceptor to enable HTTPS.
+    pub fn with_tls(mut self, acceptor: TlsAcceptor) -> Self {
+        self.tls_acceptor = Some(Arc::new(acceptor));
+        self
     }
 
     /// Start accepting connections.
     ///
     /// Runs indefinitely until the `shutdown` future resolves.
+    /// If a TLS acceptor is configured, serves HTTPS; otherwise plain HTTP.
     pub async fn start(&self, shutdown: impl std::future::Future<Output = ()>) -> Result<()> {
         use hyper::service::service_fn;
         use hyper_util::rt::TokioIo;
 
         let listener = tokio::net::TcpListener::bind(&self.listen_addr).await?;
-        tracing::info!(addr = %self.listen_addr, "HTTP API server listening");
+        let scheme = if self.tls_acceptor.is_some() { "HTTPS" } else { "HTTP" };
+        tracing::info!(addr = %self.listen_addr, scheme = scheme, "API server listening");
 
         let session = self.session.clone();
+        let tls_acceptor = self.tls_acceptor.clone();
         let mut shutdown = std::pin::pin!(shutdown);
 
         loop {
             tokio::select! {
                 accept_result = listener.accept() => {
                     let (stream, remote) = accept_result?;
-                    let io = TokioIo::new(stream);
                     let session = session.clone();
+                    let tls = tls_acceptor.clone();
 
                     tokio::spawn(async move {
                         let service = service_fn(move |req| {
@@ -138,16 +150,35 @@ impl HttpApiServer {
                             }
                         });
 
-                        if let Err(e) = hyper::server::conn::http1::Builder::new()
-                            .serve_connection(io, service)
-                            .await
-                        {
-                            tracing::error!(error = %e, remote = %remote, "HTTP connection error");
+                        // If TLS is configured, wrap the TCP stream.
+                        if let Some(acceptor) = tls {
+                            match acceptor.accept(stream).await {
+                                Ok(tls_stream) => {
+                                    let io = TokioIo::new(tls_stream);
+                                    if let Err(e) = hyper::server::conn::http1::Builder::new()
+                                        .serve_connection(io, service)
+                                        .await
+                                    {
+                                        tracing::error!(error = %e, remote = %remote, "HTTPS connection error");
+                                    }
+                                }
+                                Err(e) => {
+                                    tracing::warn!(error = %e, remote = %remote, "TLS handshake failed");
+                                }
+                            }
+                        } else {
+                            let io = TokioIo::new(stream);
+                            if let Err(e) = hyper::server::conn::http1::Builder::new()
+                                .serve_connection(io, service)
+                                .await
+                            {
+                                tracing::error!(error = %e, remote = %remote, "HTTP connection error");
+                            }
                         }
                     });
                 }
                 _ = shutdown.as_mut() => {
-                    tracing::info!("HTTP API server shutting down");
+                    tracing::info!("{} API server shutting down", scheme);
                     break;
                 }
             }

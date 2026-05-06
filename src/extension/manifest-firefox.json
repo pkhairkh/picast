@@ -36,7 +36,9 @@
 
   "host_permissions": [
     "http://*.local/*",
-    "http://*/*"
+    "http://*/*",
+    "https://*.local/*",
+    "https://*/*"
   ],
 
   "content_scripts": [

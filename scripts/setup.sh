@@ -497,6 +497,32 @@ install_picast() {
     # The SQLite cache file will be created automatically by the resolver.
     info "Resolve cache: /var/lib/picast/resolve-cache.db"
 
+    # Generate self-signed TLS certificate for HTTPS/WSS
+    local cert_dir="/etc/picast/tls"
+    local cert_path="${cert_dir}/picast.pem"
+    local key_path="${cert_dir}/picast-key.pem"
+    if [ ! -f "$cert_path" ] || [ ! -f "$key_path" ]; then
+        info "Generating self-signed TLS certificate..."
+        mkdir -p "$cert_dir"
+        # Get the Pi's hostname and IP for the SAN
+        local hostname
+        hostname="$(hostname 2>/dev/null || echo 'picast')" 
+        local ip_addr
+        ip_addr="$(hostname -I 2>/dev/null | cut -d' ' -f1 || echo '192.168.1.1')"
+        openssl req -x509 -newkey rsa:2048 -sha256 -days 3650 \
+            -nodes -keyout "$key_path" -out "$cert_path" \
+            -subj "/CN=PiCast/O=PiCast/C=US" \
+            -addext "subjectAltName=DNS:${hostname}.local,DNS:${hostname},DNS:picast.local,IP:${ip_addr},IP:127.0.0.1" \
+            2>/dev/null
+        chmod 644 "$cert_path"
+        chmod 600 "$key_path"
+        chown picast:picast "$cert_path" "$key_path"
+        info "TLS certificate generated: ${cert_path}"
+        info "  SANs: ${hostname}.local, ${hostname}, picast.local, ${ip_addr}, 127.0.0.1"
+    else
+        info "TLS certificate already exists: ${cert_path}"
+    fi
+
     # Create temp directory
     mkdir -p /tmp/picast/subs
     chown picast:picast /tmp/picast
@@ -516,9 +542,24 @@ install_picast() {
             cp "$toml_source" /etc/picast/picast.toml
             chown picast:picast /etc/picast/picast.toml
             chmod 644 /etc/picast/picast.toml
+            # Add TLS paths to the config
+            if ! grep -q "tls_cert_path" /etc/picast/picast.toml 2>/dev/null; then
+                echo "" >> /etc/picast/picast.toml
+                echo "# TLS certificate for HTTPS/WSS (self-signed by setup.sh)" >> /etc/picast/picast.toml
+                echo "tls_cert_path = \"/etc/picast/tls/picast.pem\"" >> /etc/picast/picast.toml
+                echo "tls_key_path = \"/etc/picast/tls/picast-key.pem\"" >> /etc/picast/picast.toml
+            fi
             info "Installed config to /etc/picast/picast.toml (from $(basename "$toml_source"))"
         else
             info "Config already exists at /etc/picast/picast.toml — not overwriting"
+            # Add TLS paths if missing from existing config
+            if ! grep -q "tls_cert_path" /etc/picast/picast.toml 2>/dev/null; then
+                echo "" >> /etc/picast/picast.toml
+                echo "# TLS certificate for HTTPS/WSS (self-signed by setup.sh)" >> /etc/picast/picast.toml
+                echo "tls_cert_path = \"/etc/picast/tls/picast.pem\"" >> /etc/picast/picast.toml
+                echo "tls_key_path = \"/etc/picast/tls/picast-key.pem\"" >> /etc/picast/picast.toml
+                info "Added TLS paths to existing config"
+            fi
         fi
     else
         warn "No picast.toml found — skipping config installation"
