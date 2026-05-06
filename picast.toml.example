@@ -16,6 +16,10 @@ http_addr = "0.0.0.0:8585"
 ws_addr = "0.0.0.0:8586"
 # Session database path (SQLite).
 db_path = "/var/lib/picast/sessions.db"
+# TLS certificate path (PEM). Set both cert and key to enable HTTPS/WSS.
+tls_cert_path = "/etc/picast/tls/picast.pem"
+# TLS private key path (PEM). Set both cert and key to enable HTTPS/WSS.
+tls_key_path = "/etc/picast/tls/picast-key.pem"
 
 [tor]
 # Tor SOCKS5 proxy address.

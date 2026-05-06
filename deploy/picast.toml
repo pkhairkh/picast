@@ -2,6 +2,8 @@
 http_addr = "0.0.0.0:8585"
 ws_addr = "0.0.0.0:8586"
 db_path = "/var/lib/picast/sessions.db"
+tls_cert_path = "/etc/picast/tls/picast.pem"
+tls_key_path = "/etc/picast/tls/picast-key.pem"
 
 [tor]
 socks_addr = "127.0.0.1:29050"

@@ -850,7 +850,7 @@ async function testConnectionFromBackground(host, port) {
     if (response.ok) {
       const data = await response.json();
       if (data.status === "ok") {
-        return { success: true, message: "Connected successfully!" };
+        return { success: true, message: "Connected successfully (HTTPS)!" };
       }
       return { success: false, error: `Unexpected response: ${JSON.stringify(data)}` };
     }
@@ -860,9 +860,8 @@ async function testConnectionFromBackground(host, port) {
     if (err.name === "AbortError") {
       return { success: false, error: "Connection timed out (5s)" };
     }
-    // Detect Firefox HTTPS-Only upgrade: fetch to http:// fails because
-    // Firefox silently upgrades to https:// and the server has no TLS.
-    // The error is typically TypeError with "NetworkError" or "Failed to fetch".
+    // All network-level TLS/connection errors surface as TypeError
+    // with "NetworkError" or "Failed to fetch" in Firefox extensions.
     if (
       err.message.includes("NetworkError") ||
       err.message.includes("Failed to fetch") ||
@@ -871,10 +870,11 @@ async function testConnectionFromBackground(host, port) {
       return {
         success: false,
         error:
-          "Firefox HTTPS-Only Mode is upgrading http:// to https://. " +
-          "Go to about:preferences#privacy, find HTTPS-Only Mode, " +
-          "and add an exception for " + host + ". " +
-          "Or disable HTTPS-Only Mode entirely.",
+          "TLS certificate not trusted. The PiCast server uses a " +
+          "self-signed CA. Import the CA certificate into your browser: " +
+          "Settings > Privacy & Security > Certificates > View Certificates " +
+          "> Import > select ca.pem. " +
+          "See the PiCast deploy guide for details.",
       };
     }
     return { success: false, error: err.message || "Network error" };
@@ -920,8 +920,9 @@ async function discoverPiCast() {
       e.name === "TypeError"
     ) {
       console.warn(
-        "[PiCast] Discovery failed — likely Firefox HTTPS-Only upgrade.",
-        "Add an exception in about:preferences#privacy for", config.piHost
+        "[PiCast] Discovery failed — TLS certificate not trusted.",
+        "Import the PiCast CA certificate (ca.pem) into your browser's",
+        "trusted root certificate store. See deploy/generate-certs.sh."
       );
     } else {
       console.warn("[PiCast] Discovery failed for", base, e.message);
