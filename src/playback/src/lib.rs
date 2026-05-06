@@ -391,11 +391,13 @@ impl PlaybackEngine {
         socks_addr: &str,
         isolation_username: &str,
     ) -> Result<(), PlaybackError> {
-        let mut guard = self.gst_pipeline.lock().await;
-
-        // Stop any existing pipeline.
-        if let Some(ref mut existing) = *guard {
-            let _ = existing.stop();
+        // Stop any existing pipeline while holding the lock.
+        {
+            let mut guard = self.gst_pipeline.lock().await;
+            if let Some(ref mut existing) = *guard {
+                let _ = existing.stop();
+            }
+            *guard = None;
         }
 
         // Reset SW fallback flag for the new playback attempt.
@@ -469,8 +471,28 @@ impl PlaybackEngine {
         .expect("failed to add bus watch");
         pipeline.set_bus_watch(bus_watch);
 
+        // Move pipeline.play() to a blocking thread so we don't block the
+        // tokio runtime.  pipeline.play() can block for up to 10 seconds
+        // waiting for GStreamer async preroll.  If we block the tokio
+        // runtime, the systemd watchdog heartbeat (sent every 10s) can't
+        // be dispatched, and systemd kills the process after WatchdogSec=30.
+        //
+        // The mutex is NOT held during this blocking call, so stop() and
+        // other operations can still acquire the lock while play() is
+        // waiting for preroll.
+        let (pipeline, play_result) = tokio::task::spawn_blocking(move || {
+            let mut p = pipeline;
+            let result = p.play();
+            (p, result)
+        })
+        .await
+        .map_err(|e| PlaybackError::Gstreamer(format!("play task panicked: {}", e)))?;
+
+        // Re-acquire the lock and handle the result.
+        let mut guard = self.gst_pipeline.lock().await;
+
         // Start playback — try HW decode first, fall back to SW on failure.
-        match pipeline.play() {
+        match play_result {
             Ok(()) => {
                 tracing::info!("pipeline started successfully (hw_accel={})", self.config.hw_accel);
                 *guard = Some(pipeline);
@@ -482,11 +504,19 @@ impl PlaybackEngine {
                     error = %msg,
                     "HW decode negotiation failed — falling back to software decode"
                 );
-                drop(guard); // release lock before recursive call
+                // Stop the failed pipeline before trying SW fallback.
+                let mut failed_pipeline = pipeline;
+                let _ = failed_pipeline.stop();
+                drop(failed_pipeline);
+                drop(guard); // release lock before fallback call
                 self.play_software_fallback(url, socks_addr, isolation_username).await
             },
             Err(e) => {
                 tracing::error!(error = %e, "pipeline play() failed");
+                // Stop the failed pipeline.
+                let mut failed_pipeline = pipeline;
+                let _ = failed_pipeline.stop();
+                drop(failed_pipeline);
                 // Try SW fallback if HW accel was enabled.
                 if self.config.hw_accel {
                     tracing::warn!("attempting software decode fallback after play failure");
@@ -518,11 +548,13 @@ impl PlaybackEngine {
         socks_addr: &str,
         isolation_username: &str,
     ) -> Result<(), PlaybackError> {
-        let mut guard = self.gst_pipeline.lock().await;
-
-        // Stop any existing pipeline.
-        if let Some(ref mut existing) = *guard {
-            let _ = existing.stop();
+        // Stop any existing pipeline while holding the lock.
+        {
+            let mut guard = self.gst_pipeline.lock().await;
+            if let Some(ref mut existing) = *guard {
+                let _ = existing.stop();
+            }
+            *guard = None;
         }
 
         let mut sw_config = self.config.clone();
@@ -583,7 +615,17 @@ impl PlaybackEngine {
         .expect("failed to add bus watch for SW fallback");
         pipeline.set_bus_watch(bus_watch);
 
-        pipeline.play()?;
+        // Use spawn_blocking so pipeline.play() doesn't block the tokio runtime.
+        let (pipeline, play_result) = tokio::task::spawn_blocking(move || {
+            let mut p = pipeline;
+            let result = p.play();
+            (p, result)
+        })
+        .await
+        .map_err(|e| PlaybackError::Gstreamer(format!("SW fallback play task panicked: {}", e)))?;
+
+        let mut guard = self.gst_pipeline.lock().await;
+        play_result?;
         self.sw_fallback_active.store(true, Ordering::Relaxed);
         tracing::info!("software decode fallback pipeline started successfully");
         *guard = Some(pipeline);

@@ -567,14 +567,22 @@ impl GstPipeline {
                 //
                 // state() blocks until the state change succeeds or fails.
                 // On failure, it returns Err and we can read the specific error
-                // from the bus. A generous timeout (30s) accounts for slow
-                // network sources that need time to buffer the first frames.
+                // from the bus. The timeout is set to 10 seconds — well below
+                // the systemd WatchdogSec=30 to ensure we return before the
+                // watchdog kills the process. 10s is enough for most CDN sources
+                // to buffer the first frames; if not, the error is caught and
+                // the SW fallback or a retry can be attempted.
+                //
+                // IMPORTANT: The caller (PlaybackEngine) MUST wrap this call in
+                // tokio::task::spawn_blocking() to avoid blocking the tokio
+                // runtime, which would prevent the watchdog heartbeat from being
+                // sent and cause systemd to kill the process.
                 //
                 // Note: gstreamer-rs 0.23 names this method `state()`, not
                 // `get_state()`. It returns a 3-tuple:
                 //   (Result<StateChangeSuccess, StateChangeError>, current, pending)
                 let (state_result, current, pending) =
-                    self.pipeline.state(gstreamer::ClockTime::from_seconds(30));
+                    self.pipeline.state(gstreamer::ClockTime::from_seconds(10));
                 match state_result {
                     Ok(success) => {
                         tracing::info!(
