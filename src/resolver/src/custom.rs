@@ -165,17 +165,20 @@ pub async fn resolve_doodstream(url: &str) -> Result<ResolveResult, ResolveError
         .map_err(|e| ResolveError::Network(format!("failed to build HTTP client: {}", e)))?;
 
     let html_text = fetch_page(&client, url).await?;
-    let document = Html::parse_document(&html_text);
 
-    let title = extract_meta_content(&document, "og:title")
-        .or_else(|| extract_meta_content(&document, "twitter:title"))
-        .or_else(|| extract_document_title(&document));
-
-    let thumbnail = extract_meta_content(&document, "og:image")
-        .or_else(|| extract_meta_content(&document, "twitter:image"));
-
-    // Look for the /e/ embed iframe
-    let embed_url = find_embed_iframe(&document, url);
+    // Extract all data from the Html document up-front, then drop it.
+    // scraper::Html is !Send (contains Cell<usize>), so it must not
+    // survive across an .await point.
+    let (title, thumbnail, embed_url) = {
+        let document = Html::parse_document(&html_text);
+        let title = extract_meta_content(&document, "og:title")
+            .or_else(|| extract_meta_content(&document, "twitter:title"))
+            .or_else(|| extract_document_title(&document));
+        let thumbnail = extract_meta_content(&document, "og:image")
+            .or_else(|| extract_meta_content(&document, "twitter:image"));
+        let embed_url = find_embed_iframe(&document, url);
+        (title, thumbnail, embed_url)
+    }; // document dropped here – no !Send value crosses the await below
 
     if let Some(embed_href) = embed_url {
         let full_embed = if embed_href.starts_with("http") {
@@ -376,7 +379,7 @@ fn try_method6(html: &str) -> Option<String> {
 // ── DoodStream-specific extraction ─────────────────────────────────
 
 /// Find the `/e/` embed iframe URL in a DoodStream page.
-fn find_embed_iframe(document: &Html, base_url: &str) -> Option<String> {
+fn find_embed_iframe(document: &Html, _base_url: &str) -> Option<String> {
     let iframe_selector = Selector::parse("iframe").ok()?;
 
     for iframe in document.select(&iframe_selector) {
