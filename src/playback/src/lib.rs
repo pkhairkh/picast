@@ -586,8 +586,12 @@ impl PlaybackEngine {
                 // asynchronously and may never reach Playing if preroll
                 // fails (e.g. kmssink can't get DRM master).  This check
                 // surfaces such failures in the logs.
+                //
+                // We check twice (5s and 15s) and dump per-element state
+                // at 15s to identify which element is blocking preroll.
                 let pipeline_weak_diag = guard.as_ref().unwrap().pipeline().downgrade();
                 tokio::spawn(async move {
+                    // First check at 5s — quick status
                     tokio::time::sleep(std::time::Duration::from_secs(5)).await;
                     if let Some(pipe) = pipeline_weak_diag.upgrade() {
                         let (result, current, pending) = pipe.state(gstreamer::ClockTime::from_mseconds(0));
@@ -597,6 +601,62 @@ impl PlaybackEngine {
                             pending = ?pending,
                             "pipeline state check after 5s"
                         );
+                    }
+
+                    // Second check at 15s — detailed per-element state dump
+                    tokio::time::sleep(std::time::Duration::from_secs(10)).await;
+                    if let Some(pipe) = pipeline_weak_diag.upgrade() {
+                        let (result, current, pending) = pipe.state(gstreamer::ClockTime::from_mseconds(0));
+                        tracing::info!(
+                            result = ?result,
+                            current = ?current,
+                            pending = ?pending,
+                            "pipeline state check after 15s"
+                        );
+
+                        // Walk all elements and log their states to find
+                        // which one is stuck and blocking preroll.
+                        if current != State::Playing {
+                            tracing::warn!("pipeline NOT playing after 15s — dumping per-element state:");
+                            let bin = pipe.dynamic_cast::<gstreamer::Bin>().unwrap();
+                            for element in bin.iterate_elements().iter::<gstreamer::Element>() {
+                                match element {
+                                    Ok(e) => {
+                                        let (res, st, pend) = e.state(gstreamer::ClockTime::from_mseconds(0));
+                                        tracing::warn!(
+                                            element = %e.name(),
+                                            type_ = %e.factory().map(|f| f.name().to_string()).unwrap_or_default(),
+                                            state = ?st,
+                                            pending = ?pend,
+                                            result = ?res,
+                                            "element state"
+                                        );
+                                        // Also check elements inside bins (e.g. video bin)
+                                        if let Ok(sub_bin) = e.dynamic_cast::<gstreamer::Bin>() {
+                                            for sub in sub_bin.iterate_elements().iter::<gstreamer::Element>() {
+                                                if let Ok(se) = sub {
+                                                    let (sr, sst, sp) = se.state(gstreamer::ClockTime::from_mseconds(0));
+                                                    tracing::warn!(
+                                                        element = %se.name(),
+                                                        type_ = %se.factory().map(|f| f.name().to_string()).unwrap_or_default(),
+                                                        state = ?sst,
+                                                        pending = ?sp,
+                                                        result = ?sr,
+                                                        "  sub-element state"
+                                                    );
+                                                }
+                                            }
+                                        }
+                                    },
+                                    Err(_) => {},
+                                }
+                            }
+
+                            // Point to GStreamer debug log for details
+                            tracing::warn!(
+                                "check /tmp/picast/gst-debug.log for detailed kmssink/v4l2h264dec debug output"
+                            );
+                        }
                     }
                 });
 
