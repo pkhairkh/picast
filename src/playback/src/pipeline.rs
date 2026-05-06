@@ -7,16 +7,20 @@
 //! ## Pipeline Topology
 //!
 //! ```text
-//! ┌──────────┐    ┌────────┐    ┌──────────┐    ┌───────┐    ┌───────────────┐    ┌─────────┐
-//! │souphttpsrc│───►│queue2  │───►│parsebin  │──┬►│queue  │───►│v4l2h264dec   │───►│kmssink  │
-//! │(SOCKS5h) │    │(buffer)│    │(demux)   │  │ │       │    │(HW decode)   │    │(DRM/KMS)│
-//! └──────────┘    └────────┘    └──────────┘  │ └───────┘    └───────────────┘    └─────────┘
+//! ┌──────────┐    ┌────────┐    ┌──────────┐    ┌───────┐    ┌──────────┐    ┌───────────┐    ┌──────────┐    ┌─────────┐
+//! │souphttpsrc│───►│queue2  │───►│parsebin  │──┬►│queue  │───►│h264parse │───►│capssetter │───►│v4l2h264dec│──►│kmssink  │
+//! │(SOCKS5h) │    │(buffer)│    │(demux)   │  │ │       │    │          │    │(bt709)    │    │(HW decode)│   │(DRM/KMS)│
+//! └──────────┘    └────────┘    └──────────┘  │ └───────┘    └──────────┘    └───────────┘    └──────────┘    └─────────┘
 //!                                               │
 //!                                               │ ┌───────┐    ┌──────────────┐    ┌──────────────┐    ┌────────┐    ┌─────────┐
 //!                                               └►│queue  │───►│audioconvert  │───►│audioresample │───►│volume │───►│alsasink │
 //!                                                 │       │    │              │    │              │    │        │    │(HDMI)   │
 //!                                                 └───────┘    └──────────────┘    └──────────────┘    └────────┘    └─────────┘
 //! ```
+//!
+//! The `capssetter` element overrides the H.264 stream colorimetry to bt709,
+//! which prevents "not-negotiated" errors between v4l2h264dec and kmssink
+//! caused by unusual VUI colorimetry values in some streams.
 //!
 //! ## Fallback
 //!
@@ -259,7 +263,18 @@ impl GstPipeline {
     }
 
     /// Build the hardware-accelerated video branch:
-    /// `v4l2h264dec (DMA-BUF) → kmssink`
+    /// `h264parse → capssetter(colorimetry=bt709) → v4l2h264dec(mmap) → kmssink`
+    ///
+    /// The colorimetry override via capssetter is critical on Raspberry Pi 4:
+    /// the bcm2835-codec V4L2 decoder reports colorimetry from the H.264
+    /// bitstream VUI parameters, and some streams (especially those from
+    /// Apple encoders) use colorimetry values (e.g. 1:3:5:1) that
+    /// GStreamer's caps system does not recognise, causing "not-negotiated"
+    /// between v4l2h264dec and kmssink.  Forcing bt709 resolves this.
+    ///
+    /// We also use `capture-io-mode=mmap` instead of `dmabuf` because
+    /// dmabuf adds `memory:DMABuf` caps features that kmssink may not
+    /// properly negotiate on older GStreamer versions (< 1.22).
     fn build_hw_video_bin(config: &PipelineConfig) -> Result<(Element, Element), PlaybackError> {
         let video_queue = ElementFactory::make("queue")
             .property("max-size-buffers", 3u32)
@@ -268,8 +283,31 @@ impl GstPipeline {
                 PlaybackError::PipelineCreation(format!("video_queue: {}", e))
             })?;
 
+        // h264parse ensures the stream is properly framed for V4L2 decode.
+        let h264parse = ElementFactory::make("h264parse")
+            .build()
+            .map_err(|e| {
+                PlaybackError::PipelineCreation(format!("h264parse: {}", e))
+            })?;
+
+        // capssetter overrides the colorimetry to bt709, which is the most
+        // common colour space for H.264 content.  Without this, streams
+        // with unusual VUI colorimetry (e.g. Apple's 1:3:5:1) cause
+        // "not-negotiated" between v4l2h264dec and kmssink.
+        let capssetter = ElementFactory::make("capssetter")
+            .property_from_str("caps", "video/x-h264,colorimetry=bt709")
+            .property("join", false)
+            .property("replace", true)
+            .build()
+            .map_err(|e| {
+                PlaybackError::PipelineCreation(format!("capssetter: {}", e))
+            })?;
+
+        // V4L2 hardware H.264 decoder using bcm2835-codec on Pi 4.
+        // Use mmap mode — dmabuf mode adds memory:DMABuf caps features
+        // that kmssink may not negotiate correctly.
         let v4l2dec = ElementFactory::make("v4l2h264dec")
-            .property_from_str("capture-io-mode", "dmabuf")
+            .property_from_str("capture-io-mode", "mmap")
             .build()
             .map_err(|e| {
                 PlaybackError::PipelineCreation(format!(
@@ -280,8 +318,10 @@ impl GstPipeline {
 
         let mut kmssink_builder = ElementFactory::make(&config.video_sink)
             .property_from_str("driver-name", "vc4")
-            .property("can-scale", true)
-            .property("force-modesetting", true);
+            .property("can-scale", true);
+            // NOTE: force-modesetting removed — it can conflict with an
+            // already-running display server or console framebuffer.
+            // kmssink will modeset automatically when it acquires DRM master.
 
         // Only set plane-id if explicitly configured (> 0).
         // When plane-id is 0 (default), kmssink auto-detects the best
@@ -298,12 +338,12 @@ impl GstPipeline {
         })?;
 
         let bin = gstreamer::Bin::new();
-        bin.add_many([&video_queue, &v4l2dec, &kmssink]).map_err(|e| {
+        bin.add_many([&video_queue, &h264parse, &capssetter, &v4l2dec, &kmssink]).map_err(|e| {
             PlaybackError::PipelineCreation(format!("add video elements to bin: {}", e))
         })?;
 
-        Element::link_many([&video_queue, &v4l2dec, &kmssink]).map_err(|e| {
-            PlaybackError::PipelineCreation(format!("link video_queue→v4l2h264dec→kmssink: {}", e))
+        Element::link_many([&video_queue, &h264parse, &capssetter, &v4l2dec, &kmssink]).map_err(|e| {
+            PlaybackError::PipelineCreation(format!("link video_queue→h264parse→capssetter→v4l2h264dec→kmssink: {}", e))
         })?;
 
         // Create ghost pads for the bin (on the queue element, which is the entry point).
@@ -337,8 +377,7 @@ impl GstPipeline {
 
         let mut kmssink_builder = ElementFactory::make(&config.video_sink)
             .property_from_str("driver-name", "vc4")
-            .property("can-scale", true)
-            .property("force-modesetting", true);
+            .property("can-scale", true);
 
         // Only set plane-id if explicitly configured (> 0).
         if config.plane_id > 0 {

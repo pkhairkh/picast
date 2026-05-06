@@ -83,8 +83,17 @@ impl DlnaRenderer {
 
         // Build the GStreamer pipeline string for gmediarender.
         // %s is replaced by gmediarender with the URI set by the DLNA controller.
+        //
+        // Pipeline: souphttpsrc → queue2 → parsebin → h264parse → capssetter(bt709)
+        //           → v4l2h264dec(mmap) → kmssink(vc4)
+        //
+        // The capssetter forces bt709 colorimetry to prevent "not-negotiated"
+        // errors between v4l2h264dec and kmssink caused by unusual VUI
+        // colorimetry values in some H.264 streams.
+        // Using mmap instead of dmabuf avoids memory:DMABuf caps features
+        // that kmssink may not negotiate correctly.
         let pipeline = if self.socks_addr.is_empty() {
-            "souphttpsrc location=%s ! queue2 max-size-bytes=52428800 use-buffering=true ! parsebin ! v4l2h264dec capture-io-mode=dmabuf ! kmssink driver-name=vc4 plane-id=0 can-scale=true force-modesetting=true".to_owned()
+            "souphttpsrc location=%s ! queue2 max-size-bytes=52428800 use-buffering=true ! parsebin ! h264parse ! capssetter caps=\"video/x-h264,colorimetry=bt709\" join=false replace=true ! v4l2h264dec capture-io-mode=mmap ! kmssink driver-name=vc4 can-scale=true".to_owned()
         } else {
             // Safely extract the port number from socks_addr, validating it's numeric.
             let port_str = self.socks_addr.split(':').next_back().unwrap_or("9050");
@@ -93,7 +102,7 @@ impl DlnaRenderer {
                 9050
             });
             format!(
-                "souphttpsrc location=%s socks5-proxy-ip=127.0.0.1 socks5-proxy-port={} ! queue2 max-size-bytes=52428800 use-buffering=true ! parsebin ! v4l2h264dec capture-io-mode=dmabuf ! kmssink driver-name=vc4 plane-id=0 can-scale=true force-modesetting=true",
+                "souphttpsrc location=%s socks5-proxy-ip=127.0.0.1 socks5-proxy-port={} ! queue2 max-size-bytes=52428800 use-buffering=true ! parsebin ! h264parse ! capssetter caps=\"video/x-h264,colorimetry=bt709\" join=false replace=true ! v4l2h264dec capture-io-mode=mmap ! kmssink driver-name=vc4 can-scale=true",
                 port
             )
         };
