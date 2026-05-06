@@ -75,6 +75,7 @@ impl ResolveCache {
             "CREATE TABLE IF NOT EXISTS resolved_urls (
                 source_url     TEXT PRIMARY KEY,
                 direct_url     TEXT NOT NULL,
+                audio_url      TEXT,
                 category       TEXT NOT NULL,
                 mime_type      TEXT,
                 content_length INTEGER,
@@ -117,7 +118,7 @@ impl ResolveCache {
 
         let mut stmt = conn
             .prepare(
-                "SELECT source_url, direct_url, category, mime_type, content_length,
+                "SELECT source_url, direct_url, audio_url, category, mime_type, content_length,
                     used_tor, title, duration, thumbnail, vcodec, acodec,
                     width, height, subtitle_tracks
              FROM resolved_urls
@@ -196,7 +197,7 @@ impl ResolveCache {
 
         // Try to get from cache first.
         let mut stmt = match conn.prepare(
-            "SELECT source_url, direct_url, category, mime_type, content_length,
+            "SELECT source_url, direct_url, audio_url, category, mime_type, content_length,
                 used_tor, title, duration, thumbnail, vcodec, acodec,
                 width, height, subtitle_tracks
              FROM resolved_urls
@@ -240,13 +241,14 @@ impl ResolveCache {
 
         if let Err(e) = conn.execute(
             "INSERT OR REPLACE INTO resolved_urls
-                (source_url, direct_url, category, mime_type, content_length,
+                (source_url, direct_url, audio_url, category, mime_type, content_length,
                  used_tor, title, duration, thumbnail, vcodec, acodec,
                  width, height, subtitle_tracks, resolved_at)
-             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
             params![
                 result.source_url,
                 result.direct_url,
+                result.audio_url,
                 result.category.to_string(),
                 result.mime_type,
                 content_length,
@@ -271,34 +273,35 @@ impl ResolveCache {
 
 /// Convert a database row into a `ResolveResult`.
 fn row_to_resolve_result(row: &rusqlite::Row<'_>) -> ResolveResult {
-    let category_str: String = row.get(2).unwrap_or_else(|_| "direct_media".into());
+    let category_str: String = row.get(3).unwrap_or_else(|_| "direct_media".into());
     let category = crate::UrlCategory::from_str(&category_str);
 
-    let used_tor: i32 = row.get(5).unwrap_or(0);
+    let used_tor: i32 = row.get(6).unwrap_or(0);
 
-    let subtitle_tracks_str: String = row.get(13).unwrap_or_else(|_| "[]".into());
+    let subtitle_tracks_str: String = row.get(14).unwrap_or_else(|_| "[]".into());
     let subtitle_tracks: Vec<String> =
         serde_json::from_str(&subtitle_tracks_str).unwrap_or_default();
 
     // Convert i64/i32 back to u64/u32 for ResolveResult fields.
     let content_length: Option<u64> =
-        row.get::<_, Option<i64>>(4).unwrap_or(None).map(|v| v as u64);
-    let duration: Option<u64> = row.get::<_, Option<i64>>(7).unwrap_or(None).map(|v| v as u64);
-    let width: Option<u32> = row.get::<_, Option<i32>>(11).unwrap_or(None).map(|v| v as u32);
-    let height: Option<u32> = row.get::<_, Option<i32>>(12).unwrap_or(None).map(|v| v as u32);
+        row.get::<_, Option<i64>>(5).unwrap_or(None).map(|v| v as u64);
+    let duration: Option<u64> = row.get::<_, Option<i64>>(8).unwrap_or(None).map(|v| v as u64);
+    let width: Option<u32> = row.get::<_, Option<i32>>(12).unwrap_or(None).map(|v| v as u32);
+    let height: Option<u32> = row.get::<_, Option<i32>>(13).unwrap_or(None).map(|v| v as u32);
 
     ResolveResult {
         source_url: row.get(0).unwrap_or_default(),
         direct_url: row.get(1).unwrap_or_default(),
+        audio_url: row.get(2).unwrap_or(None),
         category,
-        mime_type: row.get(3).unwrap_or(None),
+        mime_type: row.get(4).unwrap_or(None),
         content_length,
         used_tor: used_tor != 0,
-        title: row.get(6).unwrap_or(None),
+        title: row.get(7).unwrap_or(None),
         duration,
-        thumbnail: row.get(8).unwrap_or(None),
-        vcodec: row.get(9).unwrap_or(None),
-        acodec: row.get(10).unwrap_or(None),
+        thumbnail: row.get(9).unwrap_or(None),
+        vcodec: row.get(10).unwrap_or(None),
+        acodec: row.get(11).unwrap_or(None),
         width,
         height,
         subtitle_tracks,
@@ -320,6 +323,7 @@ mod tests {
         ResolveResult {
             source_url: url.to_owned(),
             direct_url: format!("{}?direct=1", url),
+            audio_url: None,
             category: UrlCategory::DirectMedia,
             mime_type: Some("video/mp4".into()),
             content_length: Some(1024),
@@ -582,6 +586,7 @@ mod tests {
         let result = ResolveResult {
             source_url: url.to_owned(),
             direct_url: url.to_owned(),
+            audio_url: None,
             category: UrlCategory::DirectMedia,
             mime_type: None,
             content_length: None,

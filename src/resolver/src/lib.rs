@@ -67,6 +67,13 @@ pub struct ResolveResult {
     pub source_url: String,
     /// The resolved direct media URL ready for playback.
     pub direct_url: String,
+    /// Separate audio stream URL, if yt-dlp returned split video+audio
+    /// formats (e.g. `bestvideo+bestaudio`). When present, `direct_url`
+    /// points to the video-only stream and this field holds the audio-only
+    /// stream. Currently unused by the GStreamer pipeline but stored for
+    /// future multi-stream playback support.
+    #[serde(default)]
+    pub audio_url: Option<String>,
     /// Classification of the resolved URL.
     pub category: UrlCategory,
     /// MIME type of the media, if known (e.g. `"video/mp4"`).
@@ -211,6 +218,7 @@ impl Resolver {
             UrlCategory::DirectMedia => ResolveResult {
                 source_url: url.to_owned(),
                 direct_url: url.to_owned(),
+                audio_url: None,
                 category,
                 mime_type: mime_from_extension(url),
                 content_length: None,
@@ -227,6 +235,7 @@ impl Resolver {
             UrlCategory::HlsManifest => ResolveResult {
                 source_url: url.to_owned(),
                 direct_url: url.to_owned(),
+                audio_url: None,
                 category,
                 mime_type: Some("application/vnd.apple.mpegurl".to_string()),
                 content_length: None,
@@ -243,6 +252,7 @@ impl Resolver {
             UrlCategory::DashManifest => ResolveResult {
                 source_url: url.to_owned(),
                 direct_url: url.to_owned(),
+                audio_url: None,
                 category,
                 mime_type: Some("application/dash+xml".to_string()),
                 content_length: None,
@@ -308,6 +318,7 @@ impl Resolver {
         let result = ResolveResult {
             source_url: url.to_owned(),
             direct_url: url.to_owned(),
+            audio_url: None,
             category,
             mime_type: mime_from_extension(url),
             content_length: None,
@@ -586,6 +597,7 @@ mod tests {
         let result = ResolveResult {
             source_url: "https://example.com/video.mp4".into(),
             direct_url: "https://cdn.example.com/video.mp4".into(),
+            audio_url: None,
             category: UrlCategory::DirectMedia,
             mime_type: Some("video/mp4".into()),
             content_length: Some(1024),

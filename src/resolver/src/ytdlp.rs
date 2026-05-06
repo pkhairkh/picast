@@ -38,17 +38,28 @@ const DEFAULT_SUB_LANGS: &str = "en,es,fr,de";
 const SUB_FORMAT: &str = "vtt";
 
 /// The H.264 format string passed to yt-dlp's `--format` flag.
-/// Prioritises hardware-decodable H.264 at 1080p or below.
+/// Prioritises pre-merged H.264 at 1080p or below (single URL with audio),
+/// then falls back to separate video+audio streams (requires `requested_formats`
+/// parsing), and finally any best stream at 1080p or below.
+///
+/// Pre-merged formats are preferred because they always provide a top-level
+/// `url` field in `--dump-json` output, whereas `bestvideo+bestaudio` produces
+/// separate entries in `requested_formats` with no top-level URL.
 const H264_FORMAT_STRING: &str = concat!(
-    "bestvideo[vcodec^=avc1][height<=1080]+bestaudio/",
     "best[vcodec^=avc1][height<=1080]/",
-    "best[height<=1080]"
+    "best[height<=1080]/",
+    "bestvideo[vcodec^=avc1][height<=1080]+bestaudio"
 );
 
 /// Parsed output from `yt-dlp --dump-json`.
 ///
 /// Only the fields we care about are deserialized; everything
 /// else is silently ignored.
+///
+/// When yt-dlp selects a pre-merged format (e.g. `best[vcodec^=avc1]`),
+/// the `url` field is present at the top level. When it selects separate
+/// video+audio streams (e.g. `bestvideo+bestaudio`), the top-level `url`
+/// is empty and the individual stream URLs are in `requested_formats`.
 #[derive(Debug, Deserialize)]
 struct YtdlpOutput {
     /// The webpage URL (same as input).
@@ -56,7 +67,17 @@ struct YtdlpOutput {
     #[serde(default)]
     webpage_url: Option<String>,
     /// Direct media URL for the best format.
-    url: String,
+    ///
+    /// Present for pre-merged formats, empty/missing for `bestvideo+bestaudio`
+    /// selections that use `requested_formats` instead.
+    #[serde(default)]
+    url: Option<String>,
+    /// Individual stream formats when yt-dlp selects separate video+audio.
+    ///
+    /// Each entry has its own `url`, `vcodec`, `acodec`, etc.
+    /// Only populated when the top-level `url` is empty.
+    #[serde(default)]
+    requested_formats: Option<Vec<RequestedFormat>>,
     /// Video title.
     title: Option<String>,
     /// Duration in seconds.
@@ -77,6 +98,92 @@ struct YtdlpOutput {
     /// The format identifier string.
     #[serde(default)]
     format: Option<String>,
+}
+
+/// A single format entry from yt-dlp's `requested_formats` array.
+///
+/// When yt-dlp selects `bestvideo+bestaudio`, each stream has its own
+/// URL and codec information. We only deserialize the fields we need.
+#[derive(Debug, PartialEq, Deserialize)]
+struct RequestedFormat {
+    /// Direct stream URL for this format.
+    url: Option<String>,
+    /// Video codec (e.g. "avc1.64001F", "none" for audio-only).
+    #[serde(default)]
+    vcodec: Option<String>,
+    /// Audio codec (e.g. "mp4a.40.2", "none" for video-only).
+    #[serde(default)]
+    acodec: Option<String>,
+    /// Video width.
+    #[serde(default)]
+    width: Option<i64>,
+    /// Video height.
+    #[serde(default)]
+    height: Option<i64>,
+}
+
+impl YtdlpOutput {
+    /// Resolve the effective media URL(s) from this yt-dlp output.
+    ///
+    /// Returns `(video_url, audio_url)` where:
+    /// - `video_url` is always `Some` (the primary media URL)
+    /// - `audio_url` is `Some` only when separate audio stream is available
+    ///
+    /// Resolution order:
+    /// 1. Top-level `url` (pre-merged format) → `(url, None)`
+    /// 2. `requested_formats` → video URL + optional audio URL
+    /// 3. Error if no URL can be found
+    fn resolve_urls(&self) -> Result<(String, Option<String>), ResolveError> {
+        // Try top-level URL first (pre-merged format).
+        if let Some(ref url) = self.url {
+            if !url.is_empty() {
+                return Ok((url.clone(), None));
+            }
+        }
+
+        // Fall back to requested_formats (separate video+audio).
+        if let Some(ref formats) = self.requested_formats {
+            let mut video_url: Option<String> = None;
+            let mut audio_url: Option<String> = None;
+
+            for fmt in formats {
+                let has_video = fmt
+                    .vcodec
+                    .as_ref()
+                    .is_some_and(|c| c != "none" && !c.is_empty());
+                let has_audio = fmt
+                    .acodec
+                    .as_ref()
+                    .is_some_and(|c| c != "none" && !c.is_empty());
+
+                if let Some(ref url) = fmt.url {
+                    if !url.is_empty() {
+                        if has_video && video_url.is_none() {
+                            video_url = Some(url.clone());
+                        }
+                        if has_audio && audio_url.is_none() {
+                            audio_url = Some(url.clone());
+                        }
+                    }
+                }
+            }
+
+            if let Some(vurl) = video_url {
+                if audio_url.is_some() {
+                    tracing::warn!(
+                        "separate video+audio streams detected; current pipeline plays \
+                         video only — audio URL stored for future multi-stream support"
+                    );
+                }
+                return Ok((vurl, audio_url));
+            }
+        }
+
+        Err(ResolveError::NoMediaFound(
+            "yt-dlp returned no playable URL (neither top-level `url` nor `requested_formats`)"
+                .into(),
+        ))
+    }
 }
 
 /// Resolve a web page URL using yt-dlp.
@@ -193,8 +300,14 @@ pub async fn resolve_with_ytdlp_and_subs(
         vcodec = ?ytdlp.vcodec,
         width = ?ytdlp.width,
         height = ?ytdlp.height,
-        "yt-dlp resolved media URL"
+        has_top_level_url = ytdlp.url.as_ref().is_some_and(|u| !u.is_empty()),
+        has_requested_formats = ytdlp.requested_formats.is_some(),
+        "yt-dlp resolved media info"
     );
+
+    // Resolve the effective URL(s) — handles both pre-merged and separate
+    // video+audio format outputs from yt-dlp.
+    let (direct_url, audio_url) = ytdlp.resolve_urls()?;
 
     // Determine category based on what yt-dlp returned.
     let category = determine_category(&ytdlp);
@@ -214,7 +327,8 @@ pub async fn resolve_with_ytdlp_and_subs(
     // temp_dir is dropped here, cleaning up any subtitle files yt-dlp wrote.
     Ok(ResolveResult {
         source_url: url.to_owned(),
-        direct_url: ytdlp.url,
+        direct_url,
+        audio_url,
         category,
         mime_type,
         content_length: None, // Not available from yt-dlp
@@ -327,7 +441,8 @@ mod tests {
     fn determine_category_hls() {
         let ytdlp = YtdlpOutput {
             webpage_url: None,
-            url: "https://example.com/stream".into(),
+            url: Some("https://example.com/stream".into()),
+            requested_formats: None,
             title: None,
             duration: None,
             thumbnail: None,
@@ -345,7 +460,8 @@ mod tests {
     fn determine_category_dash() {
         let ytdlp = YtdlpOutput {
             webpage_url: None,
-            url: "https://example.com/stream".into(),
+            url: Some("https://example.com/stream".into()),
+            requested_formats: None,
             title: None,
             duration: None,
             thumbnail: None,
@@ -363,7 +479,8 @@ mod tests {
     fn determine_category_direct() {
         let ytdlp = YtdlpOutput {
             webpage_url: None,
-            url: "https://example.com/video.mp4".into(),
+            url: Some("https://example.com/video.mp4".into()),
+            requested_formats: None,
             title: None,
             duration: None,
             thumbnail: None,
@@ -590,7 +707,8 @@ mod tests {
     fn subtitle_tracks_empty_when_no_subs() {
         let ytdlp = YtdlpOutput {
             webpage_url: None,
-            url: String::new(),
+            url: None,
+            requested_formats: None,
             title: None,
             duration: None,
             thumbnail: None,
@@ -621,7 +739,8 @@ mod tests {
     fn determine_category_no_format() {
         let ytdlp = YtdlpOutput {
             webpage_url: None,
-            url: "https://example.com/video.mp4".into(),
+            url: Some("https://example.com/video.mp4".into()),
+            requested_formats: None,
             title: None,
             duration: None,
             thumbnail: None,
@@ -656,7 +775,7 @@ mod tests {
         }"#;
 
         let ytdlp: YtdlpOutput = serde_json::from_str(json).unwrap();
-        assert_eq!(ytdlp.url, "https://rr.googlevideo.com/videoplayback?id=abc");
+        assert_eq!(ytdlp.url, Some("https://rr.googlevideo.com/videoplayback?id=abc".into()));
         assert_eq!(ytdlp.title, Some("Full Test Video".into()));
         assert_eq!(ytdlp.duration, Some(300.0));
         assert_eq!(ytdlp.width, Some(1920));
@@ -676,7 +795,8 @@ mod tests {
         // HLS should be returned since it's checked first.
         let ytdlp = YtdlpOutput {
             webpage_url: None,
-            url: "https://example.com/stream".into(),
+            url: Some("https://example.com/stream".into()),
+            requested_formats: None,
             title: None,
             duration: None,
             thumbnail: None,
@@ -695,7 +815,8 @@ mod tests {
         // The format check is case-sensitive: "HLS" should NOT match.
         let ytdlp = YtdlpOutput {
             webpage_url: None,
-            url: "https://example.com/stream".into(),
+            url: Some("https://example.com/stream".into()),
+            requested_formats: None,
             title: None,
             duration: None,
             thumbnail: None,
@@ -715,7 +836,8 @@ mod tests {
         // "DASH" should NOT match since contains() is case-sensitive.
         let ytdlp = YtdlpOutput {
             webpage_url: None,
-            url: "https://example.com/stream".into(),
+            url: Some("https://example.com/stream".into()),
+            requested_formats: None,
             title: None,
             duration: None,
             thumbnail: None,
@@ -797,10 +919,10 @@ mod tests {
 
     #[test]
     fn ytdlp_output_deserialize_minimal() {
-        // Only the required `url` field is present; everything else should default.
+        // Only the `url` field is present; everything else should default.
         let json = r#"{"url": "https://example.com/video.mp4"}"#;
         let ytdlp: YtdlpOutput = serde_json::from_str(json).unwrap();
-        assert_eq!(ytdlp.url, "https://example.com/video.mp4");
+        assert_eq!(ytdlp.url, Some("https://example.com/video.mp4".into()));
         assert_eq!(ytdlp.webpage_url, None);
         assert_eq!(ytdlp.title, None);
         assert_eq!(ytdlp.duration, None);
@@ -811,14 +933,20 @@ mod tests {
         assert_eq!(ytdlp.height, None);
         assert!(ytdlp.subtitles.is_empty());
         assert_eq!(ytdlp.format, None);
+        assert_eq!(ytdlp.requested_formats, None);
     }
 
     #[test]
-    fn ytdlp_output_deserialize_missing_url_fails() {
-        // The `url` field is required. Without it, deserialization should fail.
+    fn ytdlp_output_deserialize_missing_url_no_requested_formats_fails() {
+        // The `url` field is now optional, but if neither `url` nor
+        // `requested_formats` provides a playable URL, `resolve_urls()`
+        // should fail.
         let json = r#"{"title": "No URL"}"#;
-        let result = serde_json::from_str::<YtdlpOutput>(json);
-        assert!(result.is_err(), "deserialization should fail without required 'url' field");
+        let ytdlp: YtdlpOutput = serde_json::from_str(json).unwrap();
+        assert!(ytdlp.url.is_none());
+        assert!(ytdlp.requested_formats.is_none());
+        let result = ytdlp.resolve_urls();
+        assert!(result.is_err(), "resolve_urls should fail with no URL available");
     }
 
     #[test]
@@ -831,7 +959,7 @@ mod tests {
             "another_extra": 42
         }"#;
         let ytdlp: YtdlpOutput = serde_json::from_str(json).unwrap();
-        assert_eq!(ytdlp.url, "https://example.com/video.mp4");
+        assert_eq!(ytdlp.url, Some("https://example.com/video.mp4".into()));
         assert_eq!(ytdlp.title, Some("Test".into()));
     }
 
@@ -897,7 +1025,8 @@ mod tests {
         // Any format string containing "hls" should match.
         let ytdlp = YtdlpOutput {
             webpage_url: None,
-            url: "https://example.com/stream".into(),
+            url: Some("https://example.com/stream".into()),
+            requested_formats: None,
             title: None,
             duration: None,
             thumbnail: None,
@@ -915,7 +1044,8 @@ mod tests {
     fn determine_category_format_with_dash_substring() {
         let ytdlp = YtdlpOutput {
             webpage_url: None,
-            url: "https://example.com/stream".into(),
+            url: Some("https://example.com/stream".into()),
+            requested_formats: None,
             title: None,
             duration: None,
             thumbnail: None,
@@ -927,5 +1057,133 @@ mod tests {
             format: Some("dash-9876".into()),
         };
         assert_eq!(determine_category(&ytdlp), UrlCategory::DashManifest);
+    }
+
+    // ── requested_formats / resolve_urls tests ──────────────────────────
+
+    #[test]
+    fn resolve_urls_top_level_url_preferred() {
+        // When top-level `url` is present, it should be used directly.
+        let json = r#"{
+            "url": "https://example.com/merged.mp4",
+            "title": "Pre-merged"
+        }"#;
+        let ytdlp: YtdlpOutput = serde_json::from_str(json).unwrap();
+        let (video_url, audio_url) = ytdlp.resolve_urls().unwrap();
+        assert_eq!(video_url, "https://example.com/merged.mp4");
+        assert_eq!(audio_url, None);
+    }
+
+    #[test]
+    fn resolve_urls_from_requested_formats_video_plus_audio() {
+        // When top-level `url` is missing but `requested_formats` has
+        // separate video and audio entries, we should extract both URLs.
+        let json = r#"{
+            "title": "Separate Streams",
+            "requested_formats": [
+                {
+                    "url": "https://cdn.example.com/video_only.mp4",
+                    "vcodec": "avc1.64001F",
+                    "acodec": "none",
+                    "width": 1920,
+                    "height": 1080
+                },
+                {
+                    "url": "https://cdn.example.com/audio_only.mp4",
+                    "vcodec": "none",
+                    "acodec": "mp4a.40.2"
+                }
+            ]
+        }"#;
+        let ytdlp: YtdlpOutput = serde_json::from_str(json).unwrap();
+        assert!(ytdlp.url.is_none());
+        let (video_url, audio_url) = ytdlp.resolve_urls().unwrap();
+        assert_eq!(video_url, "https://cdn.example.com/video_only.mp4");
+        assert_eq!(audio_url, Some("https://cdn.example.com/audio_only.mp4".into()));
+    }
+
+    #[test]
+    fn resolve_urls_from_requested_formats_video_only() {
+        // When `requested_formats` only has a video entry.
+        let json = r#"{
+            "requested_formats": [
+                {
+                    "url": "https://cdn.example.com/video.mp4",
+                    "vcodec": "avc1",
+                    "acodec": "none"
+                }
+            ]
+        }"#;
+        let ytdlp: YtdlpOutput = serde_json::from_str(json).unwrap();
+        let (video_url, audio_url) = ytdlp.resolve_urls().unwrap();
+        assert_eq!(video_url, "https://cdn.example.com/video.mp4");
+        assert_eq!(audio_url, None);
+    }
+
+    #[test]
+    fn resolve_urls_empty_top_level_url_falls_back_to_requested_formats() {
+        // When top-level `url` is an empty string, fall back to requested_formats.
+        let json = r#"{
+            "url": "",
+            "requested_formats": [
+                {
+                    "url": "https://cdn.example.com/video.mp4",
+                    "vcodec": "avc1",
+                    "acodec": "none"
+                },
+                {
+                    "url": "https://cdn.example.com/audio.mp4",
+                    "vcodec": "none",
+                    "acodec": "opus"
+                }
+            ]
+        }"#;
+        let ytdlp: YtdlpOutput = serde_json::from_str(json).unwrap();
+        let (video_url, audio_url) = ytdlp.resolve_urls().unwrap();
+        assert_eq!(video_url, "https://cdn.example.com/video.mp4");
+        assert_eq!(audio_url, Some("https://cdn.example.com/audio.mp4".into()));
+    }
+
+    #[test]
+    fn resolve_urls_no_url_at_all_errors() {
+        // Neither top-level `url` nor `requested_formats` — should error.
+        let json = r#"{"title": "Nothing"}"#;
+        let ytdlp: YtdlpOutput = serde_json::from_str(json).unwrap();
+        let result = ytdlp.resolve_urls();
+        assert!(result.is_err());
+        match result.unwrap_err() {
+            ResolveError::NoMediaFound(msg) => {
+                assert!(msg.contains("no playable URL"));
+            },
+            other => panic!("expected NoMediaFound, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn resolve_urls_requested_formats_with_empty_urls_skipped() {
+        // `requested_formats` entries with empty URLs should be skipped.
+        let json = r#"{
+            "requested_formats": [
+                {
+                    "url": "",
+                    "vcodec": "avc1",
+                    "acodec": "none"
+                }
+            ]
+        }"#;
+        let ytdlp: YtdlpOutput = serde_json::from_str(json).unwrap();
+        let result = ytdlp.resolve_urls();
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn format_string_prefers_pre_merged() {
+        // The format string should prefer pre-merged formats first,
+        // falling back to separate video+audio only as last resort.
+        assert!(H264_FORMAT_STRING.starts_with("best[vcodec^=avc1]"));
+        assert!(H264_FORMAT_STRING.contains("best[height<=1080]"));
+        // The + format (bestvideo+bestaudio) should be the LAST option.
+        let parts: Vec<&str> = H264_FORMAT_STRING.split('/').collect();
+        assert_eq!(parts.last().unwrap(), &"bestvideo[vcodec^=avc1][height<=1080]+bestaudio");
     }
 }
