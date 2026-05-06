@@ -9,26 +9,16 @@ User=picast
 Group=picast
 SupplementaryGroups=video render audio
 
-# Environment
 Environment=RUST_LOG=picast=info
 Environment=HOME=/var/lib/picast
 Environment=XDG_CACHE_HOME=/var/lib/picast/.cache
-
-# Main executable
 ExecStart=/usr/local/bin/picast-server --config /etc/picast/picast.toml
-
-# Notify systemd when ready (sd_notify support)
 NotifyAccess=all
 
-# Restart policy
 Restart=on-failure
 RestartSec=5
-
-# Watchdog — the binary sends WATCHDOG=1 every 10 seconds.
-# If no heartbeat is received within 30s, systemd restarts the service.
 WatchdogSec=30
 
-# Hardening
 NoNewPrivileges=true
 ProtectSystem=strict
 ProtectHome=true
@@ -42,7 +32,6 @@ LockPersonality=true
 MemoryDenyWriteExecute=false
 RestrictRealtime=true
 
-# Resource limits
 LimitNOFILE=4096
 CPUWeight=80
 IOWeight=80

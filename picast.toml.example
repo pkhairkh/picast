@@ -20,6 +20,10 @@ db_path = "/var/lib/picast/sessions.db"
 [tor]
 # Tor SOCKS5 proxy address.
 socks_addr = "127.0.0.1:9050"
+# Tor control port.
+control_port = 9051
+# Tor control authentication cookie path.
+cookie_path = "/run/tor/control.authcookie"
 
 [display]
 # DRM device path (empty = auto-detect, "mock" = no hardware).

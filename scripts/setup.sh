@@ -250,7 +250,7 @@ install_dependencies() {
         libdrm-dev
         libgbm-dev
         libegl-dev
-        libgles2-dev
+        libgles-dev
         libsqlite3-dev
         libssl-dev
         iptables

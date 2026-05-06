@@ -216,6 +216,7 @@ async fn main() -> Result<()> {
         ws_addr = %config.server.ws_addr,
         dlna_name = %config.dlna.friendly_name,
         tor_socks = %config.tor.socks_addr,
+        tor_control_port = config.tor.control_port,
         "configuration loaded"
     );
 
@@ -234,8 +235,17 @@ async fn main() -> Result<()> {
     info!("initialising subsystems");
 
     // 4a. Tor
-    let tor_manager = Arc::new(picast_tor::TorManager::new(&config.tor.socks_addr));
-    info!(socks = %config.tor.socks_addr, "Tor manager created");
+    let tor_manager = Arc::new(
+        picast_tor::TorManager::new(&config.tor.socks_addr)
+            .with_control_port(config.tor.control_port)
+            .with_cookie_path(&config.tor.cookie_path),
+    );
+    info!(
+        socks = %config.tor.socks_addr,
+        control_port = config.tor.control_port,
+        cookie_path = %config.tor.cookie_path,
+        "Tor manager created"
+    );
 
     // Start the Tor background monitor — watches for process crashes
     // and queries circuit health from the control port every 30 seconds.
@@ -312,7 +322,7 @@ async fn main() -> Result<()> {
     // ── 6b. Notify systemd that we're ready ────────────────────────────
     // Send READY=1 so systemd knows the service has started.
     // If not running under systemd (e.g. dev mode), this is a no-op.
-    if let Err(e) = sd_notify::notify(true, &[sd_notify::NotifyState::Ready]) {
+    if let Err(e) = sd_notify::notify(false, &[sd_notify::NotifyState::Ready]) {
         warn!(error = %e, "sd_notify READY failed (not running under systemd?)");
     } else {
         info!("sd_notify: READY=1 sent to systemd");

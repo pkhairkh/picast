@@ -32,29 +32,28 @@ use gstreamer::prelude::*;
 use gstreamer::{Element, ElementFactory, Pipeline, State};
 
 /// Ensure GStreamer is initialised exactly once.
-static GST_INIT: std::sync::OnceLock<Result<(), PlaybackError>> = std::sync::OnceLock::new();
+static GST_INIT: std::sync::OnceLock<Result<(), String>> = std::sync::OnceLock::new();
 
 /// Initialise GStreamer. Safe to call multiple times.
 /// Returns an error if initialisation fails (instead of panicking),
 /// and subsequent calls will return the same error.
 fn ensure_gst_init() -> Result<(), PlaybackError> {
-    GST_INIT
-        .get_or_init(|| {
-            match gstreamer::init() {
-                Ok(()) => {
-                    tracing::debug!("GStreamer initialised successfully");
-                    Ok(())
-                },
-                Err(e) => {
-                    tracing::error!("GStreamer initialisation failed: {}", e);
-                    Err(PlaybackError::Gstreamer(format!(
-                        "GStreamer init failed (permanent): {}",
-                        e
-                    )))
-                },
-            }
-        })
-        .clone()
+    match GST_INIT.get_or_init(|| {
+        match gstreamer::init() {
+            Ok(()) => {
+                tracing::debug!("GStreamer initialised successfully");
+                Ok(())
+            },
+            Err(e) => {
+                let message = format!("GStreamer init failed (permanent): {}", e);
+                tracing::error!("{}", message);
+                Err(message)
+            },
+        }
+    }) {
+        Ok(()) => Ok(()),
+        Err(message) => Err(PlaybackError::Gstreamer(message.clone())),
+    }
 }
 
 /// A constructed GStreamer pipeline ready for state transitions.
@@ -67,6 +66,8 @@ pub struct GstPipeline {
     volume: Element,
     /// Current pipeline state.
     state: PipelineState,
+    /// Keeps the GStreamer bus watch alive for this pipeline.
+    bus_watch: Option<gstreamer::bus::BusWatchGuard>,
 }
 
 /// Internal tracking of pipeline state.
@@ -105,36 +106,54 @@ impl GstPipeline {
         // ── Source element ──────────────────────────────────────────
         let src = ElementFactory::make("souphttpsrc")
             .property("location", url)
-            .property("timeout", 30u64 * 1_000_000_000u64) // 30s in ns
+            .property("timeout", 30u32)
             .build()
             .map_err(|e| PlaybackError::PipelineCreation(format!("souphttpsrc: {}", e)))?;
 
-        // Configure SOCKS5h proxy if provided.
-        if !socks_addr.is_empty() {
+        // Configure SOCKS5h proxy if provided. Loopback media is used for
+        // local device tests and must stay local.
+        let is_loopback_url = url.starts_with("http://127.0.0.1:")
+            || url.starts_with("http://localhost:")
+            || url.starts_with("http://[::1]:");
+        if !socks_addr.is_empty() && !is_loopback_url {
             let parts: Vec<&str> = socks_addr.split(':').collect();
             let (host, port) = if parts.len() == 2 {
                 (parts[0], parts[1].parse::<u32>().unwrap_or(9050))
             } else {
                 ("127.0.0.1", 9050u32)
             };
-            // Note: souphttpsrc's built-in SOCKS5 does not support
-            // username-based circuit isolation (IsolateSOCKSAuth).
-            // All connections through this proxy share Tor circuits.
-            // For per-host isolation, use a SOCKS5 forwarder or
-            // GStreamer's souphttpsrc with a local socat bridge.
-            src.set_property("socks5-proxy-ip", host);
-            src.set_property("socks5-proxy-port", port);
-            tracing::debug!(
-                host = host,
-                port = port,
-                user = isolation_username,
-                "SOCKS5h proxy configured on souphttpsrc"
-            );
+            if src.find_property("socks5-proxy-ip").is_some()
+                && src.find_property("socks5-proxy-port").is_some()
+            {
+                src.set_property("socks5-proxy-ip", host);
+                src.set_property("socks5-proxy-port", port);
+                tracing::debug!(
+                    host = host,
+                    port = port,
+                    user = isolation_username,
+                    "SOCKS5h proxy configured on souphttpsrc"
+                );
+            } else if src.find_property("proxy").is_some() {
+                let proxy = format!("socks5h://{}@{}:{}", isolation_username, host, port);
+                src.set_property("proxy", proxy);
+                tracing::debug!(
+                    host = host,
+                    port = port,
+                    user = isolation_username,
+                    "SOCKS proxy URI configured on souphttpsrc"
+                );
+            } else {
+                tracing::warn!(
+                    "souphttpsrc has no supported SOCKS proxy property; playback proxy not set"
+                );
+            }
+        } else if is_loopback_url {
+            tracing::debug!("loopback media URL detected; skipping playback proxy");
         }
 
         // ── Buffer element ──────────────────────────────────────────
         let queue2 = ElementFactory::make("queue2")
-            .property("max-size-bytes", 52_428_800u64) // 50 MB
+            .property("max-size-bytes", 52_428_800u32) // 50 MB
             .property("use-buffering", true)
             .property_from_str("low-percent", "25")
             .property_from_str("high-percent", "75")
@@ -194,7 +213,6 @@ impl GstPipeline {
             .map_err(|e| PlaybackError::PipelineCreation(format!("link audio chain: {}", e)))?;
 
         // ── Dynamic pad linking (parsebin → video/audio) ────────────
-        let pipeline_weak = pipeline.downgrade();
         let video_bin_weak = video_bin.downgrade();
         let audio_queue_weak = audio_queue.downgrade();
 
@@ -237,7 +255,7 @@ impl GstPipeline {
             }
         });
 
-        Ok(Self { pipeline, video_sink, volume, state: PipelineState::Ready })
+        Ok(Self { pipeline, video_sink, volume, state: PipelineState::Ready, bus_watch: None })
     }
 
     /// Build the hardware-accelerated video branch:
@@ -262,7 +280,7 @@ impl GstPipeline {
 
         let kmssink = ElementFactory::make(&config.video_sink)
             .property_from_str("driver-name", "vc4")
-            .property("plane-id", config.plane_id)
+            .property("plane-id", config.plane_id as i32)
             .property("can-scale", true)
             .property("force-modesetting", true)
             .build()
@@ -270,7 +288,7 @@ impl GstPipeline {
                 PlaybackError::PipelineCreation(format!("{}: {}", config.video_sink, e))
             })?;
 
-        let bin = gstreamer::Bin::new(Some("video-bin"));
+        let bin = gstreamer::Bin::new();
         bin.add_many([&video_queue, &v4l2dec, &kmssink]).map_err(|e| {
             PlaybackError::PipelineCreation(format!("add video elements to bin: {}", e))
         })?;
@@ -310,6 +328,7 @@ impl GstPipeline {
 
         let kmssink = ElementFactory::make(&config.video_sink)
             .property_from_str("driver-name", "vc4")
+            .property("plane-id", config.plane_id as i32)
             .property("can-scale", true)
             .property("force-modesetting", true)
             .build()
@@ -317,7 +336,7 @@ impl GstPipeline {
                 PlaybackError::PipelineCreation(format!("{}: {}", config.video_sink, e))
             })?;
 
-        let bin = gstreamer::Bin::new(Some("sw-video-bin"));
+        let bin = gstreamer::Bin::new();
         bin.add_many([&video_queue, &avdec, &vconv, &kmssink]).map_err(|e| {
             PlaybackError::PipelineCreation(format!("add sw video elements: {}", e))
         })?;
@@ -418,15 +437,16 @@ impl GstPipeline {
     /// Query the current buffer health from the queue2 element.
     pub fn buffer_health(&self) -> BufferHealth {
         // Query buffering stats from queue2.
-        let query = gstreamer::query::Buffering::new();
-        if self.pipeline.query(&query) {
-            let percent = query.percent();
-            let stats = query.stats();
+        let mut query = gstreamer::query::Buffering::new(gstreamer::Format::Time);
+        if self.pipeline.query(&mut query) {
+            let (busy, percent) = query.percent();
+            let percent = percent.clamp(0, 100) as u8;
+            let _stats = query.stats();
             BufferHealth {
-                fill_percent: percent as u8,
+                fill_percent: percent,
                 buffered_seconds: 0.0, // Approximated from fill_percent
                 estimated_fill_ms: None,
-                is_buffering: percent < 100,
+                is_buffering: busy || percent < 100,
             }
         } else {
             BufferHealth::default()
@@ -436,6 +456,11 @@ impl GstPipeline {
     /// Return a reference to the GStreamer pipeline for bus watch setup.
     pub fn pipeline(&self) -> &Pipeline {
         &self.pipeline
+    }
+
+    /// Retain the bus watch guard so GStreamer keeps dispatching messages.
+    pub fn set_bus_watch(&mut self, guard: gstreamer::bus::BusWatchGuard) {
+        self.bus_watch = Some(guard);
     }
 
     /// Return the current pipeline state.

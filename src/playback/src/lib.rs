@@ -37,13 +37,17 @@ pub mod pipeline;
 #[cfg(feature = "hw")]
 use events::PlaybackEvent;
 #[cfg(feature = "hw")]
-use pipeline::{GstPipeline, PipelineState};
+use gstreamer::prelude::*;
+#[cfg(feature = "hw")]
+use gstreamer::State;
+#[cfg(feature = "hw")]
+use pipeline::GstPipeline;
 use serde::{Deserialize, Serialize};
-use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, Ordering};
+#[cfg(not(feature = "hw"))]
+use std::sync::atomic::AtomicU64;
 use std::sync::Arc;
 use thiserror::Error;
-#[cfg(feature = "hw")]
-use tokio::sync::broadcast;
 #[cfg(feature = "hw")]
 use tokio::sync::Mutex;
 
@@ -376,25 +380,19 @@ impl PlaybackEngine {
         let is_playing = self.is_playing.clone();
         let bus = pipeline.pipeline().bus().expect("pipeline should have a bus");
 
-        bus.add_watch(move |_bus, msg| {
+        let bus_watch = bus.add_watch(move |_bus, msg| {
             use gstreamer::MessageView;
 
             match msg.view() {
                 MessageView::StateChanged(s) => {
-                    if let Some(src) = s.src() {
-                        if src == msg.src() {
-                            let old = s.old();
-                            let current = s.current();
-                            let new_state = s.current();
+                    let new_state = s.current();
 
-                            if new_state == State::Playing {
-                                let _ = event_tx.send(PlaybackEvent::Playing);
-                                is_playing.store(true, Ordering::Relaxed);
-                            } else if new_state == State::Paused {
-                                let _ = event_tx.send(PlaybackEvent::Paused);
-                                is_playing.store(false, Ordering::Relaxed);
-                            }
-                        }
+                    if new_state == State::Playing {
+                        let _ = event_tx.send(PlaybackEvent::Playing);
+                        is_playing.store(true, Ordering::Relaxed);
+                    } else if new_state == State::Paused {
+                        let _ = event_tx.send(PlaybackEvent::Paused);
+                        is_playing.store(false, Ordering::Relaxed);
                     }
                 },
                 MessageView::Eos(_) => {
@@ -404,9 +402,10 @@ impl PlaybackEngine {
                 },
                 MessageView::Error(e) => {
                     let msg = e.error().to_string();
-                    let debug = e.debug().map(|d| d.to_string());
-                    tracing::error!(error = %msg, debug = ?debug, "GStreamer error");
-                    let _ = event_tx.send(PlaybackEvent::Error { message: msg, debug });
+                    let debug_info = e.debug().map(|d| d.to_string());
+                    tracing::error!(error = %msg, debug = ?debug_info, "GStreamer error");
+                    let _ =
+                        event_tx.send(PlaybackEvent::Error { message: msg, debug: debug_info });
                     is_playing.store(false, Ordering::Relaxed);
                 },
                 MessageView::Buffering(b) => {
@@ -414,15 +413,16 @@ impl PlaybackEngine {
                     tracing::debug!(percent = percent, "buffering progress");
                     let _ = event_tx.send(PlaybackEvent::Buffering { percent });
                 },
-                MessageView::Latency(l) => {
+                MessageView::Latency(_l) => {
                     // Latency message — not forwarding in v1.
                 },
                 _ => {},
             }
 
-            gstreamer::Continue(true)
+            gstreamer::glib::ControlFlow::Continue
         })
         .expect("failed to add bus watch");
+        pipeline.set_bus_watch(bus_watch);
 
         // Start playback.
         pipeline.play()?;

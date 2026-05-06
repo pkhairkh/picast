@@ -18,6 +18,8 @@
 //!
 //! [tor]
 //! socks_addr = "127.0.0.1:9050"
+//! control_port = 9051
+//! cookie_path = "/run/tor/control.authcookie"
 //!
 //! [display]
 //! drm_device = ""
@@ -91,11 +93,21 @@ pub struct TorConfig {
     /// SOCKS5 proxy address (host:port).
     #[serde(default = "default_socks_addr")]
     pub socks_addr: String,
+    /// Tor control port used for health checks and lifecycle control.
+    #[serde(default = "default_tor_control_port")]
+    pub control_port: u16,
+    /// Tor control authentication cookie path.
+    #[serde(default = "default_tor_cookie_path")]
+    pub cookie_path: String,
 }
 
 impl Default for TorConfig {
     fn default() -> Self {
-        Self { socks_addr: default_socks_addr() }
+        Self {
+            socks_addr: default_socks_addr(),
+            control_port: default_tor_control_port(),
+            cookie_path: default_tor_cookie_path(),
+        }
     }
 }
 
@@ -151,6 +163,12 @@ fn default_db_path() -> String {
 }
 fn default_socks_addr() -> String {
     "127.0.0.1:9050".into()
+}
+fn default_tor_control_port() -> u16 {
+    9051
+}
+fn default_tor_cookie_path() -> String {
+    "/run/tor/control.authcookie".into()
 }
 fn default_dlna_name() -> String {
     "PiCast".into()
@@ -236,6 +254,16 @@ impl AppConfig {
         if let Ok(v) = std::env::var("PICAST_TOR_SOCKS") {
             self.tor.socks_addr = v;
         }
+        if let Ok(v) = std::env::var("PICAST_TOR_CONTROL_PORT") {
+            if let Ok(port) = v.parse::<u16>() {
+                self.tor.control_port = port;
+            } else {
+                tracing::warn!(value = %v, "PICAST_TOR_CONTROL_PORT is not a valid port number");
+            }
+        }
+        if let Ok(v) = std::env::var("PICAST_TOR_COOKIE_PATH") {
+            self.tor.cookie_path = v;
+        }
         if let Ok(v) = std::env::var("PICAST_DRM_DEVICE") {
             self.display.drm_device = v;
         }
@@ -277,6 +305,8 @@ mod tests {
         assert_eq!(config.server.ws_addr, "0.0.0.0:8586");
         assert_eq!(config.server.db_path, "/var/lib/picast/sessions.db");
         assert_eq!(config.tor.socks_addr, "127.0.0.1:9050");
+        assert_eq!(config.tor.control_port, 9051);
+        assert_eq!(config.tor.cookie_path, "/run/tor/control.authcookie");
         assert_eq!(config.display.drm_device, "");
         assert_eq!(config.dlna.friendly_name, "PiCast");
         assert_eq!(config.logging.level, "info");
@@ -293,6 +323,8 @@ http_addr = "0.0.0.0:9999"
         // Unset fields should use defaults.
         assert_eq!(config.server.ws_addr, "0.0.0.0:8586");
         assert_eq!(config.tor.socks_addr, "127.0.0.1:9050");
+        assert_eq!(config.tor.control_port, 9051);
+        assert_eq!(config.tor.cookie_path, "/run/tor/control.authcookie");
     }
 
     #[test]
@@ -305,6 +337,8 @@ db_path = "/tmp/picast-test.db"
 
 [tor]
 socks_addr = "127.0.0.1:19050"
+control_port = 19051
+cookie_path = "/tmp/picast-test/control_auth_cookie"
 
 [display]
 drm_device = "/dev/dri/card1"
@@ -320,6 +354,8 @@ level = "debug"
         assert_eq!(config.server.ws_addr, "0.0.0.0:8081");
         assert_eq!(config.server.db_path, "/tmp/picast-test.db");
         assert_eq!(config.tor.socks_addr, "127.0.0.1:19050");
+        assert_eq!(config.tor.control_port, 19051);
+        assert_eq!(config.tor.cookie_path, "/tmp/picast-test/control_auth_cookie");
         assert_eq!(config.display.drm_device, "/dev/dri/card1");
         assert_eq!(config.dlna.friendly_name, "Living Room Pi");
         assert_eq!(config.logging.level, "debug");
@@ -341,6 +377,8 @@ level = "debug"
         assert_eq!(parsed.server.http_addr, original.server.http_addr);
         assert_eq!(parsed.server.ws_addr, original.server.ws_addr);
         assert_eq!(parsed.tor.socks_addr, original.tor.socks_addr);
+        assert_eq!(parsed.tor.control_port, original.tor.control_port);
+        assert_eq!(parsed.tor.cookie_path, original.tor.cookie_path);
         assert_eq!(parsed.dlna.friendly_name, original.dlna.friendly_name);
         assert_eq!(parsed.logging.level, original.logging.level);
     }
@@ -365,6 +403,8 @@ level = "debug"
         std::env::remove_var("PICAST_HTTP_ADDR");
         std::env::remove_var("PICAST_WS_ADDR");
         std::env::remove_var("PICAST_TOR_SOCKS");
+        std::env::remove_var("PICAST_TOR_CONTROL_PORT");
+        std::env::remove_var("PICAST_TOR_COOKIE_PATH");
         std::env::remove_var("PICAST_DRM_DEVICE");
         std::env::remove_var("PICAST_DLNA_NAME");
         std::env::remove_var("PICAST_DB_PATH");
@@ -381,9 +421,13 @@ level = "debug"
         let toml = r#"
 [tor]
 socks_addr = "127.0.0.1:19051"
+control_port = 19052
+cookie_path = "/tmp/picast/control_auth_cookie"
 "#;
         let config: AppConfig = toml::from_str(toml).unwrap();
         assert_eq!(config.tor.socks_addr, "127.0.0.1:19051");
+        assert_eq!(config.tor.control_port, 19052);
+        assert_eq!(config.tor.cookie_path, "/tmp/picast/control_auth_cookie");
         assert_eq!(config.server.http_addr, "0.0.0.0:8585");
         assert_eq!(config.display.drm_device, "");
     }

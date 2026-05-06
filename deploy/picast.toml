@@ -1,0 +1,19 @@
+[server]
+http_addr = "0.0.0.0:8585"
+ws_addr = "0.0.0.0:8586"
+db_path = "/var/lib/picast/sessions.db"
+
+[tor]
+socks_addr = "127.0.0.1:29050"
+control_port = 29051
+cookie_path = "/tmp/picast/tor-data/control_auth_cookie"
+
+[display]
+drm_device = ""
+
+[dlna]
+friendly_name = "PiCast"
+port = 49152
+
+[logging]
+level = "info"

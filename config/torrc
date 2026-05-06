@@ -27,7 +27,7 @@ StrictNodes 0
 # Control port for PiCast's TorManager (circuit health, NEWNYM).
 # Cookie authentication is required — no password-based auth.
 # Restricted to localhost only.
-ControlPort 9051
+ControlPort 9052
 CookieAuthentication 1
 CookieAuthFileGroupReadable 1
 

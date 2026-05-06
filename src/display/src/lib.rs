@@ -39,19 +39,15 @@
 //! are no-ops.
 
 #[cfg(feature = "hw")]
-use drm::control::connector::{Connector, Info as ConnectorInfo, State as ConnectorState};
+use drm::control::connector::State as ConnectorState;
 #[cfg(feature = "hw")]
-use drm::control::crtc::{Crtc, Info as CrtcInfo};
-#[cfg(feature = "hw")]
-use drm::control::plane::{Info as PlaneInfo, PlaneType};
-#[cfg(feature = "hw")]
-use drm::control::Mode;
+use drm::control::{self, Device as ControlDevice, Mode, PlaneType};
 #[cfg(feature = "hw")]
 use drm::Device as DrmDevice;
 #[cfg(feature = "hw")]
 use std::fs::OpenOptions;
 #[cfg(feature = "hw")]
-use std::os::unix::io::AsRawFd;
+use std::os::unix::io::{AsFd, AsRawFd, BorrowedFd};
 #[cfg(feature = "hw")]
 use std::path::Path;
 use thiserror::Error;
@@ -173,7 +169,7 @@ pub struct DisplayManager {
     device_path: String,
     /// Raw file descriptor for the DRM device.
     #[cfg(feature = "hw")]
-    drm_fd: Option<std::fs::File>,
+    drm_fd: Option<Card>,
     /// Cached list of connectors (populated on acquire).
     connectors: Vec<DisplayConnector>,
     /// Cached list of planes.
@@ -196,6 +192,30 @@ struct SavedCrtcState {
     x: u32,
     y: u32,
 }
+
+#[cfg(feature = "hw")]
+#[derive(Debug)]
+struct Card(std::fs::File);
+
+#[cfg(feature = "hw")]
+impl AsFd for Card {
+    fn as_fd(&self) -> BorrowedFd<'_> {
+        self.0.as_fd()
+    }
+}
+
+#[cfg(feature = "hw")]
+impl AsRawFd for Card {
+    fn as_raw_fd(&self) -> std::os::unix::io::RawFd {
+        self.0.as_raw_fd()
+    }
+}
+
+#[cfg(feature = "hw")]
+impl DrmDevice for Card {}
+
+#[cfg(feature = "hw")]
+impl ControlDevice for Card {}
 
 // ── HW implementation ────────────────────────────────────────────────
 
@@ -220,7 +240,7 @@ impl DisplayManager {
 
         Ok(Self {
             device_path: path,
-            drm_fd: Some(file),
+            drm_fd: Some(Card(file)),
             connectors: Vec::new(),
             planes: Vec::new(),
             crtcs: Vec::new(),
@@ -264,7 +284,7 @@ impl DisplayManager {
 
         // Acquire DRM master — required for modesetting ioctls.
         // Without this, all set_crtc / atomic_commit calls fail with EPERM.
-        fd.set_master().map_err(|e| {
+        fd.acquire_master_lock().map_err(|e| {
             DisplayError::MasterAcquire(format!(
                 "set_master failed: {} (are you root?)",
                 e
@@ -272,18 +292,26 @@ impl DisplayManager {
         })?;
         tracing::info!(fd = fd.as_raw_fd(), "acquired DRM master");
 
+        for cap in [drm::ClientCapability::UniversalPlanes, drm::ClientCapability::Atomic] {
+            if let Err(e) = fd.set_client_capability(cap, true) {
+                tracing::debug!(capability = ?cap, error = %e, "DRM client capability not enabled");
+            }
+        }
+
         // Enumerate DRM resources.
-        let resources = drm::control::ResourceHandles::from_device(fd)
+        let resources = fd
+            .resource_handles()
             .map_err(|e| DisplayError::Modeset(format!("failed to get resource handles: {}", e)))?;
 
         // Find connected connectors.
         let mut found_connectors = Vec::new();
         for &conn_handle in resources.connectors() {
-            let info = drm::control::connector::Info::from_device(fd, conn_handle)
+            let info = fd
+                .get_connector(conn_handle, true)
                 .map_err(|e| DisplayError::Modeset(format!("connector info failed: {}", e)))?;
 
             let connected = info.state() == ConnectorState::Connected;
-            let conn_type = format!("{:?}", info.connector_type());
+            let conn_type = format!("{}-{}", info.interface().as_str(), info.interface_id());
 
             let preferred_mode = info
                 .modes()
@@ -294,7 +322,7 @@ impl DisplayManager {
                     let b_area = b.size().0 as u64 * b.size().1 as u64;
                     a_area.cmp(&b_area).then_with(|| a.vrefresh().cmp(&b.vrefresh()))
                 })
-                .map(|m| (m.size().0, m.size().1, m.vrefresh()));
+                .map(|m| (m.size().0 as u32, m.size().1 as u32, m.vrefresh()));
 
             found_connectors.push(DisplayConnector {
                 connector_id: conn_handle.into(),
@@ -318,13 +346,14 @@ impl DisplayManager {
         // Enumerate CRTCs.
         let mut found_crtcs = Vec::new();
         for &crtc_handle in resources.crtcs() {
-            let info = drm::control::crtc::Info::from_device(fd, crtc_handle)
+            let info = fd
+                .get_crtc(crtc_handle)
                 .map_err(|e| DisplayError::Modeset(format!("crtc info failed: {}", e)))?;
 
             found_crtcs.push(DrmCrtc {
                 crtc_id: crtc_handle.into(),
-                width: info.mode().map(|m| m.size().0).unwrap_or(0),
-                height: info.mode().map(|m| m.size().1).unwrap_or(0),
+                width: info.mode().map(|m| m.size().0 as u32).unwrap_or(0),
+                height: info.mode().map(|m| m.size().1 as u32).unwrap_or(0),
                 refresh_mhz: info.mode().map(|m| m.vrefresh()).unwrap_or(0),
                 fb_id: info.framebuffer().map(|fb| fb.into()),
             });
@@ -332,23 +361,32 @@ impl DisplayManager {
         self.crtcs = found_crtcs;
 
         // Enumerate planes.
-        let plane_resources = drm::control::plane::Resources::from_device(fd)
+        let plane_handles = fd
+            .plane_handles()
             .map_err(|e| DisplayError::Modeset(format!("plane resources failed: {}", e)))?;
 
         let mut found_planes = Vec::new();
-        for &plane_handle in plane_resources.planes() {
-            let info = drm::control::plane::Info::from_device(fd, plane_handle)
+        for plane_handle in plane_handles {
+            let info = fd
+                .get_plane(plane_handle)
                 .map_err(|e| DisplayError::Modeset(format!("plane info failed: {}", e)))?;
 
-            let plane_type = info.plane_type();
+            let plane_type = Self::plane_type(fd, plane_handle).unwrap_or(PlaneType::Overlay);
             let is_primary = plane_type == PlaneType::Primary;
+            let possible_handles = resources.filter_crtcs(info.possible_crtcs());
+            let possible_crtcs = resources
+                .crtcs()
+                .iter()
+                .enumerate()
+                .filter(|(_, handle)| possible_handles.contains(handle))
+                .fold(0u32, |mask, (idx, _)| mask | (1u32 << idx));
 
             found_planes.push(DrmPlane {
                 plane_id: plane_handle.into(),
                 zpos: if is_primary { 0 } else { 1 },
                 formats: info.formats().iter().map(|f| *f).collect(),
                 is_primary,
-                possible_crtcs: info.possible_crtcs(),
+                possible_crtcs,
             });
         }
         self.planes = found_planes;
@@ -357,8 +395,9 @@ impl DisplayManager {
         let crtc = self.crtcs.first().ok_or(DisplayError::NoCrtc)?.clone();
 
         // Save current CRTC state for restoration on release().
-        let crtc_handle = drm::control::crtc::Handle::from_raw(crtc.crtc_id);
-        let crtc_info = drm::control::crtc::Info::from_device(fd, crtc_handle).ok();
+        let crtc_handle = control::from_u32::<control::crtc::Handle>(crtc.crtc_id)
+            .ok_or_else(|| DisplayError::Modeset(format!("invalid CRTC id {}", crtc.crtc_id)))?;
+        let crtc_info = fd.get_crtc(crtc_handle).ok();
         self.saved_crtc = Some(SavedCrtcState {
             crtc_id: crtc.crtc_id,
             fb_id: crtc_info.as_ref().and_then(|i| i.framebuffer().map(|fb| fb.into())),
@@ -393,13 +432,23 @@ impl DisplayManager {
             // Restore CRTC state via atomic modeset.
             // This requires the DRM fd to still be valid.
             if let Some(ref fd) = self.drm_fd {
-                let crtc_handle = drm::control::crtc::Handle::from_raw(saved.crtc_id);
+                let crtc_handle = match control::from_u32::<control::crtc::Handle>(saved.crtc_id) {
+                    Some(handle) => handle,
+                    None => {
+                        tracing::warn!(crtc_id = saved.crtc_id, "invalid saved CRTC id");
+                        return Ok(());
+                    },
+                };
                 if let Some(mode) = saved.mode {
-                    let restore_result = drm::control::crtc::set(
-                        fd,
+                    let framebuffer = saved
+                        .fb_id
+                        .and_then(control::from_u32::<control::framebuffer::Handle>);
+                    let restore_result = fd.set_crtc(
                         crtc_handle,
-                        saved.fb_id.map(|id| drm::control::framebuffer::Handle::from_raw(id)),
-                        &mode,
+                        framebuffer,
+                        (saved.x, saved.y),
+                        &[],
+                        Some(mode),
                     );
                     match restore_result {
                         Ok(()) => tracing::info!(crtc_id = saved.crtc_id, "CRTC state restored"),
@@ -488,6 +537,30 @@ impl DisplayManager {
         Err(DisplayError::DeviceOpen(
             "no /dev/dri/card* device found — is the vc4 driver loaded?".into(),
         ))
+    }
+
+    fn plane_type(card: &Card, handle: control::plane::Handle) -> Option<PlaneType> {
+        let props = card.get_properties(handle).ok()?;
+        for (&prop_handle, &raw_value) in props.iter() {
+            let prop = card.get_property(prop_handle).ok()?;
+            if prop.name().to_str().ok()? != "type" {
+                continue;
+            }
+
+            let value_type = prop.value_type();
+            if let control::property::Value::Enum(Some(enum_value)) =
+                value_type.convert_value(raw_value)
+            {
+                return match enum_value.name().to_str().ok()? {
+                    "Primary" => Some(PlaneType::Primary),
+                    "Overlay" => Some(PlaneType::Overlay),
+                    "Cursor" => Some(PlaneType::Cursor),
+                    _ => None,
+                };
+            }
+        }
+
+        None
     }
 }
 
