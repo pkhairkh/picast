@@ -41,6 +41,25 @@ impl std::fmt::Display for UrlCategory {
     }
 }
 
+impl UrlCategory {
+    /// Parse a category string (as produced by `Display`) back into a
+    /// `UrlCategory`. Returns `DirectMedia` for unrecognized strings.
+    pub fn from_str(s: &str) -> Self {
+        match s {
+            "direct_media" => UrlCategory::DirectMedia,
+            "hls_manifest" => UrlCategory::HlsManifest,
+            "dash_manifest" => UrlCategory::DashManifest,
+            "web_page" => UrlCategory::WebPage,
+            "magnet" => UrlCategory::Magnet,
+            "onion" => UrlCategory::Onion,
+            _ => {
+                tracing::warn!(category = s, "unknown UrlCategory string — defaulting to DirectMedia");
+                UrlCategory::DirectMedia
+            },
+        }
+    }
+}
+
 /// Known video hosting domains that require yt-dlp for resolution.
 const WEB_PAGE_DOMAINS: &[&str] = &[
     "youtube.com",

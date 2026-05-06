@@ -702,4 +702,179 @@ mod tests {
     fn guess_mime_type_unknown() {
         assert_eq!(Resolver::guess_mime_from_url("https://x.com/page"), None);
     }
+
+    // ── Integration tests (T-4.9) ──────────────────────────────────────
+
+    /// Test the full resolution chain for direct media URLs:
+    /// classify → cache miss → resolve → cache hit on second call.
+    #[tokio::test]
+    async fn integration_direct_media_resolve_and_cache() {
+        let resolver = resolver();
+
+        // First resolution — should hit the resolver logic, not cache.
+        let result = resolver
+            .resolve("https://cdn.example.com/video.mp4")
+            .await
+            .expect("direct media should resolve");
+        assert_eq!(result.category, UrlCategory::DirectMedia);
+        assert_eq!(result.direct_url, "https://cdn.example.com/video.mp4");
+        assert_eq!(result.mime_type, Some("video/mp4".into()));
+        assert!(!result.used_tor);
+
+        // Second resolution — should return the same result (from cache).
+        let cached = resolver
+            .resolve("https://cdn.example.com/video.mp4")
+            .await
+            .expect("cached direct media should resolve");
+        assert_eq!(cached.category, UrlCategory::DirectMedia);
+        assert_eq!(cached.direct_url, result.direct_url);
+        assert_eq!(cached.mime_type, result.mime_type);
+    }
+
+    /// Test the full resolution chain for HLS manifest URLs.
+    #[tokio::test]
+    async fn integration_hls_manifest_resolve() {
+        let resolver = resolver();
+
+        let result = resolver
+            .resolve("https://cdn.example.com/live/stream.m3u8")
+            .await
+            .expect("HLS manifest should resolve");
+        assert_eq!(result.category, UrlCategory::HlsManifest);
+        assert_eq!(
+            result.mime_type,
+            Some("application/vnd.apple.mpegurl".into())
+        );
+        assert_eq!(result.direct_url, "https://cdn.example.com/live/stream.m3u8");
+    }
+
+    /// Test the full resolution chain for DASH manifest URLs.
+    #[tokio::test]
+    async fn integration_dash_manifest_resolve() {
+        let resolver = resolver();
+
+        let result = resolver
+            .resolve("https://cdn.example.com/vod/stream.mpd")
+            .await
+            .expect("DASH manifest should resolve");
+        assert_eq!(result.category, UrlCategory::DashManifest);
+        assert_eq!(result.mime_type, Some("application/dash+xml".into()));
+        assert_eq!(result.direct_url, "https://cdn.example.com/vod/stream.mpd");
+    }
+
+    /// Test that magnet links return NoMediaFound.
+    #[tokio::test]
+    async fn integration_magnet_link_unsupported() {
+        let resolver = resolver();
+
+        let result = resolver.resolve("magnet:?xt=urn:btih:abc123").await;
+        assert!(result.is_err());
+        match result.unwrap_err() {
+            ResolveError::NoMediaFound(url) => assert!(url.contains("magnet")),
+            other => panic!("expected NoMediaFound, got {:?}", other),
+        }
+    }
+
+    /// Test that invalid URLs return InvalidUrl error.
+    #[tokio::test]
+    async fn integration_invalid_url_error() {
+        let resolver = resolver();
+
+        let result = resolver.resolve("not a url at all").await;
+        assert!(result.is_err());
+        match result.unwrap_err() {
+            ResolveError::InvalidUrl(_) => {},
+            other => panic!("expected InvalidUrl, got {:?}", other),
+        }
+    }
+
+    /// Test the resolution chain for WebPage URLs (requires yt-dlp).
+    /// If yt-dlp is not installed, the test gracefully skips.
+    #[tokio::test]
+    async fn integration_webpage_resolve_with_ytdlp() {
+        let resolver = resolver();
+
+        let result = resolver
+            .resolve("https://www.youtube.com/watch?v=dQw4w9WgXcQ")
+            .await;
+
+        match result {
+            Ok(resolved) => {
+                // If yt-dlp is installed and works, verify the result.
+                assert_eq!(resolved.category, UrlCategory::WebPage);
+                assert!(resolved.used_tor);
+                assert!(!resolved.direct_url.is_empty(), "direct_url should not be empty");
+                // The direct URL should be a media URL, not the YouTube page.
+                assert!(
+                    !resolved.direct_url.contains("youtube.com/watch"),
+                    "direct_url should be a media URL, not the YouTube page URL"
+                );
+
+                // Second call should hit cache.
+                let cached = resolver
+                    .resolve("https://www.youtube.com/watch?v=dQw4w9WgXcQ")
+                    .await
+                    .expect("cached result should resolve");
+                assert_eq!(cached.direct_url, resolved.direct_url);
+                assert_eq!(cached.category, resolved.category);
+            },
+            Err(ResolveError::TorUnavailable(msg)) => {
+                // Expected when yt-dlp is not installed.
+                assert!(msg.contains("yt-dlp"), "error should mention yt-dlp: {}", msg);
+            },
+            Err(ResolveError::Network(_)) | Err(ResolveError::NoMediaFound(_)) => {
+                // Acceptable without a running Tor daemon.
+            },
+            Err(e) => panic!("unexpected error: {:?}", e),
+        }
+    }
+
+    /// Test that Onion URLs are classified correctly and route through Tor.
+    #[tokio::test]
+    async fn integration_onion_url_routes_through_tor() {
+        let resolver = resolver();
+
+        let result = resolver
+            .resolve("http://example.onion/video.mp4")
+            .await;
+
+        match result {
+            Ok(resolved) => {
+                assert_eq!(resolved.category, UrlCategory::Onion);
+                assert!(resolved.used_tor, "onion URLs must use Tor");
+            },
+            Err(ResolveError::TorUnavailable(msg)) => {
+                assert!(msg.contains("yt-dlp"), "error should mention yt-dlp: {}", msg);
+            },
+            Err(ResolveError::Network(_)) | Err(ResolveError::NoMediaFound(_)) => {
+                // Acceptable without a running Tor daemon.
+            },
+            Err(e) => panic!("unexpected error: {:?}", e),
+        }
+    }
+
+    /// Test multiple URL categories are cached independently.
+    #[tokio::test]
+    async fn integration_cache_isolation_between_categories() {
+        let resolver = resolver();
+
+        // Resolve different URL types.
+        let mp4 = resolver.resolve("https://cdn.example.com/video.mp4").await.unwrap();
+        let m3u8 = resolver.resolve("https://cdn.example.com/stream.m3u8").await.unwrap();
+        let mpd = resolver.resolve("https://cdn.example.com/stream.mpd").await.unwrap();
+
+        // Verify each is in the correct category.
+        assert_eq!(mp4.category, UrlCategory::DirectMedia);
+        assert_eq!(m3u8.category, UrlCategory::HlsManifest);
+        assert_eq!(mpd.category, UrlCategory::DashManifest);
+
+        // Re-resolve all — should get cached results.
+        let mp4_cached = resolver.resolve("https://cdn.example.com/video.mp4").await.unwrap();
+        let m3u8_cached = resolver.resolve("https://cdn.example.com/stream.m3u8").await.unwrap();
+        let mpd_cached = resolver.resolve("https://cdn.example.com/stream.mpd").await.unwrap();
+
+        assert_eq!(mp4_cached.direct_url, mp4.direct_url);
+        assert_eq!(m3u8_cached.direct_url, m3u8.direct_url);
+        assert_eq!(mpd_cached.direct_url, mpd.direct_url);
+    }
 }

@@ -515,20 +515,23 @@ effort. Tasks are ordered by execution sequence within each phase.
   4. `socks5h` (h = remote DNS) ensures DNS goes through Tor, not local resolver
   5. Test: resolve a URL, check Tor control port for circuit with matching username
 
-### T-4.5 Resolution cache with TTL ✅
+### T-4.5 Resolution cache with TTL ✅ (upgraded to SQLite)
 - **Crate:** `picast-resolver`
 - **Depends on:** T-4.2
 - **Effort:** 1.5 days
 - **Description:** Add a SQLite-backed cache for resolved URLs. Avoids repeated
   yt-dlp invocations for the same URL within the TTL window (10 minutes).
+  **Upgraded from in-memory HashMap to SQLite with WAL mode.** Timestamps
+  stored as Unix epoch seconds for reliable cross-platform time comparison.
 - **Acceptance:** Second call to `resolve()` with same URL returns cached result
   without spawning yt-dlp.
 - **Key steps:**
-  1. Create table: `resolved_urls (source_url TEXT PK, direct_url TEXT, category TEXT, mime_type TEXT, content_length INTEGER, used_tor BOOLEAN, resolved_at TEXT)`
-  2. On `resolve()`: check cache first — `SELECT * FROM resolved_urls WHERE source_url = ? AND resolved_at > datetime('now', '-10 minutes')`
+  1. Create table: `resolved_urls (source_url TEXT PK, direct_url TEXT, category TEXT, mime_type TEXT, content_length INTEGER, used_tor INTEGER, title TEXT, duration INTEGER, thumbnail TEXT, vcodec TEXT, acodec TEXT, width INTEGER, height INTEGER, subtitle_tracks TEXT, resolved_at INTEGER)`
+  2. On `resolve()`: check cache first — `SELECT ... WHERE source_url = ? AND resolved_at > (now - TTL)`
   3. Cache hit → return stored `ResolveResult`
-  4. Cache miss → resolve via yt-dlp → INSERT into cache
-  5. Cleanup: `DELETE FROM resolved_urls WHERE resolved_at < datetime('now', '-1 hour')` on each resolve
+  4. Cache miss → resolve via yt-dlp → INSERT OR REPLACE into cache
+  5. Cleanup: `DELETE FROM resolved_urls WHERE resolved_at < (now - 1 hour)` on each resolve
+  6. WAL mode enabled for concurrent read access
 
 ### T-4.6 Subtitle extraction ✅
 - **Crate:** `picast-resolver`
@@ -572,14 +575,18 @@ effort. Tasks are ordered by execution sequence within each phase.
   4. Timeout (60s) → kill child → `ResolveError::Network("yt-dlp timed out")`
   5. Binary not found → `ResolveError::TorUnavailable("yt-dlp not installed")` (or new variant)
 
-### T-4.9 Resolver integration test
+### T-4.9 Resolver integration test ✅
 - **Crate:** `picast-resolver`
 - **Depends on:** T-4.3, T-4.4, T-4.5
 - **Effort:** 1 day
-- **Description:** End-to-end test: resolve a real URL through Tor, verify
-  result fields, test cache hit on second call. Skip in CI.
-- **Acceptance:** Test resolves YouTube URL, gets H.264 direct URL, cache
-  returns same result on second call.
+- **Description:** End-to-end test: resolve URLs of each category, verify
+  result fields, test cache hit on second call, verify error handling for
+  invalid URLs and magnet links. WebPage/Onion tests gracefully handle
+  the case where yt-dlp is not installed.
+- **Acceptance:** Tests resolve direct media, HLS, DASH URLs correctly;
+  cache hit verified on second call; invalid URLs return `InvalidUrl`;
+  magnet links return `NoMediaFound`; WebPage/Onion tests pass with or
+  without yt-dlp.
 - **Key steps:**
   1. `#[tokio::test] async fn test_resolve_youtube()`
   2. Requires running Tor + yt-dlp

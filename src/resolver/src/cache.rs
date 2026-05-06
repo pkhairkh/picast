@@ -1,113 +1,264 @@
 //! PiCast Resolver Cache
 //!
-//! Simple in-memory cache for resolved URLs. Prevents duplicate
+//! SQLite-backed cache for resolved URLs. Prevents duplicate
 //! resolution of the same URL within a configurable TTL window.
 //!
-//! The cache is intentionally simple — no LRU eviction, no disk
-//! persistence. For v1 this is sufficient; a more sophisticated
-//! cache can be added in v2 if needed.
+//! The cache stores resolution results in a SQLite database with WAL
+//! mode for concurrent access. Entries older than the TTL are
+//! automatically cleaned up on each insert.
+//!
+//! Timestamps are stored as Unix epoch seconds (INTEGER) for
+//! reliable and portable time comparisons.
 
 use crate::ResolveResult;
-use std::collections::HashMap;
-use std::time::{Duration, Instant};
+use rusqlite::{params, Connection};
+use std::path::Path;
+use std::sync::Mutex;
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 /// Default cache TTL: 10 minutes.
 const DEFAULT_TTL: Duration = Duration::from_secs(600);
 
-/// Maximum number of entries in the cache.
-const MAX_ENTRIES: usize = 256;
+/// Maximum age for stale entries before cleanup (1 hour).
+const CLEANUP_AGE: Duration = Duration::from_secs(3600);
 
-/// A cached resolution result with its insertion time.
-struct CacheEntry {
-    result: ResolveResult,
-    inserted_at: Instant,
+/// Return the current time as Unix epoch seconds.
+fn now_epoch_secs() -> i64 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_secs() as i64
 }
 
-/// In-memory URL resolution cache.
+/// SQLite-backed URL resolution cache.
 ///
-/// Thread safety: This cache is **not** thread-safe. It should be
-/// wrapped in a `Mutex` or `RwLock` if shared across tasks.
+/// Thread safety: The cache wraps a `Mutex<Connection>` so it can be
+/// shared across async tasks. SQLite is compiled with WAL mode for
+/// concurrent read access.
 pub struct ResolveCache {
-    entries: HashMap<String, CacheEntry>,
+    /// SQLite connection (guarded by Mutex for thread safety).
+    conn: Mutex<Connection>,
+    /// TTL for cache entries.
     ttl: Duration,
-    max_entries: usize,
 }
 
 impl ResolveCache {
-    /// Create a new cache with default TTL (10 minutes).
+    /// Create a new in-memory SQLite cache with default TTL (10 minutes).
     pub fn new() -> Self {
-        Self { entries: HashMap::new(), ttl: DEFAULT_TTL, max_entries: MAX_ENTRIES }
+        Self::with_path_and_ttl(None, DEFAULT_TTL)
     }
 
     /// Create a new cache with a custom TTL.
     pub fn with_ttl(ttl: Duration) -> Self {
-        Self { entries: HashMap::new(), ttl, max_entries: MAX_ENTRIES }
+        Self::with_path_and_ttl(None, ttl)
+    }
+
+    /// Create a new cache backed by a SQLite database file at `path`.
+    ///
+    /// If `path` is `None`, an in-memory database is used.
+    pub fn with_path(path: &Path) -> Self {
+        Self::with_path_and_ttl(Some(path), DEFAULT_TTL)
+    }
+
+    /// Create a new cache backed by a SQLite database file with custom TTL.
+    ///
+    /// If `path` is `None`, an in-memory database is used.
+    pub fn with_path_and_ttl(path: Option<&Path>, ttl: Duration) -> Self {
+        let conn = match path {
+            Some(p) => Connection::open(p).expect("failed to open cache database"),
+            None => Connection::open_in_memory().expect("failed to create in-memory database"),
+        };
+
+        // Enable WAL mode for concurrent read access.
+        conn.execute_batch("PRAGMA journal_mode=WAL; PRAGMA synchronous=NORMAL;")
+            .expect("failed to set WAL mode");
+
+        // Create the cache table. resolved_at is Unix epoch seconds.
+        conn.execute_batch(
+            "CREATE TABLE IF NOT EXISTS resolved_urls (
+                source_url     TEXT PRIMARY KEY,
+                direct_url     TEXT NOT NULL,
+                category       TEXT NOT NULL,
+                mime_type      TEXT,
+                content_length INTEGER,
+                used_tor       INTEGER NOT NULL,
+                title          TEXT,
+                duration       INTEGER,
+                thumbnail      TEXT,
+                vcodec         TEXT,
+                acodec         TEXT,
+                width          INTEGER,
+                height         INTEGER,
+                subtitle_tracks TEXT,
+                resolved_at    INTEGER NOT NULL
+            );"
+        ).expect("failed to create cache table");
+
+        Self { conn: Mutex::new(conn), ttl }
     }
 
     /// Insert a resolution result into the cache.
     ///
-    /// If the cache is full, expired entries are evicted first.
-    /// If still full after eviction, the oldest entry is removed.
-    pub fn insert(&mut self, url: &str, result: ResolveResult) {
-        // Evict expired entries if we're at capacity.
-        if self.entries.len() >= self.max_entries {
-            self.evict_expired();
+    /// If an entry with the same `source_url` already exists, it is
+    /// replaced. Stale entries (older than 1 hour) are cleaned up
+    /// on each insert.
+    pub fn insert(&self, _url: &str, result: ResolveResult) {
+        let conn = self.conn.lock().unwrap();
+        let now = now_epoch_secs();
+        let subtitle_json = serde_json::to_string(&result.subtitle_tracks).unwrap_or_else(|_| "[]".into());
+
+        // Convert u64/u32 fields to i64/i32 for SQLite compatibility.
+        let content_length: Option<i64> = result.content_length.map(|v| v as i64);
+        let duration: Option<i64> = result.duration.map(|v| v as i64);
+        let width: Option<i32> = result.width.map(|v| v as i32);
+        let height: Option<i32> = result.height.map(|v| v as i32);
+
+        if let Err(e) = conn.execute(
+            "INSERT OR REPLACE INTO resolved_urls
+                (source_url, direct_url, category, mime_type, content_length,
+                 used_tor, title, duration, thumbnail, vcodec, acodec,
+                 width, height, subtitle_tracks, resolved_at)
+             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            params![
+                result.source_url,
+                result.direct_url,
+                result.category.to_string(),
+                result.mime_type,
+                content_length,
+                result.used_tor as i32,
+                result.title,
+                duration,
+                result.thumbnail,
+                result.vcodec,
+                result.acodec,
+                width,
+                height,
+                subtitle_json,
+                now,
+            ],
+        ) {
+            tracing::warn!(error = %e, "failed to insert cache entry");
         }
 
-        // If still at capacity, remove the oldest entry.
-        if self.entries.len() >= self.max_entries {
-            if let Some(oldest_key) =
-                self.entries.iter().min_by_key(|(_, v)| v.inserted_at).map(|(k, _)| k.clone())
-            {
-                self.entries.remove(&oldest_key);
-            }
-        }
-
-        self.entries.insert(url.to_owned(), CacheEntry { result, inserted_at: Instant::now() });
+        // Clean up stale entries on each insert.
+        self.cleanup_stale(&conn);
     }
 
     /// Look up a URL in the cache.
     ///
-    /// Returns `Some(&ResolveResult)` if the URL is cached and
+    /// Returns `Some(ResolveResult)` if the URL is cached and
     /// hasn't expired, `None` otherwise.
-    pub fn get(&mut self, url: &str) -> Option<&ResolveResult> {
-        let now = Instant::now();
+    pub fn get(&self, url: &str) -> Option<ResolveResult> {
+        let conn = self.conn.lock().unwrap();
+        let now = now_epoch_secs();
+        let ttl_secs = self.ttl.as_secs() as i64;
+        let cutoff = now - ttl_secs;
 
-        // Check if the entry exists and is still valid.
-        let is_valid = self
-            .entries
-            .get(url)
-            .is_some_and(|entry| now.duration_since(entry.inserted_at) < self.ttl);
+        let mut stmt = conn.prepare(
+            "SELECT source_url, direct_url, category, mime_type, content_length,
+                    used_tor, title, duration, thumbnail, vcodec, acodec,
+                    width, height, subtitle_tracks
+             FROM resolved_urls
+             WHERE source_url = ?
+               AND resolved_at > ?"
+        ).ok()?;
 
-        if !is_valid {
-            // Remove expired entry if it exists.
-            self.entries.remove(url);
-            return None;
+        let result = stmt.query_row(params![url, cutoff], |row| {
+            Ok(row_to_resolve_result(row))
+        });
+
+        match result {
+            Ok(r) => Some(r),
+            Err(rusqlite::Error::QueryReturnedNoRows) => None,
+            Err(e) => {
+                tracing::warn!(error = %e, "cache query error");
+                None
+            },
         }
-
-        // Entry is valid — return a reference.
-        Some(&self.entries.get(url).unwrap().result)
     }
 
     /// Remove all expired entries from the cache.
-    pub fn evict_expired(&mut self) {
-        let now = Instant::now();
-        self.entries.retain(|_, entry| now.duration_since(entry.inserted_at) < self.ttl);
+    pub fn evict_expired(&self) {
+        let conn = self.conn.lock().unwrap();
+        let now = now_epoch_secs();
+        let ttl_secs = self.ttl.as_secs() as i64;
+        let cutoff = now - ttl_secs;
+
+        match conn.execute(
+            "DELETE FROM resolved_urls WHERE resolved_at < ?",
+            params![cutoff],
+        ) {
+            Ok(deleted) => {
+                if deleted > 0 {
+                    tracing::debug!(deleted = deleted, "evicted expired cache entries");
+                }
+            },
+            Err(e) => tracing::warn!(error = %e, "failed to evict expired cache entries"),
+        }
     }
 
     /// Return the number of entries in the cache (including expired).
     pub fn len(&self) -> usize {
-        self.entries.len()
+        let conn = self.conn.lock().unwrap();
+        conn.query_row("SELECT COUNT(*) FROM resolved_urls", [], |row| row.get::<_, i64>(0))
+            .unwrap_or(0) as usize
     }
 
     /// Return whether the cache is empty.
     pub fn is_empty(&self) -> bool {
-        self.entries.is_empty()
+        self.len() == 0
     }
 
     /// Clear all entries from the cache.
-    pub fn clear(&mut self) {
-        self.entries.clear();
+    pub fn clear(&self) {
+        let conn = self.conn.lock().unwrap();
+        let _ = conn.execute("DELETE FROM resolved_urls", []);
+    }
+
+    /// Clean up entries older than the cleanup age (1 hour).
+    fn cleanup_stale(&self, conn: &Connection) {
+        let now = now_epoch_secs();
+        let cleanup_secs = CLEANUP_AGE.as_secs() as i64;
+        let cutoff = now - cleanup_secs;
+        let _ = conn.execute(
+            "DELETE FROM resolved_urls WHERE resolved_at < ?",
+            params![cutoff],
+        );
+    }
+}
+
+/// Convert a database row into a `ResolveResult`.
+fn row_to_resolve_result(row: &rusqlite::Row<'_>) -> ResolveResult {
+    let category_str: String = row.get(2).unwrap_or_else(|_| "direct_media".into());
+    let category = crate::UrlCategory::from_str(&category_str);
+
+    let used_tor: i32 = row.get(5).unwrap_or(0);
+
+    let subtitle_tracks_str: String = row.get(13).unwrap_or_else(|_| "[]".into());
+    let subtitle_tracks: Vec<String> =
+        serde_json::from_str(&subtitle_tracks_str).unwrap_or_default();
+
+    // Convert i64/i32 back to u64/u32 for ResolveResult fields.
+    let content_length: Option<u64> = row.get::<_, Option<i64>>(4).unwrap_or(None).map(|v| v as u64);
+    let duration: Option<u64> = row.get::<_, Option<i64>>(7).unwrap_or(None).map(|v| v as u64);
+    let width: Option<u32> = row.get::<_, Option<i32>>(11).unwrap_or(None).map(|v| v as u32);
+    let height: Option<u32> = row.get::<_, Option<i32>>(12).unwrap_or(None).map(|v| v as u32);
+
+    ResolveResult {
+        source_url: row.get(0).unwrap_or_default(),
+        direct_url: row.get(1).unwrap_or_default(),
+        category,
+        mime_type: row.get(3).unwrap_or(None),
+        content_length,
+        used_tor: used_tor != 0,
+        title: row.get(6).unwrap_or(None),
+        duration,
+        thumbnail: row.get(8).unwrap_or(None),
+        vcodec: row.get(9).unwrap_or(None),
+        acodec: row.get(10).unwrap_or(None),
+        width,
+        height,
+        subtitle_tracks,
     }
 }
 
@@ -128,7 +279,7 @@ mod tests {
             direct_url: format!("{}?direct=1", url),
             category: UrlCategory::DirectMedia,
             mime_type: Some("video/mp4".into()),
-            content_length: None,
+            content_length: Some(1024),
             used_tor: false,
             title: Some("Test Video".into()),
             duration: Some(300000),
@@ -137,13 +288,21 @@ mod tests {
             acodec: Some("mp4a".into()),
             width: Some(1920),
             height: Some(1080),
-            subtitle_tracks: vec![],
+            subtitle_tracks: vec!["en".into(), "es".into()],
         }
+    }
+
+    fn test_result_with_tor(url: &str) -> ResolveResult {
+        let mut r = test_result(url);
+        r.used_tor = true;
+        r.category = UrlCategory::WebPage;
+        r.title = Some("YouTube Video".into());
+        r
     }
 
     #[test]
     fn cache_insert_and_get() {
-        let mut cache = ResolveCache::new();
+        let cache = ResolveCache::new();
         let url = "https://example.com/video.mp4";
         let result = test_result(url);
 
@@ -152,264 +311,30 @@ mod tests {
 
         let cached = cache.get(url);
         assert!(cached.is_some());
-        assert_eq!(cached.unwrap().direct_url, "https://example.com/video.mp4?direct=1");
+        let cached = cached.unwrap();
+        assert_eq!(cached.direct_url, "https://example.com/video.mp4?direct=1");
+        assert_eq!(cached.category, UrlCategory::DirectMedia);
+        assert_eq!(cached.mime_type, Some("video/mp4".into()));
+        assert_eq!(cached.content_length, Some(1024));
+        assert!(!cached.used_tor);
+        assert_eq!(cached.title, Some("Test Video".into()));
+        assert_eq!(cached.duration, Some(300000));
+        assert_eq!(cached.vcodec, Some("avc1".into()));
+        assert_eq!(cached.acodec, Some("mp4a".into()));
+        assert_eq!(cached.width, Some(1920));
+        assert_eq!(cached.height, Some(1080));
+        assert_eq!(cached.subtitle_tracks, vec!["en", "es"]);
     }
 
     #[test]
     fn cache_miss() {
-        let mut cache = ResolveCache::new();
+        let cache = ResolveCache::new();
         assert!(cache.get("https://example.com/not-found").is_none());
     }
 
     #[test]
-    fn cache_expiry() {
-        let mut cache = ResolveCache::with_ttl(Duration::from_millis(10));
-        let url = "https://example.com/video.mp4";
-
-        cache.insert(url, test_result(url));
-
-        // Wait for the entry to expire.
-        std::thread::sleep(Duration::from_millis(20));
-
-        // The entry should be expired.
-        assert!(cache.get(url).is_none());
-    }
-
-    #[test]
-    fn cache_evict_expired() {
-        let mut cache = ResolveCache::with_ttl(Duration::from_millis(10));
-        let url1 = "https://example.com/video1.mp4";
-        let url2 = "https://example.com/video2.mp4";
-
-        cache.insert(url1, test_result(url1));
-        std::thread::sleep(Duration::from_millis(20));
-        cache.insert(url2, test_result(url2));
-
-        assert_eq!(cache.len(), 2);
-
-        cache.evict_expired();
-        assert_eq!(cache.len(), 1);
-
-        // url1 should be expired, url2 should still be there.
-        assert!(cache.get(url1).is_none());
-        assert!(cache.get(url2).is_some());
-    }
-
-    #[test]
-    fn cache_max_entries() {
-        let mut cache = ResolveCache::new();
-        // Override max_entries for testing.
-        cache.max_entries = 3;
-
-        for i in 0..5 {
-            let url = format!("https://example.com/video{}.mp4", i);
-            cache.insert(&url, test_result(&url));
-        }
-
-        // Cache should have evicted some entries.
-        assert!(cache.len() <= 3);
-    }
-
-    #[test]
-    fn cache_clear() {
-        let mut cache = ResolveCache::new();
-        cache.insert("url1", test_result("url1"));
-        cache.insert("url2", test_result("url2"));
-        assert_eq!(cache.len(), 2);
-
-        cache.clear();
-        assert!(cache.is_empty());
-    }
-
-    #[test]
-    fn cache_default() {
-        let cache = ResolveCache::default();
-        assert!(cache.is_empty());
-    }
-
-    // ── Comprehensive cache tests ──────────────────────────────────────
-
-    #[test]
-    fn cache_ttl_expiration_with_very_short_ttl() {
-        // Use a 1ms TTL to verify entries expire almost immediately.
-        let mut cache = ResolveCache::with_ttl(Duration::from_millis(1));
-        let url = "https://example.com/video.mp4";
-
-        cache.insert(url, test_result(url));
-        assert_eq!(cache.len(), 1, "cache should contain the entry immediately after insert");
-
-        // Wait for the TTL to expire.
-        std::thread::sleep(Duration::from_millis(5));
-
-        // The entry should be expired and removed on get.
-        assert!(cache.get(url).is_none(), "entry should be expired after 1ms TTL");
-        assert_eq!(
-            cache.len(),
-            0,
-            "cache should be empty after expired entry is accessed and removed"
-        );
-    }
-
-    #[test]
-    fn cache_ttl_not_expired_within_window() {
-        // Use a generous TTL to ensure entries are still valid.
-        let mut cache = ResolveCache::with_ttl(Duration::from_secs(600));
-        let url = "https://example.com/video.mp4";
-
-        cache.insert(url, test_result(url));
-
-        // Should still be present immediately.
-        assert!(cache.get(url).is_some(), "entry should be valid within TTL window");
-    }
-
-    #[test]
-    fn cache_lru_eviction_oldest_removed_first() {
-        let mut cache = ResolveCache::new();
-        cache.max_entries = 3;
-
-        // Insert entries 0, 1, 2 to fill the cache.
-        for i in 0..3 {
-            let url = format!("https://example.com/video{}.mp4", i);
-            cache.insert(&url, test_result(&url));
-        }
-        assert_eq!(cache.len(), 3, "cache should be at max capacity");
-
-        // Insert a 4th entry — the oldest (video0) should be evicted.
-        let url3 = "https://example.com/video3.mp4";
-        cache.insert(url3, test_result(url3));
-
-        // The cache should still be at max_capacity (or less after eviction).
-        assert!(cache.len() <= 3, "cache should not exceed max_entries");
-
-        // video0 (the oldest) should be gone.
-        assert!(
-            cache.get("https://example.com/video0.mp4").is_none(),
-            "oldest entry should be evicted when cache is full"
-        );
-
-        // video3 (the newest) should be present.
-        assert!(cache.get(url3).is_some(), "newest entry should be present after eviction");
-    }
-
-    #[test]
-    fn cache_lru_eviction_with_all_expired() {
-        // When the cache is at capacity and all entries are expired,
-        // inserting a new one should evict all expired entries first.
-        let mut cache = ResolveCache::with_ttl(Duration::from_millis(1));
-        cache.max_entries = 3;
-
-        // Fill the cache to capacity with entries that will expire.
-        for i in 0..3 {
-            let url = format!("https://example.com/old{}.mp4", i);
-            cache.insert(&url, test_result(&url));
-        }
-        assert_eq!(cache.len(), 3, "cache should be at max capacity");
-
-        // Wait for them to expire.
-        std::thread::sleep(Duration::from_millis(5));
-
-        // Insert a new entry — since we're at capacity, expired entries
-        // should be evicted first, making room for the new one.
-        let new_url = "https://example.com/new.mp4";
-        cache.insert(new_url, test_result(new_url));
-
-        // Only the new entry should remain (all 3 expired entries evicted, 1 new inserted).
-        assert_eq!(cache.len(), 1, "only the new entry should remain after expired eviction");
-        assert!(cache.get(new_url).is_some());
-    }
-
-    #[test]
-    fn cache_size_tracking_after_insertions() {
-        let mut cache = ResolveCache::new();
-        assert_eq!(cache.len(), 0, "new cache should be empty");
-
-        cache.insert("url1", test_result("url1"));
-        assert_eq!(cache.len(), 1);
-
-        cache.insert("url2", test_result("url2"));
-        assert_eq!(cache.len(), 2);
-
-        cache.insert("url3", test_result("url3"));
-        assert_eq!(cache.len(), 3);
-    }
-
-    #[test]
-    fn cache_size_tracking_after_evictions() {
-        let mut cache = ResolveCache::new();
-        cache.max_entries = 5;
-
-        for i in 0..5 {
-            let url = format!("https://example.com/video{}.mp4", i);
-            cache.insert(&url, test_result(&url));
-        }
-        assert_eq!(cache.len(), 5, "cache should be at max capacity");
-
-        // Insert one more — should trigger eviction of oldest.
-        cache.insert(
-            "https://example.com/video5.mp4",
-            test_result("https://example.com/video5.mp4"),
-        );
-        assert!(cache.len() <= 5, "cache should not exceed max capacity after eviction");
-    }
-
-    #[test]
-    fn cache_size_tracking_after_expiry() {
-        let mut cache = ResolveCache::with_ttl(Duration::from_millis(1));
-
-        for i in 0..5 {
-            let url = format!("https://example.com/video{}.mp4", i);
-            cache.insert(&url, test_result(&url));
-        }
-        assert_eq!(cache.len(), 5);
-
-        // Wait for all to expire.
-        std::thread::sleep(Duration::from_millis(5));
-
-        // evict_expired should remove all.
-        cache.evict_expired();
-        assert_eq!(cache.len(), 0, "all expired entries should be removed");
-    }
-
-    #[test]
-    fn cache_clear_empties_all_entries() {
-        let mut cache = ResolveCache::new();
-
-        // Insert several entries.
-        for i in 0..10 {
-            let url = format!("https://example.com/video{}.mp4", i);
-            cache.insert(&url, test_result(&url));
-        }
-        assert_eq!(cache.len(), 10, "cache should have 10 entries before clear");
-
-        cache.clear();
-
-        assert!(cache.is_empty(), "cache should be empty after clear");
-        assert_eq!(cache.len(), 0, "len() should return 0 after clear");
-
-        // Verify individual lookups also return None.
-        for i in 0..10 {
-            let url = format!("https://example.com/video{}.mp4", i);
-            assert!(cache.get(&url).is_none(), "entries should not be found after clear");
-        }
-    }
-
-    #[test]
-    fn cache_clear_then_reinsert() {
-        let mut cache = ResolveCache::new();
-
-        cache.insert("url1", test_result("url1"));
-        cache.clear();
-        assert!(cache.is_empty());
-
-        // Should be able to insert again after clear.
-        cache.insert("url2", test_result("url2"));
-        assert_eq!(cache.len(), 1);
-        assert!(cache.get("url2").is_some());
-    }
-
-    #[test]
     fn cache_insert_overwrites_existing_key() {
-        let mut cache = ResolveCache::new();
+        let cache = ResolveCache::new();
         let url = "https://example.com/video.mp4";
 
         let mut result1 = test_result(url);
@@ -429,19 +354,199 @@ mod tests {
     }
 
     #[test]
-    fn cache_get_removes_expired_entry() {
-        let mut cache = ResolveCache::with_ttl(Duration::from_millis(1));
-        let url = "https://example.com/video.mp4";
+    fn cache_tor_result_roundtrip() {
+        let cache = ResolveCache::new();
+        let url = "https://www.youtube.com/watch?v=abc";
+        let result = test_result_with_tor(url);
 
-        cache.insert(url, test_result(url));
+        cache.insert(url, result);
+
+        let cached = cache.get(url).unwrap();
+        assert!(cached.used_tor);
+        assert_eq!(cached.category, UrlCategory::WebPage);
+        assert_eq!(cached.title, Some("YouTube Video".into()));
+    }
+
+    #[test]
+    fn cache_all_categories() {
+        let cache = ResolveCache::new();
+
+        for (url, category) in [
+            ("https://example.com/v.mp4", UrlCategory::DirectMedia),
+            ("https://example.com/stream.m3u8", UrlCategory::HlsManifest),
+            ("https://example.com/stream.mpd", UrlCategory::DashManifest),
+            ("https://youtube.com/watch?v=abc", UrlCategory::WebPage),
+            ("http://xyz.onion/v.mp4", UrlCategory::Onion),
+        ] {
+            let mut result = test_result(url);
+            result.category = category;
+            cache.insert(url, result);
+        }
+
+        assert_eq!(cache.len(), 5);
+
+        // Verify each category roundtrips correctly.
+        assert_eq!(cache.get("https://example.com/v.mp4").unwrap().category, UrlCategory::DirectMedia);
+        assert_eq!(cache.get("https://example.com/stream.m3u8").unwrap().category, UrlCategory::HlsManifest);
+        assert_eq!(cache.get("https://example.com/stream.mpd").unwrap().category, UrlCategory::DashManifest);
+        assert_eq!(cache.get("https://youtube.com/watch?v=abc").unwrap().category, UrlCategory::WebPage);
+        assert_eq!(cache.get("http://xyz.onion/v.mp4").unwrap().category, UrlCategory::Onion);
+    }
+
+    #[test]
+    fn cache_clear() {
+        let cache = ResolveCache::new();
+        cache.insert("url1", test_result("url1"));
+        cache.insert("url2", test_result("url2"));
+        assert_eq!(cache.len(), 2);
+
+        cache.clear();
+
+        assert!(cache.is_empty());
+        assert_eq!(cache.len(), 0);
+    }
+
+    #[test]
+    fn cache_default() {
+        let cache = ResolveCache::default();
+        assert!(cache.is_empty());
+    }
+
+    #[test]
+    fn cache_clear_then_reinsert() {
+        let cache = ResolveCache::new();
+        cache.insert("url1", test_result("url1"));
+        cache.clear();
+        assert!(cache.is_empty());
+
+        // Should be able to insert again after clear.
+        cache.insert("url2", test_result("url2"));
+        assert_eq!(cache.len(), 1);
+        assert!(cache.get("url2").is_some());
+    }
+
+    #[test]
+    fn cache_size_tracking() {
+        let cache = ResolveCache::new();
+        assert_eq!(cache.len(), 0);
+
+        for i in 0..5 {
+            let url = format!("https://example.com/video{}.mp4", i);
+            cache.insert(&url, test_result(&url));
+        }
+        assert_eq!(cache.len(), 5);
+    }
+
+    #[test]
+    fn cache_evict_expired() {
+        let cache = ResolveCache::with_ttl(Duration::from_secs(1));
+
+        // Insert an entry.
+        cache.insert("https://example.com/video1.mp4", test_result("https://example.com/video1.mp4"));
         assert_eq!(cache.len(), 1);
 
-        // Wait for expiry.
-        std::thread::sleep(Duration::from_millis(5));
+        // Wait well beyond the TTL for it to expire.
+        std::thread::sleep(Duration::from_secs(3));
 
-        // get() should remove the expired entry.
-        assert!(cache.get(url).is_none());
-        assert_eq!(cache.len(), 0, "expired entry should be removed from cache on get()");
+        // Explicitly evict expired entries.
+        cache.evict_expired();
+
+        // The entry should be gone.
+        assert_eq!(cache.len(), 0, "expired entries should be evicted");
+    }
+
+    #[test]
+    fn cache_expired_entry_not_returned() {
+        let cache = ResolveCache::with_ttl(Duration::from_secs(2));
+
+        cache.insert("https://example.com/video.mp4", test_result("https://example.com/video.mp4"));
+        assert!(cache.get("https://example.com/video.mp4").is_some());
+
+        // Wait for the entry to expire.
+        std::thread::sleep(Duration::from_millis(2500));
+
+        // The entry should not be returned even without explicit eviction.
+        assert!(cache.get("https://example.com/video.mp4").is_none(), "expired entry should not be returned");
+    }
+
+    #[test]
+    fn cache_multiple_entries_independent_expiry() {
+        let cache = ResolveCache::with_ttl(Duration::from_secs(3));
+
+        let url1 = "https://example.com/video1.mp4";
+        cache.insert(url1, test_result(url1));
+
+        // Wait a bit, then insert a second entry.
+        std::thread::sleep(Duration::from_secs(2));
+        let url2 = "https://example.com/video2.mp4";
+        cache.insert(url2, test_result(url2));
+
+        // Wait long enough for url1 to expire but url2 is still valid.
+        std::thread::sleep(Duration::from_secs(2));
+
+        assert!(cache.get(url1).is_none(), "url1 should have expired");
+        assert!(cache.get(url2).is_some(), "url2 should still be valid");
+    }
+
+    #[test]
+    fn cache_subtitle_tracks_roundtrip() {
+        let cache = ResolveCache::new();
+        let url = "https://example.com/video.mp4";
+        let mut result = test_result(url);
+        result.subtitle_tracks = vec!["en".into(), "es".into(), "fr".into(), "de".into()];
+        cache.insert(url, result);
+
+        let cached = cache.get(url).unwrap();
+        let mut tracks = cached.subtitle_tracks.clone();
+        tracks.sort();
+        assert_eq!(tracks, vec!["de", "en", "es", "fr"]);
+    }
+
+    #[test]
+    fn cache_empty_subtitle_tracks() {
+        let cache = ResolveCache::new();
+        let url = "https://example.com/video.mp4";
+        let mut result = test_result(url);
+        result.subtitle_tracks = vec![];
+        cache.insert(url, result);
+
+        let cached = cache.get(url).unwrap();
+        assert!(cached.subtitle_tracks.is_empty());
+    }
+
+    #[test]
+    fn cache_none_fields_roundtrip() {
+        let cache = ResolveCache::new();
+        let url = "https://example.com/plain";
+        let result = ResolveResult {
+            source_url: url.to_owned(),
+            direct_url: url.to_owned(),
+            category: UrlCategory::DirectMedia,
+            mime_type: None,
+            content_length: None,
+            used_tor: false,
+            title: None,
+            duration: None,
+            thumbnail: None,
+            vcodec: None,
+            acodec: None,
+            width: None,
+            height: None,
+            subtitle_tracks: vec![],
+        };
+        cache.insert(url, result);
+
+        let cached = cache.get(url).unwrap();
+        assert!(cached.mime_type.is_none());
+        assert!(cached.content_length.is_none());
+        assert!(cached.title.is_none());
+        assert!(cached.duration.is_none());
+        assert!(cached.thumbnail.is_none());
+        assert!(cached.vcodec.is_none());
+        assert!(cached.acodec.is_none());
+        assert!(cached.width.is_none());
+        assert!(cached.height.is_none());
+        assert!(cached.subtitle_tracks.is_empty());
     }
 
     #[test]
@@ -455,28 +560,47 @@ mod tests {
     fn cache_with_ttl_custom_duration() {
         let cache = ResolveCache::with_ttl(Duration::from_secs(3600));
         assert!(cache.is_empty());
-        // TTL is stored internally; we verify it works by inserting and
-        // confirming the entry is still there well within the TTL.
         drop(cache); // Just verifying construction works without panic.
     }
 
     #[test]
-    fn cache_multiple_entries_independent_expiry() {
-        let mut cache = ResolveCache::with_ttl(Duration::from_millis(50));
+    fn cache_many_entries() {
+        let cache = ResolveCache::new();
 
-        let url1 = "https://example.com/video1.mp4";
-        cache.insert(url1, test_result(url1));
+        // Insert 50 entries.
+        for i in 0..50 {
+            let url = format!("https://example.com/video{}.mp4", i);
+            cache.insert(&url, test_result(&url));
+        }
+        assert_eq!(cache.len(), 50);
 
-        // Wait a bit, then insert a second entry.
-        std::thread::sleep(Duration::from_millis(30));
-        let url2 = "https://example.com/video2.mp4";
-        cache.insert(url2, test_result(url2));
+        // Verify all entries are retrievable.
+        for i in 0..50 {
+            let url = format!("https://example.com/video{}.mp4", i);
+            assert!(cache.get(&url).is_some(), "entry {} should be in cache", i);
+        }
+    }
 
-        // url1 should be close to expiry but url2 should still be fresh.
-        // Wait a bit more so url1 expires but url2 is still valid.
-        std::thread::sleep(Duration::from_millis(30));
+    #[test]
+    fn cache_concurrent_inserts() {
+        use std::sync::Arc;
+        use std::thread;
 
-        assert!(cache.get(url1).is_none(), "url1 should have expired");
-        assert!(cache.get(url2).is_some(), "url2 should still be valid");
+        let cache = Arc::new(ResolveCache::new());
+        let mut handles = vec![];
+
+        for i in 0..10 {
+            let cache = Arc::clone(&cache);
+            handles.push(thread::spawn(move || {
+                let url = format!("https://example.com/video{}.mp4", i);
+                cache.insert(&url, test_result(&url));
+            }));
+        }
+
+        for handle in handles {
+            handle.join().unwrap();
+        }
+
+        assert_eq!(cache.len(), 10);
     }
 }
