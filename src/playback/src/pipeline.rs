@@ -134,7 +134,7 @@ impl GstPipeline {
         // browser-like, which helps with CDNs that reject GStreamer's
         // default headers.
         if src.find_property("extra-headers").is_some() {
-            let mut headers = gstreamer::Structure::new("extra-headers");
+            let mut headers = gstreamer::Structure::new_empty("extra-headers");
             headers.set("Accept", "video/webm,video/mp4,video/*;q=0.9,application/ogg,*/*;q=0.7");
             headers.set("Accept-Language", "en-US,en;q=0.5");
             // Derive Referer from the URL's origin (scheme://host).
