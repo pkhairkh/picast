@@ -136,19 +136,35 @@ struct ResolverAdapter(Arc<picast_resolver::Resolver>);
 
 #[async_trait::async_trait]
 impl picast_session::interfaces::ResolverTrait for ResolverAdapter {
-    async fn resolve(&self, url: &str) -> Result<String, Box<dyn std::error::Error + Send + Sync>> {
+    async fn resolve(
+        &self,
+        url: &str,
+    ) -> Result<picast_session::interfaces::ResolveInfo, Box<dyn std::error::Error + Send + Sync>>
+    {
         let result = self.0.resolve(url).await?;
-        Ok(result.direct_url)
+        Ok(picast_session::interfaces::ResolveInfo {
+            direct_url: result.direct_url,
+            title: result.title,
+            duration_ms: result.duration,
+        })
     }
 }
 
 // AppConfig is now in config.rs with full TOML support.
 
 /// Initialize the `tracing-subscriber` with an `env-filter`.
-fn init_tracing() {
+///
+/// The log level defaults to `info` but can be overridden via:
+/// 1. The `PICAST_LOG_LEVEL` environment variable
+/// 2. The `RUST_LOG` environment variable (standard tracing convention)
+/// 3. The `logging.level` field in the TOML config file
+fn init_tracing(config_level: &str) {
     use tracing_subscriber::EnvFilter;
+    let level_directive = config_level
+        .parse()
+        .unwrap_or_else(|_| "info".parse().unwrap());
     tracing_subscriber::fmt()
-        .with_env_filter(EnvFilter::from_default_env().add_directive("info".parse().unwrap()))
+        .with_env_filter(EnvFilter::from_default_env().add_directive(level_directive))
         .with_thread_ids(true)
         .with_file(true)
         .with_line_number(true)
@@ -157,15 +173,15 @@ fn init_tracing() {
 
 #[tokio::main]
 async fn main() -> Result<()> {
-    // ── 1. Logging ────────────────────────────────────────────────────
-    init_tracing();
-    info!("PiCast starting …");
-
-    // ── 2. Configuration ──────────────────────────────────────────────
+    // ── 1. Configuration ──────────────────────────────────────────────
     let config = AppConfig::load().unwrap_or_else(|e| {
-        error!(error = %e, "failed to load configuration");
+        eprintln!("failed to load configuration: {}", e);
         std::process::exit(1);
     });
+
+    // ── 2. Logging ────────────────────────────────────────────────────
+    init_tracing(&config.logging.level);
+    info!("PiCast starting …");
     info!(
         http_addr = %config.server.http_addr,
         ws_addr = %config.server.ws_addr,
@@ -255,6 +271,15 @@ async fn main() -> Result<()> {
 
     info!("all components initialised");
 
+    // ── 6b. Notify systemd that we're ready ────────────────────────────
+    // Send READY=1 so systemd knows the service has started.
+    // If not running under systemd (e.g. dev mode), this is a no-op.
+    if let Err(e) = sd_notify::notify(true, &[sd_notify::NotifyState::Ready]) {
+        warn!(error = %e, "sd_notify READY failed (not running under systemd?)");
+    } else {
+        info!("sd_notify: READY=1 sent to systemd");
+    }
+
     // ── 7. Start servers ──────────────────────────────────────────────
     let shutdown_http = shutdown_tx.subscribe();
     let shutdown_ws = shutdown_tx.subscribe();
@@ -303,7 +328,30 @@ async fn main() -> Result<()> {
     });
 
     // ── 8. Run until shutdown ─────────────────────────────────────────
+    // Set up a periodic watchdog notification for systemd (if WatchdogSec is set).
+    let watchdog_interval = tokio::time::interval(std::time::Duration::from_secs(10));
+    let (watchdog_stop_tx, watchdog_stop_rx) = tokio::sync::oneshot::channel::<()>();
+    let watchdog_handle = tokio::spawn(async move {
+        let mut interval = watchdog_interval;
+        let mut stop_rx = watchdog_stop_rx;
+        loop {
+            tokio::select! {
+                _ = interval.tick() => {
+                    if let Err(e) = sd_notify::notify(false, &[sd_notify::NotifyState::Watchdog]) {
+                        // Not running under systemd — this is fine.
+                        let _ = e; // suppress unused warning
+                    }
+                }
+                _ = &mut stop_rx => break,
+            }
+        }
+    });
+
     shutdown_signal.await;
+
+    // Stop the watchdog before shutdown.
+    let _ = watchdog_stop_tx.send(());
+    let _ = watchdog_handle.await;
 
     // Signal all tasks to wind down.
     let _ = shutdown_tx.send(());

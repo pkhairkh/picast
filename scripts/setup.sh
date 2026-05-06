@@ -375,6 +375,13 @@ configure_tor() {
     cp "${CONFIG_DIR}/torrc" /etc/tor/torrc
     chmod 644 /etc/tor/torrc
 
+    # Validate the torrc before restarting Tor
+    if command -v tor &>/dev/null; then
+        if ! tor --verify-config 2>/dev/null; then
+            warn "Tor configuration validation failed — check /etc/tor/torrc"
+        fi
+    fi
+
     if systemctl is-active --quiet tor 2>/dev/null; then
         systemctl restart tor
         info "Tor restarted"

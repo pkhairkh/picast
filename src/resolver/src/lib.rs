@@ -26,8 +26,10 @@ pub mod ytdlp;
 
 pub use classifier::UrlCategory;
 
+use async_trait::async_trait;
 use cache::ResolveCache;
 use classifier::classify_url;
+use picast_session::interfaces::{ResolveInfo, ResolverTrait};
 use serde::{Deserialize, Serialize};
 use std::sync::Arc;
 use thiserror::Error;
@@ -308,40 +310,6 @@ impl Resolver {
     }
 
     // ── Private resolution strategies ────────────────────────────────
-    //
-    // These are kept for future use when yt-dlp integration is
-    // re-enabled. They are currently not called from resolve().
-
-    /// Direct media / HLS / DASH: return the URL as-is.
-    ///
-    /// GStreamer's `souphttpsrc` can handle these directly.
-    /// We do a HEAD request to get content-type and content-length
-    /// metadata if possible.
-    #[allow(dead_code)]
-    async fn resolve_direct_internal(
-        &self,
-        url: &str,
-        category: UrlCategory,
-    ) -> Result<ResolveResult, ResolveError> {
-        let mime_type = Self::guess_mime_from_url(url);
-
-        Ok(ResolveResult {
-            source_url: url.to_owned(),
-            direct_url: url.to_owned(),
-            category,
-            mime_type,
-            content_length: None,
-            used_tor: false,
-            title: None,
-            duration: None,
-            thumbnail: None,
-            vcodec: None,
-            acodec: None,
-            width: None,
-            height: None,
-            subtitle_tracks: vec![],
-        })
-    }
 
     /// Web page resolution via yt-dlp through Tor.
     async fn resolve_webpage(&self, url: &str) -> Result<ResolveResult, ResolveError> {
@@ -373,31 +341,27 @@ impl Resolver {
         result.used_tor = true;
         Ok(result)
     }
+}
 
-    /// Guess the MIME type from the URL path extension.
-    #[allow(dead_code)]
-    fn guess_mime_from_url(url: &str) -> Option<String> {
-        let parsed = Url::parse(url).ok()?;
-        let path = parsed.path().to_lowercase();
-        let ext = path.rsplit('.').next()?;
+// ── ResolverTrait implementation ─────────────────────────────────────
 
-        match ext {
-            "mp4" | "m4v" => Some("video/mp4".into()),
-            "mkv" => Some("video/x-matroska".into()),
-            "webm" => Some("video/webm".into()),
-            "avi" => Some("video/x-msvideo".into()),
-            "mov" => Some("video/quicktime".into()),
-            "ts" => Some("video/mp2t".into()),
-            "m3u8" => Some("application/vnd.apple.mpegurl".into()),
-            "mpd" => Some("application/dash+xml".into()),
-            "mp3" => Some("audio/mpeg".into()),
-            "flac" => Some("audio/flac".into()),
-            "ogg" => Some("audio/ogg".into()),
-            "opus" => Some("audio/opus".into()),
-            "wav" => Some("audio/wav".into()),
-            "aac" | "m4a" => Some("audio/mp4".into()),
-            _ => None,
-        }
+/// Implement the session crate's [`ResolverTrait`] so the `Resolver`
+/// can be used as a subsystem by the [`SessionManager`].
+///
+/// The trait's `resolve()` returns the lighter-weight [`ResolveInfo`]
+/// (direct URL, title, duration) which is all the session layer needs.
+#[async_trait]
+impl ResolverTrait for Resolver {
+    async fn resolve(
+        &self,
+        url: &str,
+    ) -> Result<ResolveInfo, Box<dyn std::error::Error + Send + Sync>> {
+        let result = self.resolve(url).await?;
+        Ok(ResolveInfo {
+            direct_url: result.direct_url,
+            title: result.title,
+            duration_ms: result.duration,
+        })
     }
 }
 
@@ -611,6 +575,27 @@ mod tests {
         assert_eq!(parsed.category, result.category);
     }
 
+    // ── ResolverTrait implementation tests ─────────────────────────────
+
+    #[tokio::test]
+    async fn test_resolver_trait_returns_resolve_info() {
+        let r = resolver();
+        // Test with a direct media URL (no yt-dlp needed).
+        let info = <Resolver as ResolverTrait>::resolve(&r, "https://cdn.example.com/video.mp4")
+            .await
+            .unwrap();
+        assert_eq!(info.direct_url, "https://cdn.example.com/video.mp4");
+        assert!(info.title.is_none());
+        assert!(info.duration_ms.is_none());
+    }
+
+    #[tokio::test]
+    async fn test_resolver_trait_magnet_returns_error() {
+        let r = resolver();
+        let result = <Resolver as ResolverTrait>::resolve(&r, "magnet:?xt=urn:btih:abc123").await;
+        assert!(result.is_err());
+    }
+
     // ── Legacy / backward-compat tests ────────────────────────────────
 
     #[test]
@@ -674,33 +659,6 @@ mod tests {
         let result = r.resolve("magnet:?xt=urn:btih:abc123").await;
         assert!(result.is_err());
         assert!(result.unwrap_err().to_string().contains("magnet"));
-    }
-
-    #[test]
-    fn guess_mime_type() {
-        assert_eq!(Resolver::guess_mime_from_url("https://x.com/v.mp4"), Some("video/mp4".into()));
-        assert_eq!(
-            Resolver::guess_mime_from_url("https://x.com/v.mkv"),
-            Some("video/x-matroska".into())
-        );
-        assert_eq!(
-            Resolver::guess_mime_from_url("https://x.com/v.webm"),
-            Some("video/webm".into())
-        );
-        assert_eq!(
-            Resolver::guess_mime_from_url("https://x.com/s.m3u8"),
-            Some("application/vnd.apple.mpegurl".into())
-        );
-        assert_eq!(
-            Resolver::guess_mime_from_url("https://x.com/s.mpd"),
-            Some("application/dash+xml".into())
-        );
-        assert_eq!(Resolver::guess_mime_from_url("https://x.com/a.mp3"), Some("audio/mpeg".into()));
-    }
-
-    #[test]
-    fn guess_mime_type_unknown() {
-        assert_eq!(Resolver::guess_mime_from_url("https://x.com/page"), None);
     }
 
     // ── Integration tests (T-4.9) ──────────────────────────────────────

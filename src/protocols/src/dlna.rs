@@ -34,6 +34,7 @@
 use anyhow::{anyhow, Result};
 use picast_session::SessionEvent;
 use std::sync::Arc;
+use tokio::io::{AsyncBufReadExt, BufReader};
 use tokio::process::{Child, Command};
 use tokio::sync::{broadcast, Mutex};
 use tracing;
@@ -103,7 +104,7 @@ impl DlnaRenderer {
             "starting gmediarender subprocess"
         );
 
-        let child = Command::new(&self.binary_path)
+        let mut child = Command::new(&self.binary_path)
             .env("GSTREAMER_PIPELINE", pipeline)
             .arg("--friendly-name")
             .arg(&self.friendly_name)
@@ -121,6 +122,37 @@ impl DlnaRenderer {
                     anyhow!("failed to spawn gmediarender: {}", e)
                 }
             })?;
+
+        // Spawn a background task that reads gmediarender's stderr and
+        // logs each line at debug level. This is invaluable for diagnosing
+        // pipeline issues without cluttering the main log at info level.
+        if let Some(stderr) = child.stderr.take() {
+            let friendly_name = self.friendly_name.clone();
+            tokio::spawn(async move {
+                let reader = BufReader::new(stderr);
+                let mut lines = reader.lines();
+                loop {
+                    match lines.next_line().await {
+                        Ok(Some(line)) => {
+                            tracing::debug!(
+                                name = %friendly_name,
+                                line = %line,
+                                "gmediarender stderr"
+                            );
+                        },
+                        Ok(None) => break, // EOF — process exited
+                        Err(e) => {
+                            tracing::debug!(
+                                name = %friendly_name,
+                                error = %e,
+                                "gmediarender stderr read error"
+                            );
+                            break;
+                        },
+                    }
+                }
+            });
+        }
 
         *guard = Some(child);
         tracing::info!("gmediarender started successfully");
@@ -167,17 +199,36 @@ impl DlnaRenderer {
     }
 
     /// Whether the gmediarender subprocess is currently running.
+    ///
+    /// Checks the actual process state with `try_wait()` so that
+    /// crashed or exited children are detected promptly rather than
+    /// being reported as "running" indefinitely.
     pub async fn is_running(&self) -> bool {
-        let guard = self.child.lock().await;
-        guard.is_some()
+        let mut guard = self.child.lock().await;
+        match guard.as_mut() {
+            Some(child) => {
+                match child.try_wait() {
+                    Ok(Some(_status)) => {
+                        // Process has exited — clear the slot.
+                        *guard = None;
+                        false
+                    },
+                    Ok(None) => true, // Still running
+                    Err(_) => false,
+                }
+            },
+            None => false,
+        }
     }
 }
 
 impl Drop for DlnaRenderer {
     fn drop(&mut self) {
-        if self.child.try_lock().is_ok() {
-            // We have the lock and are dropping — try to clean up.
-            tracing::debug!("DlnaRenderer dropped — subprocess will be orphaned");
+        if let Ok(mut guard) = self.child.try_lock() {
+            if let Some(ref mut child) = *guard {
+                let _ = child.kill();
+                tracing::debug!("DlnaRenderer dropped — killed orphaned subprocess");
+            }
         }
     }
 }
@@ -317,7 +368,7 @@ mod tests {
         let dlna = Arc::new(DlnaRenderer::new("PiCast", "127.0.0.1:9050"));
 
         // Fill the channel to cause lag
-        for i in 0..10 {
+        for _i in 0..10 {
             let _ = tx.send(SessionEvent::Playing { id: uuid::Uuid::new_v4() });
         }
 

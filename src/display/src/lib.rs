@@ -262,6 +262,16 @@ impl DisplayManager {
             .as_ref()
             .ok_or_else(|| DisplayError::DeviceOpen("DRM device not open".into()))?;
 
+        // Acquire DRM master — required for modesetting ioctls.
+        // Without this, all set_crtc / atomic_commit calls fail with EPERM.
+        fd.set_master().map_err(|e| {
+            DisplayError::MasterAcquire(format!(
+                "set_master failed: {} (are you root?)",
+                e
+            ))
+        })?;
+        tracing::info!(fd = fd.as_raw_fd(), "acquired DRM master");
+
         // Enumerate DRM resources.
         let resources = drm::control::ResourceHandles::from_device(fd)
             .map_err(|e| DisplayError::Modeset(format!("failed to get resource handles: {}", e)))?;
@@ -335,7 +345,7 @@ impl DisplayManager {
 
             found_planes.push(DrmPlane {
                 plane_id: plane_handle.into(),
-                zpos: 0, // Will be populated from property if available
+                zpos: if is_primary { 0 } else { 1 },
                 formats: info.formats().iter().map(|f| *f).collect(),
                 is_primary,
                 possible_crtcs: info.possible_crtcs(),
@@ -595,9 +605,9 @@ impl Drop for DisplayManager {
     fn drop(&mut self) {
         if self.active_crtc.is_some() {
             tracing::warn!(
-                "DisplayManager dropped while CRTC is still active — \
-                 display may be in inconsistent state"
+                "DisplayManager dropped while CRTC is still active — attempting release"
             );
+            let _ = self.release();
         }
     }
 }

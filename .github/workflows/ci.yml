@@ -209,10 +209,13 @@ jobs:
       - name: Check all jobs passed
         run: |
           echo "Checking job results..."
-          results="${{ join(needs.*.result, ' ') }}"
-          echo "Results: $results"
-          for result in $results; do
-            if [ "$result" != "success" ]; then
+          # dependency-review is PR-only; treat skipped as success
+          if [ "${{ needs.dependency-review.result }}" = "failure" ]; then
+            echo "::error::dependency-review failed"
+            exit 1
+          fi
+          for result in ${{ needs.fmt.result }} ${{ needs.clippy.result }} ${{ needs.test.result }} ${{ needs.coverage.result }} ${{ needs.check-aarch64.result }} ${{ needs.check-x86.result }} ${{ needs.docs.result }} ${{ needs.audit.result }}; do
+            if [ "$result" = "failure" ] || [ "$result" = "cancelled" ]; then
               echo "::error::Job failed with result: $result"
               exit 1
             fi

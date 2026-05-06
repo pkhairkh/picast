@@ -6,16 +6,16 @@ description = "URL resolution engine with yt-dlp subprocess for PiCast"
 
 [dependencies]
 picast-tor = { path = "../tor" }
+picast-session = { path = "../session" }
 tokio = { workspace = true, features = ["process", "time", "sync", "rt", "macros", "io-util"] }
 serde = { workspace = true }
 serde_json = { workspace = true }
 thiserror = { workspace = true }
 tracing = { workspace = true }
-anyhow = { workspace = true }
 url = { workspace = true }
-sha2 = { workspace = true }
-hex = { workspace = true }
 rusqlite = { version = "0.31", features = ["bundled"] }
+async-trait = { workspace = true }
+tempfile = "3"
 
 [dev-dependencies]
 tokio = { workspace = true, features = ["rt-multi-thread", "macros", "time", "process"] }

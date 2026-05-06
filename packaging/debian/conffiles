@@ -1,3 +1,4 @@
 /etc/picast/torrc
 /etc/picast/iptables.rules
-/etc/picast/picast.service
+/etc/systemd/system/picast.service
+/etc/picast/picast.toml

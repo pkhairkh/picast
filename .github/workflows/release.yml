@@ -45,7 +45,7 @@ jobs:
           ARTIFACT_DIR="picast-${RELEASE_VERSION}-aarch64"
           mkdir -p "${ARTIFACT_DIR}"
 
-          cp "target/${{ env.TARGET }}/release/picast-server" "${ARTIFACT_DIR}/"
+          cp "target/${{ env.TARGET }}/release/picast" "${ARTIFACT_DIR}/picast-server"
           cp config/picast.service "${ARTIFACT_DIR}/"
           cp config/torrc "${ARTIFACT_DIR}/"
           cp config/iptables.rules "${ARTIFACT_DIR}/"
@@ -55,11 +55,11 @@ jobs:
 
           # Generate checksums
           cd "${ARTIFACT_DIR}"
-          sha256sum picast-server > picast-server.sha256sum
-          sha256sum picast.service >> picast-server.sha256sum
-          sha256sum torrc >> picast-server.sha256sum
-          sha256sum iptables.rules >> picast-server.sha256sum
-          sha256sum setup.sh >> picast-server.sha256sum
+          sha256sum picast-server > SHA256SUMS
+          sha256sum picast.service >> SHA256SUMS
+          sha256sum torrc >> SHA256SUMS
+          sha256sum iptables.rules >> SHA256SUMS
+          sha256sum setup.sh >> SHA256SUMS
           cd ..
 
           # Create tarball

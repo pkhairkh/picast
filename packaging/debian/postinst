@@ -36,6 +36,10 @@ case "$1" in
         # Configure Tor if available
         if [ -f /etc/picast/torrc ]; then
             if [ -d /etc/tor ]; then
+                # Back up existing torrc before overwriting
+                if [ -f /etc/tor/torrc ]; then
+                    cp -a /etc/tor/torrc /etc/tor/torrc.picast-backup 2>/dev/null || true
+                fi
                 cp /etc/picast/torrc /etc/tor/torrc
                 chmod 644 /etc/tor/torrc
                 if command -v systemctl >/dev/null 2>&1; then

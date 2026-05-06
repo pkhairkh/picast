@@ -242,6 +242,12 @@ impl TorManager {
         // Locate the Tor binary.
         let tor_path = which_tor()?;
 
+        // Ensure the DataDirectory exists so Tor can write its state.
+        let data_dir = std::path::Path::new("/tmp/picast/tor-data");
+        if !data_dir.exists() {
+            let _ = std::fs::create_dir_all(data_dir);
+        }
+
         // Spawn Tor as a child process.
         let child = Command::new(&tor_path)
             .arg("--SocksPort")
@@ -252,6 +258,8 @@ impl TorManager {
             .arg("1")
             .arg("--IsolateSOCKSAuth")
             .arg("1")
+            .arg("--DataDirectory")
+            .arg(data_dir.to_string_lossy().to_string())
             .stdout(std::process::Stdio::null())
             .stderr(std::process::Stdio::null())
             .spawn()
@@ -375,6 +383,11 @@ impl TorManager {
                                 }
                             };
 
+                            let data_dir = std::path::Path::new("/tmp/picast/tor-data");
+                            if !data_dir.exists() {
+                                let _ = std::fs::create_dir_all(data_dir);
+                            }
+
                             match Command::new(&tor_path)
                                 .arg("--SocksPort")
                                 .arg(socks.port.to_string())
@@ -384,6 +397,8 @@ impl TorManager {
                                 .arg("1")
                                 .arg("--IsolateSOCKSAuth")
                                 .arg("1")
+                                .arg("--DataDirectory")
+                                .arg(data_dir.to_string_lossy().to_string())
                                 .stdout(std::process::Stdio::null())
                                 .stderr(std::process::Stdio::null())
                                 .spawn()
@@ -568,7 +583,7 @@ impl TorManager {
 
         // Read the CONNECT response (variable length, domain type: min 10 bytes)
         let mut connect_resp = [0u8; 256];
-        tokio::time::timeout(std::time::Duration::from_secs(15), stream.read(&mut connect_resp))
+        let n = tokio::time::timeout(std::time::Duration::from_secs(15), stream.read(&mut connect_resp))
             .await
             .map_err(|_| TorError::HealthCheck("SOCKS5 CONNECT response timed out".into()))?
             .map_err(|e| TorError::HealthCheck(format!("SOCKS5 CONNECT read failed: {}", e)))?;
@@ -576,7 +591,8 @@ impl TorManager {
         let latency_ms = connect_start.elapsed().as_millis() as u64;
 
         // Response[1] is the reply field: 0x00 = succeeded
-        if connect_resp.len() >= 2 && connect_resp[1] != 0x00 {
+        // Use actual bytes read (n), not the buffer length (always 256)
+        if n < 2 || connect_resp[1] != 0x00 {
             return Err(TorError::HealthCheck(format!(
                 "SOCKS5 CONNECT failed with reply code 0x{:02x}",
                 connect_resp[1]
@@ -712,6 +728,11 @@ impl TorManager {
         }
 
         tracing::info!("sent SIGNAL NEWNYM — Tor will build fresh circuits");
+
+        // Gracefully close the control port connection.
+        let _ = writer.write_all(b"QUIT\r\n").await;
+        let _ = stream.shutdown().await;
+
         Ok(())
     }
 
@@ -978,6 +999,10 @@ async fn query_circuit_health(
         failed = failed,
         "queried circuit health from control port"
     );
+
+    // Gracefully close the control port connection.
+    let _ = writer.write_all(b"QUIT\r\n").await;
+    let _ = stream.shutdown().await;
 
     Ok(CircuitHealth {
         open_circuits: open,

@@ -1,8 +1,7 @@
 [Unit]
 Description=PiCast Media Receiver
 After=network-online.target tor.service
-Wants=network-online.target
-Requires=tor.service
+Wants=network-online.target tor.service
 
 [Service]
 Type=simple
@@ -11,7 +10,6 @@ Group=picast
 SupplementaryGroups=video render audio
 
 # Environment
-Environment=DISPLAY=:0
 Environment=RUST_LOG=picast=info
 Environment=PICAST_HTTP_ADDR=0.0.0.0:8585
 Environment=PICAST_WS_ADDR=0.0.0.0:8586
@@ -21,22 +19,22 @@ Environment=PICAST_TOR_SOCKS=127.0.0.1:9050
 ExecStart=/usr/local/bin/picast
 
 # Notify systemd when ready (sd_notify support)
-# Type=notify
-# NotifyAccess=all
+Type=notify
+NotifyAccess=all
 
 # Restart policy
 Restart=on-failure
 RestartSec=5
 
-# Watchdog disabled — requires sd_notify() integration in the Rust binary.
-# Enable once NOTIFY_SOCKET support is implemented.
-# WatchdogSec=30
+# Watchdog — the binary sends WATCHDOG=1 every 10 seconds.
+# If no heartbeat is received within 30s, systemd restarts the service.
+WatchdogSec=30
 
 # Hardening
 NoNewPrivileges=true
 ProtectSystem=strict
 ProtectHome=true
-ReadWritePaths=/tmp/picast /var/lib/picast
+ReadWritePaths=/tmp/picast /var/lib/picast /etc/picast
 PrivateTmp=false
 ProtectKernelTunables=true
 ProtectKernelModules=true

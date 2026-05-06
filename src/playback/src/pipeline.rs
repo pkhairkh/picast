@@ -7,15 +7,15 @@
 //! ## Pipeline Topology
 //!
 //! ```text
-//! ┌──────────┐    ┌────────┐    ┌──────────┐    ┌───────────────┐    ┌─────────┐
-//! │souphttpsrc│───►│queue2  │───►│parsebin  │──┬►│v4l2h264dec   │───►│kmssink  │
-//! │(SOCKS5h) │    │(buffer)│    │(demux)   │  │ │(HW decode)   │    │(DRM/KMS)│
-//! └──────────┘    └────────┘    └──────────┘  │ └───────────────┘    └─────────┘
+//! ┌──────────┐    ┌────────┐    ┌──────────┐    ┌───────┐    ┌───────────────┐    ┌─────────┐
+//! │souphttpsrc│───►│queue2  │───►│parsebin  │──┬►│queue  │───►│v4l2h264dec   │───►│kmssink  │
+//! │(SOCKS5h) │    │(buffer)│    │(demux)   │  │ │       │    │(HW decode)   │    │(DRM/KMS)│
+//! └──────────┘    └────────┘    └──────────┘  │ └───────┘    └───────────────┘    └─────────┘
 //!                                               │
-//!                                               │ ┌──────────────┐    ┌─────────┐
-//!                                               └►│audioconvert  │───►│alsasink │
-//!                                                 │+ volume      │    │(HDMI)   │
-//!                                                 └──────────────┘    └─────────┘
+//!                                               │ ┌───────┐    ┌──────────────┐    ┌──────────────┐    ┌────────┐    ┌─────────┐
+//!                                               └►│queue  │───►│audioconvert  │───►│audioresample │───►│volume │───►│alsasink │
+//!                                                 │       │    │              │    │              │    │        │    │(HDMI)   │
+//!                                                 └───────┘    └──────────────┘    └──────────────┘    └────────┘    └─────────┘
 //! ```
 //!
 //! ## Fallback
@@ -154,9 +154,18 @@ impl GstPipeline {
         };
 
         // ── Audio elements ──────────────────────────────────────────
+        let audio_queue = ElementFactory::make("queue")
+            .property("max-size-buffers", 3u32)
+            .build()
+            .map_err(|e| PlaybackError::PipelineCreation(format!("audio_queue: {}", e)))?;
+
         let audioconvert = ElementFactory::make("audioconvert")
             .build()
             .map_err(|e| PlaybackError::PipelineCreation(format!("audioconvert: {}", e)))?;
+
+        let audioresample = ElementFactory::make("audioresample")
+            .build()
+            .map_err(|e| PlaybackError::PipelineCreation(format!("audioresample: {}", e)))?;
 
         let volume = ElementFactory::make("volume")
             .property("volume", config.volume)
@@ -169,7 +178,10 @@ impl GstPipeline {
 
         // ── Assemble pipeline ───────────────────────────────────────
         pipeline
-            .add_many([&src, &queue2, &parsebin, &video_bin, &audioconvert, &volume, &audiosink])
+            .add_many([
+                &src, &queue2, &parsebin, &video_bin,
+                &audio_queue, &audioconvert, &audioresample, &volume, &audiosink,
+            ])
             .map_err(|e| PlaybackError::PipelineCreation(format!("add elements: {}", e)))?;
 
         // Link: src → queue2 → parsebin
@@ -177,14 +189,14 @@ impl GstPipeline {
             PlaybackError::PipelineCreation(format!("link src→queue2→parsebin: {}", e))
         })?;
 
-        // Link audio: audioconvert → volume → audiosink
-        Element::link_many([&audioconvert, &volume, &audiosink])
+        // Link audio: audio_queue → audioconvert → audioresample → volume → audiosink
+        Element::link_many([&audio_queue, &audioconvert, &audioresample, &volume, &audiosink])
             .map_err(|e| PlaybackError::PipelineCreation(format!("link audio chain: {}", e)))?;
 
         // ── Dynamic pad linking (parsebin → video/audio) ────────────
         let pipeline_weak = pipeline.downgrade();
         let video_bin_weak = video_bin.downgrade();
-        let audioconvert_weak = audioconvert.downgrade();
+        let audio_queue_weak = audio_queue.downgrade();
 
         parsebin.connect_pad_added(move |_parsebin, pad| {
             let caps = pad.current_caps();
@@ -209,9 +221,9 @@ impl GstPipeline {
                     }
                 }
             } else if is_audio {
-                if let Some(aconv) = audioconvert_weak.upgrade() {
+                if let Some(aq) = audio_queue_weak.upgrade() {
                     let sink_pad =
-                        aconv.static_pad("sink").expect("audioconvert should have a sink pad");
+                        aq.static_pad("sink").expect("audio_queue should have a sink pad");
                     if sink_pad.is_linked() {
                         tracing::debug!("audio pad already linked, skipping");
                         return;
@@ -219,7 +231,7 @@ impl GstPipeline {
                     if let Err(e) = pad.link(&sink_pad) {
                         tracing::error!("failed to link parsebin audio pad: {:?}", e);
                     } else {
-                        tracing::debug!("linked parsebin → audio chain");
+                        tracing::debug!("linked parsebin → audio_queue");
                     }
                 }
             }
@@ -231,6 +243,13 @@ impl GstPipeline {
     /// Build the hardware-accelerated video branch:
     /// `v4l2h264dec (DMA-BUF) → kmssink`
     fn build_hw_video_bin(config: &PipelineConfig) -> Result<(Element, Element), PlaybackError> {
+        let video_queue = ElementFactory::make("queue")
+            .property("max-size-buffers", 3u32)
+            .build()
+            .map_err(|e| {
+                PlaybackError::PipelineCreation(format!("video_queue: {}", e))
+            })?;
+
         let v4l2dec = ElementFactory::make("v4l2h264dec")
             .property_from_str("capture-io-mode", "dmabuf")
             .build()
@@ -243,7 +262,7 @@ impl GstPipeline {
 
         let kmssink = ElementFactory::make(&config.video_sink)
             .property_from_str("driver-name", "vc4")
-            .property("plane-id", 0u32)
+            .property("plane-id", config.plane_id)
             .property("can-scale", true)
             .property("force-modesetting", true)
             .build()
@@ -252,16 +271,16 @@ impl GstPipeline {
             })?;
 
         let bin = gstreamer::Bin::new(Some("video-bin"));
-        bin.add_many([&v4l2dec, &kmssink]).map_err(|e| {
+        bin.add_many([&video_queue, &v4l2dec, &kmssink]).map_err(|e| {
             PlaybackError::PipelineCreation(format!("add video elements to bin: {}", e))
         })?;
 
-        Element::link_many([&v4l2dec, &kmssink]).map_err(|e| {
-            PlaybackError::PipelineCreation(format!("link v4l2h264dec→kmssink: {}", e))
+        Element::link_many([&video_queue, &v4l2dec, &kmssink]).map_err(|e| {
+            PlaybackError::PipelineCreation(format!("link video_queue→v4l2h264dec→kmssink: {}", e))
         })?;
 
-        // Create ghost pads for the bin.
-        let sink_pad = v4l2dec.static_pad("sink").expect("v4l2h264dec should have a sink pad");
+        // Create ghost pads for the bin (on the queue element, which is the entry point).
+        let sink_pad = video_queue.static_pad("sink").expect("video_queue should have a sink pad");
         bin.add_pad(&gstreamer::GhostPad::with_target(&sink_pad).expect("create video ghost pad"))
             .map_err(|e| PlaybackError::PipelineCreation(format!("video ghost pad: {}", e)))?;
 
@@ -274,6 +293,13 @@ impl GstPipeline {
     /// Build the software-decode video branch:
     /// `avdec_h264 → videoconvert → kmssink`
     fn build_sw_video_bin(config: &PipelineConfig) -> Result<(Element, Element), PlaybackError> {
+        let video_queue = ElementFactory::make("queue")
+            .property("max-size-buffers", 3u32)
+            .build()
+            .map_err(|e| {
+                PlaybackError::PipelineCreation(format!("sw video_queue: {}", e))
+            })?;
+
         let avdec = ElementFactory::make("avdec_h264")
             .build()
             .map_err(|e| PlaybackError::PipelineCreation(format!("avdec_h264: {}", e)))?;
@@ -291,14 +317,14 @@ impl GstPipeline {
             })?;
 
         let bin = gstreamer::Bin::new(Some("sw-video-bin"));
-        bin.add_many([&avdec, &vconv, &kmssink]).map_err(|e| {
+        bin.add_many([&video_queue, &avdec, &vconv, &kmssink]).map_err(|e| {
             PlaybackError::PipelineCreation(format!("add sw video elements: {}", e))
         })?;
 
-        Element::link_many([&avdec, &vconv, &kmssink])
+        Element::link_many([&video_queue, &avdec, &vconv, &kmssink])
             .map_err(|e| PlaybackError::PipelineCreation(format!("link sw video chain: {}", e)))?;
 
-        let sink_pad = avdec.static_pad("sink").expect("avdec_h264 should have a sink pad");
+        let sink_pad = video_queue.static_pad("sink").expect("video_queue should have a sink pad");
         bin.add_pad(
             &gstreamer::GhostPad::with_target(&sink_pad).expect("create sw video ghost pad"),
         )

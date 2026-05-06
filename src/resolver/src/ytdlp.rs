@@ -12,13 +12,16 @@
 //!   --socket-timeout 30 \
 //!   --proxy socks5h://picast-<isoid>@127.0.0.1:9050 \
 //!   --format "bestvideo[vcodec^=avc1][height<=1080]+bestaudio/best[vcodec^=avc1][height<=1080]/best[height<=1080]" \
-//!   --write-subs --sub-langs "en,es,fr,de" --sub-format vtt \
+//!   --write-subs --write-auto-subs --sub-langs "en,es,fr,de" --sub-format vtt \
+//!   --paths /tmp/picast-subs-XXXX \
 //!   <url>
 //! ```
 //!
 //! The format string forces H.264 (avc1) at 1080p max, which
 //! is required for the V4L2 hardware decoder on Pi 4B+.
 //! The `--write-subs` flag extracts available subtitles in VTT format.
+//! Subtitle files are written to a temporary directory that is
+//! automatically cleaned up when the `TempDir` is dropped.
 
 use crate::{ResolveError, ResolveResult, UrlCategory};
 use serde::Deserialize;
@@ -102,9 +105,12 @@ pub async fn resolve_with_ytdlp(
 
 /// Resolve a web page URL using yt-dlp with optional subtitle extraction.
 ///
-/// When `extract_subs` is true, adds `--write-subs --sub-langs --sub-format`
+/// When `extract_subs` is true, adds `--write-subs --write-auto-subs --sub-langs --sub-format`
 /// flags to the yt-dlp command so that available subtitle tracks are
 /// included in the JSON output's `subtitles` field.
+///
+/// Subtitle files are written to a temporary directory that is automatically
+/// cleaned up when this function returns (both on success and error paths).
 pub async fn resolve_with_ytdlp_and_subs(
     url: &str,
     socks_addr: &str,
@@ -120,6 +126,13 @@ pub async fn resolve_with_ytdlp_and_subs(
         "spawning yt-dlp subprocess"
     );
 
+    // Create a temp directory for yt-dlp to write subtitle files into.
+    // The TempDir is cleaned up when dropped, which happens at the end
+    // of this function on both success and error paths.
+    let temp_dir = tempfile::tempdir().map_err(|e| {
+        ResolveError::Network(format!("failed to create temp directory for subtitles: {}", e))
+    })?;
+
     let mut cmd = Command::new("yt-dlp");
     cmd.kill_on_drop(true)
         .arg("--dump-json")
@@ -130,7 +143,9 @@ pub async fn resolve_with_ytdlp_and_subs(
         .arg("--proxy")
         .arg(&proxy_url)
         .arg("--format")
-        .arg(H264_FORMAT_STRING);
+        .arg(H264_FORMAT_STRING)
+        .arg("--paths")
+        .arg(temp_dir.path());
 
     // Add subtitle extraction flags when requested.
     if extract_subs {
@@ -184,9 +199,19 @@ pub async fn resolve_with_ytdlp_and_subs(
     // Determine category based on what yt-dlp returned.
     let category = determine_category(&ytdlp);
 
-    // Determine MIME type from video/audio codecs.
-    let mime_type = determine_mime_type(&ytdlp);
+    // Determine MIME type from video/audio codecs and container format.
+    let mime_type = determine_mime_type(&category, &ytdlp.vcodec, &ytdlp.acodec, &ytdlp.format);
 
+    // Handle negative, NaN, and infinite durations from yt-dlp (e.g. live streams return -1.0).
+    let duration_ms = ytdlp.duration.and_then(|d| {
+        if d < 0.0 || d.is_nan() || d.is_infinite() {
+            None
+        } else {
+            Some((d * 1000.0) as u64)
+        }
+    });
+
+    // temp_dir is dropped here, cleaning up any subtitle files yt-dlp wrote.
     Ok(ResolveResult {
         source_url: url.to_owned(),
         direct_url: ytdlp.url,
@@ -195,7 +220,7 @@ pub async fn resolve_with_ytdlp_and_subs(
         content_length: None, // Not available from yt-dlp
         used_tor: true,
         title: ytdlp.title,
-        duration: ytdlp.duration.map(|d| d as u64 * 1000),
+        duration: duration_ms,
         thumbnail: ytdlp.thumbnail,
         vcodec: ytdlp.vcodec,
         acodec: ytdlp.acodec,
@@ -219,16 +244,71 @@ fn determine_category(ytdlp: &YtdlpOutput) -> UrlCategory {
     UrlCategory::DirectMedia
 }
 
-/// Determine the MIME type from codec information.
-fn determine_mime_type(ytdlp: &YtdlpOutput) -> Option<String> {
-    let has_video = ytdlp.vcodec.as_ref().is_some_and(|c| c != "none");
-    let has_audio = ytdlp.acodec.as_ref().is_some_and(|c| c != "none");
+/// Determine the MIME type from codec and container information.
+///
+/// Unlike the previous implementation that always returned `"video/mp4"` or
+/// `"audio/mp4"`, this function inspects the actual codecs and container
+/// format to return the correct MIME type:
+///
+/// - VP9/AV1 video or WebM container → `video/webm`
+/// - H.264 video (default) → `video/mp4`
+/// - Opus audio → `audio/ogg`
+/// - Other audio (default) → `audio/mp4`
+/// - Magnet links → `application/x-magnet`
+fn determine_mime_type(
+    category: &UrlCategory,
+    vcodec: &Option<String>,
+    acodec: &Option<String>,
+    format: &Option<String>,
+) -> Option<String> {
+    let has_vp9 = vcodec
+        .as_ref()
+        .map(|c| c.contains("vp9") || c.contains("vp09"))
+        .unwrap_or(false);
+    let has_av1 = vcodec.as_ref().map(|c| c.contains("av1")).unwrap_or(false);
+    let has_opus = acodec.as_ref().map(|c| c.contains("opus")).unwrap_or(false);
+    let is_webm_container = format.as_ref().map(|f| f.contains("webm")).unwrap_or(false);
 
-    match (has_video, has_audio) {
-        (true, true) => Some("video/mp4".to_owned()),
-        (true, false) => Some("video/mp4".to_owned()),
-        (false, true) => Some("audio/mp4".to_owned()),
-        (false, false) => None,
+    let has_video = vcodec.as_ref().is_some_and(|c| c != "none");
+    let has_audio = acodec.as_ref().is_some_and(|c| c != "none");
+
+    match category {
+        UrlCategory::WebPage | UrlCategory::Onion => {
+            if has_video {
+                if has_vp9 || has_av1 || is_webm_container {
+                    Some("video/webm".to_string())
+                } else {
+                    Some("video/mp4".to_string())
+                }
+            } else if has_audio {
+                if has_opus || is_webm_container {
+                    Some("audio/ogg".to_string())
+                } else {
+                    Some("audio/mp4".to_string())
+                }
+            } else {
+                None
+            }
+        },
+        UrlCategory::DirectMedia | UrlCategory::HlsManifest | UrlCategory::DashManifest => {
+            // These are already classified correctly by the classifier.
+            if has_video {
+                if has_vp9 || has_av1 || is_webm_container {
+                    Some("video/webm".to_string())
+                } else {
+                    Some("video/mp4".to_string())
+                }
+            } else if has_audio {
+                if has_opus || is_webm_container {
+                    Some("audio/ogg".to_string())
+                } else {
+                    Some("audio/mp4".to_string())
+                }
+            } else {
+                None
+            }
+        },
+        UrlCategory::Magnet => Some("application/x-magnet".to_string()),
     }
 }
 
@@ -298,39 +378,183 @@ mod tests {
     }
 
     #[test]
-    fn determine_mime_type_video() {
-        let ytdlp = YtdlpOutput {
-            webpage_url: None,
-            url: String::new(),
-            title: None,
-            duration: None,
-            thumbnail: None,
-            vcodec: Some("avc1".into()),
-            acodec: Some("mp4a".into()),
-            width: None,
-            height: None,
-            subtitles: Default::default(),
-            format: None,
-        };
-        assert_eq!(determine_mime_type(&ytdlp), Some("video/mp4".into()));
+    fn determine_mime_type_h264_video() {
+        let mime = determine_mime_type(
+            &UrlCategory::WebPage,
+            &Some("avc1".into()),
+            &Some("mp4a".into()),
+            &None,
+        );
+        assert_eq!(mime, Some("video/mp4".into()));
     }
 
     #[test]
-    fn determine_mime_type_audio_only() {
-        let ytdlp = YtdlpOutput {
-            webpage_url: None,
-            url: String::new(),
-            title: None,
-            duration: None,
-            thumbnail: None,
-            vcodec: Some("none".into()),
-            acodec: Some("opus".into()),
-            width: None,
-            height: None,
-            subtitles: Default::default(),
-            format: None,
-        };
-        assert_eq!(determine_mime_type(&ytdlp), Some("audio/mp4".into()));
+    fn determine_mime_type_vp9_video() {
+        let mime = determine_mime_type(
+            &UrlCategory::WebPage,
+            &Some("vp9".into()),
+            &Some("opus".into()),
+            &None,
+        );
+        assert_eq!(mime, Some("video/webm".into()));
+    }
+
+    #[test]
+    fn determine_mime_type_vp09_video() {
+        let mime = determine_mime_type(
+            &UrlCategory::Onion,
+            &Some("vp09.00.10.08".into()),
+            &Some("opus".into()),
+            &None,
+        );
+        assert_eq!(mime, Some("video/webm".into()));
+    }
+
+    #[test]
+    fn determine_mime_type_av1_video() {
+        let mime = determine_mime_type(
+            &UrlCategory::WebPage,
+            &Some("av1".into()),
+            &Some("opus".into()),
+            &None,
+        );
+        assert_eq!(mime, Some("video/webm".into()));
+    }
+
+    #[test]
+    fn determine_mime_type_webm_container() {
+        let mime = determine_mime_type(
+            &UrlCategory::WebPage,
+            &Some("avc1".into()),
+            &Some("mp4a".into()),
+            &Some("webm-1234".into()),
+        );
+        assert_eq!(mime, Some("video/webm".into()));
+    }
+
+    #[test]
+    fn determine_mime_type_audio_only_mp4a() {
+        let mime = determine_mime_type(
+            &UrlCategory::WebPage,
+            &Some("none".into()),
+            &Some("mp4a".into()),
+            &None,
+        );
+        assert_eq!(mime, Some("audio/mp4".into()));
+    }
+
+    #[test]
+    fn determine_mime_type_audio_only_opus() {
+        let mime = determine_mime_type(
+            &UrlCategory::WebPage,
+            &Some("none".into()),
+            &Some("opus".into()),
+            &None,
+        );
+        assert_eq!(mime, Some("audio/ogg".into()));
+    }
+
+    #[test]
+    fn determine_mime_type_audio_opus_webm_container() {
+        let mime = determine_mime_type(
+            &UrlCategory::Onion,
+            &Some("none".into()),
+            &Some("opus".into()),
+            &Some("webm".into()),
+        );
+        assert_eq!(mime, Some("audio/ogg".into()));
+    }
+
+    #[test]
+    fn determine_mime_type_no_codecs() {
+        let mime = determine_mime_type(
+            &UrlCategory::WebPage,
+            &Some("none".into()),
+            &Some("none".into()),
+            &None,
+        );
+        assert_eq!(mime, None);
+    }
+
+    #[test]
+    fn determine_mime_type_magnet() {
+        let mime = determine_mime_type(&UrlCategory::Magnet, &None, &None, &None);
+        assert_eq!(mime, Some("application/x-magnet".into()));
+    }
+
+    #[test]
+    fn determine_mime_type_direct_media_vp9() {
+        let mime = determine_mime_type(
+            &UrlCategory::DirectMedia,
+            &Some("vp9".into()),
+            &Some("opus".into()),
+            &None,
+        );
+        assert_eq!(mime, Some("video/webm".into()));
+    }
+
+    #[test]
+    fn determine_mime_type_hls_h264() {
+        let mime = determine_mime_type(
+            &UrlCategory::HlsManifest,
+            &Some("avc1".into()),
+            &Some("mp4a".into()),
+            &None,
+        );
+        assert_eq!(mime, Some("video/mp4".into()));
+    }
+
+    #[test]
+    fn determine_mime_type_dash_vp9() {
+        let mime = determine_mime_type(
+            &UrlCategory::DashManifest,
+            &Some("vp9".into()),
+            &Some("opus".into()),
+            &None,
+        );
+        assert_eq!(mime, Some("video/webm".into()));
+    }
+
+    #[test]
+    fn determine_mime_type_audio_webm_container() {
+        // Audio-only with webm container should be audio/ogg
+        let mime = determine_mime_type(
+            &UrlCategory::WebPage,
+            &Some("none".into()),
+            &Some("mp4a".into()),
+            &Some("webm".into()),
+        );
+        assert_eq!(mime, Some("audio/ogg".into()));
+    }
+
+    #[test]
+    fn determine_mime_type_none_vcodec_none_acodec() {
+        let mime = determine_mime_type(&UrlCategory::WebPage, &None, &None, &None);
+        assert_eq!(mime, None);
+    }
+
+    #[test]
+    fn determine_mime_type_video_only_no_audio() {
+        // Video codec present, no audio codec at all.
+        let mime = determine_mime_type(
+            &UrlCategory::WebPage,
+            &Some("avc1".into()),
+            &None,
+            &None,
+        );
+        assert_eq!(mime, Some("video/mp4".into()));
+    }
+
+    #[test]
+    fn determine_mime_type_audio_only_no_video() {
+        // No video codec at all, audio codec present.
+        let mime = determine_mime_type(
+            &UrlCategory::WebPage,
+            &None,
+            &Some("opus".into()),
+            &None,
+        );
+        assert_eq!(mime, Some("audio/ogg".into()));
     }
 
     #[test]
@@ -391,24 +615,6 @@ mod tests {
     #[test]
     fn sub_format_is_vtt() {
         assert_eq!(SUB_FORMAT, "vtt");
-    }
-
-    #[test]
-    fn determine_mime_type_no_codecs() {
-        let ytdlp = YtdlpOutput {
-            webpage_url: None,
-            url: String::new(),
-            title: None,
-            duration: None,
-            thumbnail: None,
-            vcodec: Some("none".into()),
-            acodec: Some("none".into()),
-            width: None,
-            height: None,
-            subtitles: Default::default(),
-            format: None,
-        };
-        assert_eq!(determine_mime_type(&ytdlp), None);
     }
 
     #[test]
@@ -524,82 +730,69 @@ mod tests {
     }
 
     #[test]
-    fn determine_mime_type_video_only() {
-        // Video codec present, audio codec is "none".
-        let ytdlp = YtdlpOutput {
-            webpage_url: None,
-            url: String::new(),
-            title: None,
-            duration: None,
-            thumbnail: None,
-            vcodec: Some("avc1".into()),
-            acodec: Some("none".into()),
-            width: None,
-            height: None,
-            subtitles: Default::default(),
-            format: None,
-        };
-        assert_eq!(determine_mime_type(&ytdlp), Some("video/mp4".into()));
+    fn duration_negative_treated_as_none() {
+        // Live streams return -1.0 duration; it should map to None.
+        let duration: Option<f64> = Some(-1.0);
+        let result = duration.and_then(|d| {
+            if d < 0.0 || d.is_nan() || d.is_infinite() {
+                None
+            } else {
+                Some((d * 1000.0) as u64)
+            }
+        });
+        assert_eq!(result, None);
     }
 
     #[test]
-    fn determine_mime_type_video_with_none_audio_codec() {
-        // Video present, no audio codec at all.
-        let ytdlp = YtdlpOutput {
-            webpage_url: None,
-            url: String::new(),
-            title: None,
-            duration: None,
-            thumbnail: None,
-            vcodec: Some("vp9".into()),
-            acodec: None,
-            width: None,
-            height: None,
-            subtitles: Default::default(),
-            format: None,
-        };
-        // acodec is None, so has_audio = false (is_some_and won't match on None).
-        // Result: (true, false) → video/mp4
-        assert_eq!(determine_mime_type(&ytdlp), Some("video/mp4".into()));
+    fn duration_nan_treated_as_none() {
+        let duration: Option<f64> = Some(f64::NAN);
+        let result = duration.and_then(|d| {
+            if d < 0.0 || d.is_nan() || d.is_infinite() {
+                None
+            } else {
+                Some((d * 1000.0) as u64)
+            }
+        });
+        assert_eq!(result, None);
     }
 
     #[test]
-    fn determine_mime_type_audio_only_with_none_video() {
-        // No video codec at all, audio codec present.
-        let ytdlp = YtdlpOutput {
-            webpage_url: None,
-            url: String::new(),
-            title: None,
-            duration: None,
-            thumbnail: None,
-            vcodec: None,
-            acodec: Some("opus".into()),
-            width: None,
-            height: None,
-            subtitles: Default::default(),
-            format: None,
-        };
-        // vcodec is None, so has_video = false.
-        // Result: (false, true) → audio/mp4
-        assert_eq!(determine_mime_type(&ytdlp), Some("audio/mp4".into()));
+    fn duration_infinite_treated_as_none() {
+        let duration: Option<f64> = Some(f64::INFINITY);
+        let result = duration.and_then(|d| {
+            if d < 0.0 || d.is_nan() || d.is_infinite() {
+                None
+            } else {
+                Some((d * 1000.0) as u64)
+            }
+        });
+        assert_eq!(result, None);
     }
 
     #[test]
-    fn determine_mime_type_both_none() {
-        let ytdlp = YtdlpOutput {
-            webpage_url: None,
-            url: String::new(),
-            title: None,
-            duration: None,
-            thumbnail: None,
-            vcodec: None,
-            acodec: None,
-            width: None,
-            height: None,
-            subtitles: Default::default(),
-            format: None,
-        };
-        assert_eq!(determine_mime_type(&ytdlp), None);
+    fn duration_positive_converted_to_ms() {
+        let duration: Option<f64> = Some(120.5);
+        let result = duration.and_then(|d| {
+            if d < 0.0 || d.is_nan() || d.is_infinite() {
+                None
+            } else {
+                Some((d * 1000.0) as u64)
+            }
+        });
+        assert_eq!(result, Some(120500));
+    }
+
+    #[test]
+    fn duration_zero_converted_to_zero_ms() {
+        let duration: Option<f64> = Some(0.0);
+        let result = duration.and_then(|d| {
+            if d < 0.0 || d.is_nan() || d.is_infinite() {
+                None
+            } else {
+                Some((d * 1000.0) as u64)
+            }
+        });
+        assert_eq!(result, Some(0));
     }
 
     #[test]

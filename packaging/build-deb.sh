@@ -111,6 +111,12 @@ chmod 644 "${DEB_ROOT}/etc/picast/torrc"
 cp "${CONFIG_DIR}/iptables.rules" "${DEB_ROOT}/etc/picast/iptables.rules"
 chmod 644 "${DEB_ROOT}/etc/picast/iptables.rules"
 
+# Example TOML config (installed as the live config if not already present)
+if [ -f "${REPO_ROOT}/picast.toml.example" ]; then
+    cp "${REPO_ROOT}/picast.toml.example" "${DEB_ROOT}/etc/picast/picast.toml"
+    chmod 644 "${DEB_ROOT}/etc/picast/picast.toml"
+fi
+
 # Systemd service (patch ExecStart to use picast-server)
 sed 's|ExecStart=/usr/local/bin/picast|ExecStart=/usr/local/bin/picast-server|' \
     "${CONFIG_DIR}/picast.service" > "${DEB_ROOT}/etc/systemd/system/picast.service"

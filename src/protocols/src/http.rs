@@ -282,7 +282,13 @@ async fn handle_request(
                 Ok(()) => {
                     json_response(StatusCode::OK, &serde_json::json!({"volume": volume}))
                 },
-                Err(e) => error_response(StatusCode::INTERNAL_SERVER_ERROR, &e.to_string()),
+                Err(e) => {
+                    let status = match &e {
+                        picast_session::SessionError::NoActiveSession => StatusCode::CONFLICT,
+                        _ => StatusCode::INTERNAL_SERVER_ERROR,
+                    };
+                    error_response(status, &e.to_string())
+                },
             }
         },
 

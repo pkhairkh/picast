@@ -90,6 +90,11 @@ pub enum PlaybackError {
 
 // ── Pipeline Config ──────────────────────────────────────────────────
 
+/// Default plane ID for serde backward compatibility.
+fn default_plane_id() -> u32 {
+    1
+}
+
 /// Configuration for a GStreamer pipeline instance.
 ///
 /// Controls which video and audio sinks are used, buffer sizes, and
@@ -106,6 +111,10 @@ pub struct PipelineConfig {
     pub hw_accel: bool,
     /// Initial volume (0.0 – 1.0).
     pub volume: f64,
+    /// DRM plane ID for video overlay (kmssink plane-id property).
+    /// On Pi 4, the video overlay is typically on plane 1+ (not 0, which is the primary plane).
+    #[serde(default = "default_plane_id")]
+    pub plane_id: u32,
 }
 
 impl Default for PipelineConfig {
@@ -116,6 +125,7 @@ impl Default for PipelineConfig {
             buffer_duration_ms: 3000,
             hw_accel: true,
             volume: 1.0,
+            plane_id: 1,
         }
     }
 }

@@ -77,6 +77,10 @@ pub enum SessionError {
     #[error("playback error: {0}")]
     PlaybackError(String),
 
+    /// Display subsystem error.
+    #[error("display error: {0}")]
+    DisplayError(String),
+
     /// An invalid state transition was attempted.
     #[error("invalid state transition: cannot go from {from} to {to}")]
     InvalidTransition { from: PlayerState, to: PlayerState },
@@ -431,7 +435,10 @@ impl SessionManager {
             PlayerState::Error => {
                 SessionEvent::Error { id: session_id, message: "entered error state".into() }
             },
-            _ => return Ok(target), // No broadcast for Buffering/Seeking here
+            PlayerState::Buffering => {
+                SessionEvent::Buffering { id: session_id, percent: 0 }
+            },
+            _ => return Ok(target), // No broadcast for Seeking here
         };
         let _ = self.event_tx.send(event);
 
@@ -608,8 +615,8 @@ impl SessionManager {
     /// 1. Validates that no session is already active (PiCast is single-session).
     /// 2. Creates a new `MediaSession` in the `Idle` state.
     /// 3. Transitions to `Resolving` and calls the resolver subsystem.
-    /// 4. On successful resolution, transitions to `Buffering` and starts
-    ///    playback through the Tor SOCKS proxy.
+    /// 4. On successful resolution, transitions to `Buffering`, acquires
+    ///    the display, and starts playback through the Tor SOCKS proxy.
     /// 5. Transitions to `Playing` when the pipeline is confirmed active.
     ///
     /// Returns the new session's UUID on success.
@@ -654,7 +661,7 @@ impl SessionManager {
         self.try_transition(id, PlayerState::Resolving)?;
 
         // Resolve the URL via the resolver subsystem.
-        let direct_url = if let Some(ref resolver) = self.resolver {
+        let resolve_info = if let Some(ref resolver) = self.resolver {
             resolver.resolve(url).await.map_err(|e| {
                 // Transition to Error state on resolution failure.
                 let _ = self.try_transition(id, PlayerState::Error);
@@ -664,11 +671,14 @@ impl SessionManager {
         } else {
             // Without a resolver, treat the URL as a direct media URL.
             tracing::warn!("no resolver subsystem — using URL as direct media");
-            url.to_owned()
+            interfaces::ResolveInfo {
+                direct_url: url.to_owned(),
+                title: None,
+                duration_ms: None,
+            }
         };
 
-        // Update the session with the resolved URL.
-        let direct_url_sql: String = direct_url.clone();
+        // Update the session with the resolved URL, title, and duration.
         {
             let db = self
                 .db
@@ -676,17 +686,33 @@ impl SessionManager {
                 .map_err(|e| SessionError::Subsystem(format!("db lock poisoned: {}", e)))?;
             let now = Utc::now().to_rfc3339();
             db.execute(
-                "UPDATE sessions SET resolved_url = ?1, updated_at = ?2 WHERE id = ?3",
-                rusqlite::params![direct_url_sql, now, id.to_string()],
+                "UPDATE sessions SET resolved_url = ?1, title = ?2, duration_ms = ?3, updated_at = ?4 WHERE id = ?5",
+                rusqlite::params![
+                    resolve_info.direct_url,
+                    resolve_info.title,
+                    resolve_info.duration_ms.map(|d| d as i64),
+                    now,
+                    id.to_string(),
+                ],
             )?;
         }
 
         // Broadcast: resolved.
         let _ = self.event_tx.send(SessionEvent::Resolved {
             id,
-            direct_url: direct_url.clone(),
-            title: None,
+            direct_url: resolve_info.direct_url.clone(),
+            title: resolve_info.title.clone(),
         });
+
+        // Acquire the display before starting playback.
+        if let Some(ref display) = self.display {
+            display.acquire().await.map_err(|e| {
+                tracing::error!(error = %e, "display acquire failed");
+                let _ = self.try_transition(id, PlayerState::Error);
+                let _ = self.clear_active_session();
+                SessionError::DisplayError(e.to_string())
+            })?;
+        }
 
         // Transition: Resolving → Buffering.
         self.try_transition(id, PlayerState::Buffering)?;
@@ -708,15 +734,19 @@ impl SessionManager {
                 })
                 .unwrap_or_default();
 
-            playback.play(&direct_url, &socks_addr, &isolation_username).await.map_err(|e| {
+            playback.play(&resolve_info.direct_url, &socks_addr, &isolation_username).await.map_err(|e| SessionError::PlaybackError(e.to_string())).map_err(|e| {
+                // Transition to Error state on playback failure.
                 let _ = self.try_transition(id, PlayerState::Error);
                 let _ = self.clear_active_session();
-                SessionError::PlaybackError(e.to_string())
+                e
             })?;
         }
 
         // Transition: Buffering → Playing.
         self.try_transition(id, PlayerState::Playing)?;
+
+        // Refresh position/duration from playback subsystem.
+        self.refresh_playback_position(id).await;
 
         // Push latest state to watch channel.
         if let Ok(session) = self.load_session(id) {
@@ -740,6 +770,9 @@ impl SessionManager {
         // Transition: Playing → Paused (after subsystem confirms success).
         self.try_transition(id, PlayerState::Paused)?;
 
+        // Refresh position/duration from playback subsystem.
+        self.refresh_playback_position(id).await;
+
         // Push latest state to watch channel.
         if let Ok(session) = self.load_session(id) {
             self.broadcast_state_update(&session);
@@ -762,6 +795,9 @@ impl SessionManager {
         // Transition: Paused → Playing (after subsystem confirms success).
         self.try_transition(id, PlayerState::Playing)?;
 
+        // Refresh position/duration from playback subsystem.
+        self.refresh_playback_position(id).await;
+
         // Push latest state to watch channel.
         if let Ok(session) = self.load_session(id) {
             self.broadcast_state_update(&session);
@@ -773,20 +809,28 @@ impl SessionManager {
     /// Stop playback and destroy the current session.
     ///
     /// Can be called from any active state. Transitions to `Idle`,
-    /// stops the playback pipeline, and clears the active session.
+    /// stops the playback pipeline, releases the display, and clears
+    /// the active session.
     pub async fn stop(&self) -> Result<(), SessionError> {
         let id = self.active_session_id()?;
 
         // Load current state to check what transition is needed.
         let session = self.load_session(id)?;
 
-        // If we're in Playing/Paused/Buffering, stop the pipeline first.
+        // If we're in Playing/Paused/Buffering/Seeking, stop the pipeline first.
         if matches!(
             session.state,
-            PlayerState::Playing | PlayerState::Paused | PlayerState::Buffering
+            PlayerState::Playing | PlayerState::Paused | PlayerState::Buffering | PlayerState::Seeking
         ) {
             if let Some(ref playback) = self.playback {
                 let _ = playback.stop().await;
+            }
+        }
+
+        // Release the display (best-effort — log but don't fail).
+        if let Some(ref display) = self.display {
+            if let Err(e) = display.release().await {
+                tracing::warn!(error = %e, "display release failed during stop — continuing");
             }
         }
 
@@ -853,6 +897,9 @@ impl SessionManager {
         } else {
             self.try_transition(id, PlayerState::Playing)?;
         }
+
+        // Refresh position/duration from playback subsystem.
+        self.refresh_playback_position(id).await;
 
         // Push latest state to watch channel.
         if let Ok(session) = self.load_session(id) {
@@ -947,6 +994,66 @@ impl SessionManager {
         let _ = self.watch_tx.send(None);
     }
 
+    /// Refresh position and duration from the playback subsystem and
+    /// persist them to the database. Also emits a
+    /// [`SessionEvent::PositionUpdate`] and updates the watch channel.
+    ///
+    /// This should be called after operations that change playback state
+    /// (pause, resume, seek) so that the stored position/duration stays
+    /// roughly in sync with the pipeline.
+    async fn refresh_playback_position(&self, session_id: Uuid) {
+        let pos = if let Some(ref playback) = self.playback {
+            playback.position_ms().await.ok()
+        } else {
+            None
+        };
+        let dur = if let Some(ref playback) = self.playback {
+            playback.duration_ms().await.ok().flatten()
+        } else {
+            None
+        };
+
+        if pos.is_none() && dur.is_none() {
+            return;
+        }
+
+        // Update the database.
+        {
+            let db = match self.db.lock() {
+                Ok(guard) => guard,
+                Err(e) => {
+                    tracing::warn!(error = %e, "db lock poisoned in refresh_playback_position");
+                    return;
+                },
+            };
+            let now = Utc::now().to_rfc3339();
+            if let Some(p) = pos {
+                let _ = db.execute(
+                    "UPDATE sessions SET position_ms = ?1, updated_at = ?2 WHERE id = ?3",
+                    rusqlite::params![p as i64, now, session_id.to_string()],
+                );
+            }
+            if let Some(d) = dur {
+                let _ = db.execute(
+                    "UPDATE sessions SET duration_ms = ?1, updated_at = ?2 WHERE id = ?3",
+                    rusqlite::params![d as i64, now, session_id.to_string()],
+                );
+            }
+        }
+
+        // Emit position update event.
+        let _ = self.event_tx.send(SessionEvent::PositionUpdate {
+            id: session_id,
+            position_ms: pos.unwrap_or(0),
+            duration_ms: dur,
+        });
+
+        // Update watch channel with latest state.
+        if let Ok(session) = self.load_session(session_id) {
+            self.broadcast_state_update(&session);
+        }
+    }
+
     /// Delete sessions older than 24 hours.
     ///
     /// Called during `SessionManager::new()` to keep the database
@@ -1015,7 +1122,7 @@ mod tests {
 
     // ── Mock subsystems ──────────────────────────────────────────────
 
-    /// Mock resolver that returns a predictable direct URL.
+    /// Mock resolver that returns a predictable direct URL with metadata.
     struct MockResolver {
         should_fail: AtomicBool,
     }
@@ -1034,11 +1141,15 @@ mod tests {
         async fn resolve(
             &self,
             url: &str,
-        ) -> Result<String, Box<dyn std::error::Error + Send + Sync>> {
+        ) -> Result<interfaces::ResolveInfo, Box<dyn std::error::Error + Send + Sync>> {
             if self.should_fail.load(AtomicOrdering::Relaxed) {
                 return Err("mock resolution failure".into());
             }
-            Ok(format!("{}?direct=1", url))
+            Ok(interfaces::ResolveInfo {
+                direct_url: format!("{}?direct=1", url),
+                title: Some("Mock Title".to_string()),
+                duration_ms: Some(300000),
+            })
         }
     }
 
@@ -1425,6 +1536,10 @@ mod tests {
         assert_eq!(session.source_url, "https://example.com/video.mp4");
         assert!(session.resolved_url.is_some());
         assert!(session.resolved_url.unwrap().contains("direct=1"));
+        // Title should be populated from resolver.
+        assert_eq!(session.title, Some("Mock Title".to_string()));
+        // Duration should be populated from resolver.
+        assert_eq!(session.duration_ms, Some(300000));
     }
 
     #[tokio::test]
@@ -1447,6 +1562,9 @@ mod tests {
         let session = mgr.load_session(id).unwrap();
         assert_eq!(session.state, PlayerState::Playing);
         assert_eq!(session.resolved_url, Some("https://example.com/video.mp4".to_string()));
+        // Without resolver, title and duration are None.
+        assert!(session.title.is_none());
+        assert!(session.duration_ms.is_none());
     }
 
     // ── pause/resume with mock subsystems ────────────────────────────
@@ -1598,7 +1716,7 @@ mod tests {
 
         let _ = mgr.load("https://example.com/video.mp4").await.unwrap();
 
-        // Should receive Created, Resolving, Resolved, Playing events.
+        // Should receive Created, Resolving, Resolved, Buffering, Playing events.
         let mut received = Vec::new();
         while let Ok(event) = rx.try_recv() {
             received.push(event);
@@ -1615,6 +1733,10 @@ mod tests {
         assert!(
             received.iter().any(|e| matches!(e, SessionEvent::Resolved { .. })),
             "should have Resolved event"
+        );
+        assert!(
+            received.iter().any(|e| matches!(e, SessionEvent::Buffering { .. })),
+            "should have Buffering event"
         );
         assert!(
             received.iter().any(|e| matches!(e, SessionEvent::Playing { .. })),
@@ -2398,5 +2520,131 @@ mod tests {
             SessionEvent::Stopped { id: eid } => assert_eq!(eid, id),
             other => panic!("Expected Stopped event, got {:?}", other),
         }
+    }
+
+    // ── Display acquire/release tests ───────────────────────────────
+
+    #[tokio::test]
+    async fn test_load_acquires_display() {
+        let resolver = Arc::new(MockResolver::new());
+        let playback = Arc::new(MockPlayback::new());
+        let display = Arc::new(MockDisplay::new());
+        let tor = Arc::new(MockTor::new());
+
+        // Check display is not acquired before load.
+        assert!(!display.acquired.load(AtomicOrdering::Relaxed));
+
+        let mgr =
+            SessionManager::with_subsystems(":memory:", resolver, playback, display.clone(), tor)
+                .unwrap();
+
+        let _ = mgr.load("https://example.com/video.mp4").await.unwrap();
+
+        // Display should be acquired after load.
+        assert!(display.acquired.load(AtomicOrdering::Relaxed));
+    }
+
+    #[tokio::test]
+    async fn test_stop_releases_display() {
+        let resolver = Arc::new(MockResolver::new());
+        let playback = Arc::new(MockPlayback::new());
+        let display = Arc::new(MockDisplay::new());
+        let tor = Arc::new(MockTor::new());
+
+        let mgr =
+            SessionManager::with_subsystems(":memory:", resolver, playback, display.clone(), tor)
+                .unwrap();
+
+        let _ = mgr.load("https://example.com/video.mp4").await.unwrap();
+        assert!(display.acquired.load(AtomicOrdering::Relaxed));
+
+        mgr.stop().await.unwrap();
+
+        // Display should be released after stop.
+        assert!(!display.acquired.load(AtomicOrdering::Relaxed));
+    }
+
+    // ── Buffering event test ─────────────────────────────────────────
+
+    #[tokio::test]
+    async fn test_load_emits_buffering_event() {
+        let mgr = session_manager_with_mocks();
+        let mut rx = mgr.subscribe();
+
+        let _ = mgr.load("https://example.com/video.mp4").await.unwrap();
+
+        // Drain events and find Buffering.
+        let mut found_buffering = false;
+        while let Ok(event) = rx.try_recv() {
+            if let SessionEvent::Buffering { id: _, percent } = event {
+                found_buffering = true;
+                assert_eq!(percent, 0, "initial buffering should be at 0%");
+            }
+        }
+        assert!(found_buffering, "should have received Buffering event during load");
+    }
+
+    // ── Resolved event includes title ────────────────────────────────
+
+    #[tokio::test]
+    async fn test_resolved_event_includes_title() {
+        let mgr = session_manager_with_mocks();
+        let mut rx = mgr.subscribe();
+
+        let _ = mgr.load("https://example.com/video.mp4").await.unwrap();
+
+        // Drain events and find Resolved.
+        let mut found_resolved = false;
+        while let Ok(event) = rx.try_recv() {
+            if let SessionEvent::Resolved { id: _, direct_url: _, title } = event {
+                found_resolved = true;
+                assert_eq!(title, Some("Mock Title".to_string()));
+            }
+        }
+        assert!(found_resolved, "should have received Resolved event with title");
+    }
+
+    // ── Position update event test ───────────────────────────────────
+
+    #[tokio::test]
+    async fn test_pause_emits_position_update() {
+        let mgr = session_manager_with_mocks();
+        let _ = mgr.load("https://example.com/video.mp4").await.unwrap();
+
+        let mut rx = mgr.subscribe();
+        // Drain pending events from load.
+        while rx.try_recv().is_ok() {}
+
+        mgr.pause().await.unwrap();
+
+        // Should receive Paused and PositionUpdate events.
+        let mut found_position_update = false;
+        while let Ok(event) = rx.try_recv() {
+            if let SessionEvent::PositionUpdate { .. } = event {
+                found_position_update = true;
+            }
+        }
+        assert!(found_position_update, "should have received PositionUpdate event after pause");
+    }
+
+    #[tokio::test]
+    async fn test_seek_emits_position_update() {
+        let mgr = session_manager_with_mocks();
+        let _ = mgr.load("https://example.com/video.mp4").await.unwrap();
+
+        let mut rx = mgr.subscribe();
+        // Drain pending events from load.
+        while rx.try_recv().is_ok() {}
+
+        mgr.seek(30000).await.unwrap();
+
+        // Should receive Seeking, Playing, and PositionUpdate events.
+        let mut found_position_update = false;
+        while let Ok(event) = rx.try_recv() {
+            if let SessionEvent::PositionUpdate { .. } = event {
+                found_position_update = true;
+            }
+        }
+        assert!(found_position_update, "should have received PositionUpdate event after seek");
     }
 }

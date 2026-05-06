@@ -4,7 +4,7 @@
 //! manager (in-memory SQLite) and mock subsystems, verifying the
 //! REST API endpoints work correctly end-to-end.
 
-use picast_session::interfaces::{DisplayTrait, PlaybackTrait, ResolverTrait, TorTrait};
+use picast_session::interfaces::{DisplayTrait, PlaybackTrait, ResolveInfo, ResolverTrait, TorTrait};
 use picast_session::SessionManager;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
@@ -16,8 +16,15 @@ struct MockResolver;
 
 #[async_trait::async_trait]
 impl ResolverTrait for MockResolver {
-    async fn resolve(&self, url: &str) -> Result<String, Box<dyn std::error::Error + Send + Sync>> {
-        Ok(format!("{}?resolved=1", url))
+    async fn resolve(
+        &self,
+        url: &str,
+    ) -> Result<ResolveInfo, Box<dyn std::error::Error + Send + Sync>> {
+        Ok(ResolveInfo {
+            direct_url: format!("{}?resolved=1", url),
+            title: None,
+            duration_ms: Some(300000),
+        })
     }
 }
 
@@ -498,7 +505,7 @@ async fn test_volume_without_session_returns_error() {
         .send()
         .await
         .unwrap();
-    assert!(resp.status().is_server_error());
+    assert!(resp.status().is_client_error(), "expected 4xx for volume without session, got {}", resp.status());
 
     handle.abort();
 }

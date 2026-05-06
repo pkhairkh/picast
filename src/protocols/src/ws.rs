@@ -33,16 +33,25 @@
 //!
 //! Server sends ping every 30 seconds. Clients that don't respond
 //! within 10 seconds are disconnected.
+//!
+//! ## Connection Limit
+//!
+//! A maximum of 32 concurrent WebSocket clients are allowed.
+//! Connections beyond this limit are rejected with a 429-style
+//! error event before the socket is closed.
 
 use anyhow::{anyhow, Result};
 use futures_util::{SinkExt, StreamExt};
-use picast_session::{SessionEvent, SessionManager};
+use picast_session::{MediaSession, SessionEvent, SessionManager};
 use serde::{Deserialize, Serialize};
 use std::sync::Arc;
 use std::time::Duration;
 use tokio::net::TcpListener;
-use tokio::sync::broadcast;
+use tokio::sync::{broadcast, Semaphore};
 use tokio_tungstenite::tungstenite::Message;
+
+/// Maximum number of concurrent WebSocket clients.
+const MAX_CONNECTIONS: usize = 32;
 
 // ── Client → Server Commands ─────────────────────────────────────────
 
@@ -55,6 +64,7 @@ enum ClientCommand {
     Resume,
     Seek { position_ms: u64 },
     Volume { volume: u8 },
+    #[allow(dead_code)] // lang is needed for deserialization; command is not yet supported
     Subtitle { lang: String },
 }
 
@@ -91,12 +101,18 @@ pub struct WebSocketServer {
     listen_addr: String,
     /// Reference to the session manager.
     session: Arc<SessionManager>,
+    /// Connection limiter — at most `MAX_CONNECTIONS` concurrent clients.
+    connection_limit: Arc<Semaphore>,
 }
 
 impl WebSocketServer {
     /// Create a new WebSocket server bound to `listen_addr`.
     pub fn new(listen_addr: &str, session: Arc<SessionManager>) -> Self {
-        Self { listen_addr: listen_addr.to_owned(), session }
+        Self {
+            listen_addr: listen_addr.to_owned(),
+            session,
+            connection_limit: Arc::new(Semaphore::new(MAX_CONNECTIONS)),
+        }
     }
 
     /// Start accepting WebSocket connections.
@@ -113,8 +129,38 @@ impl WebSocketServer {
                 accept_result = listener.accept() => {
                     let (stream, remote) = accept_result?;
                     let session = self.session.clone();
+                    let connection_limit = self.connection_limit.clone();
 
                     tokio::spawn(async move {
+                        // Try to acquire a connection permit before upgrading.
+                        let permit = match connection_limit.try_acquire() {
+                            Ok(permit) => permit,
+                            Err(_) => {
+                                tracing::warn!(
+                                    remote = %remote,
+                                    "WebSocket connection rejected — limit of {} reached",
+                                    MAX_CONNECTIONS
+                                );
+                                // Do the handshake just to send an error, then close.
+                                let ws_config = tokio_tungstenite::tungstenite::protocol::WebSocketConfig {
+                                    max_message_size: Some(1_048_576),
+                                    max_frame_size: Some(1_048_576),
+                                    ..Default::default()
+                                };
+                                if let Ok(ws_stream) = tokio_tungstenite::accept_async_with_config(stream, Some(ws_config)).await {
+                                    let (mut sender, _) = ws_stream.split();
+                                    let err = ServerEvent::Error {
+                                        message: format!("too many connections (max {})", MAX_CONNECTIONS),
+                                    };
+                                    if let Ok(json) = serde_json::to_string(&err) {
+                                        let _ = sender.send(Message::Text(json)).await;
+                                    }
+                                    let _ = sender.send(Message::Close(None)).await;
+                                }
+                                return;
+                            }
+                        };
+
                         let ws_config = tokio_tungstenite::tungstenite::protocol::WebSocketConfig {
                             max_message_size: Some(1_048_576), // 1 MB
                             max_frame_size: Some(1_048_576),    // 1 MB
@@ -124,7 +170,7 @@ impl WebSocketServer {
                         match ws_stream {
                             Ok(ws_stream) => {
                                 tracing::debug!(remote = %remote, "WebSocket client connected");
-                                if let Err(e) = handle_client(ws_stream, session).await {
+                                if let Err(e) = handle_client(ws_stream, session, permit).await {
                                     tracing::warn!(remote = %remote, error = %e, "WebSocket client error");
                                 }
                             }
@@ -148,9 +194,12 @@ impl WebSocketServer {
 /// Handle a single WebSocket client connection.
 ///
 /// Reads commands from the client and forwards session events.
+/// The `_permit` parameter holds the semaphore permit for the
+/// connection's lifetime — dropping it releases the slot.
 async fn handle_client(
     ws_stream: tokio_tungstenite::WebSocketStream<tokio::net::TcpStream>,
     session: Arc<SessionManager>,
+    _permit: tokio::sync::SemaphorePermit<'_>
 ) -> Result<()> {
     let (mut ws_sender, mut ws_receiver) = ws_stream.split();
     let mut event_rx = session.subscribe();
@@ -222,7 +271,22 @@ async fn handle_client(
             event = event_rx.recv() => {
                 match event {
                     Ok(session_event) => {
-                        let server_event = map_session_event(&session_event);
+                        // For state-change events that produce MediaStatus,
+                        // query the session manager for the current snapshot
+                        // so we include real position, volume, source, and title.
+                        let current_session = match session_event {
+                            SessionEvent::Playing { .. }
+                            | SessionEvent::Paused { .. }
+                            | SessionEvent::Stopped { .. }
+                            | SessionEvent::VolumeChanged { .. }
+                            | SessionEvent::Seeking { .. }
+                            | SessionEvent::PositionUpdate { .. } => {
+                                session.current_status().await.ok()
+                            },
+                            _ => None,
+                        };
+
+                        let server_event = map_session_event(&session_event, current_session.as_ref());
                         if let Some(event) = server_event {
                             let json = serde_json::to_string(&event)?;
                             ws_sender.send(Message::Text(json)).await?;
@@ -281,36 +345,51 @@ async fn handle_command(session: &SessionManager, cmd: ClientCommand) -> Result<
             let clamped = volume.min(100);
             session.set_volume(clamped).await.map_err(|e| anyhow!("volume failed: {}", e))?;
         },
-        ClientCommand::Subtitle { lang } => {
-            // Subtitle support deferred to v0.4.0.
-            tracing::warn!(lang = %lang, "subtitle selection not yet implemented");
+        ClientCommand::Subtitle { lang: _ } => {
+            return Err(anyhow!("subtitle selection not yet supported"));
         },
     }
     Ok(())
 }
 
 /// Map a session event to a WebSocket server event.
-fn map_session_event(event: &SessionEvent) -> Option<ServerEvent> {
+///
+/// When `current_session` is `Some`, its fields (position, volume,
+/// source URL, title) are used to populate the `MediaStatus` payload
+/// instead of hardcoded placeholder values. This gives clients an
+/// accurate snapshot of the player state on every event.
+fn map_session_event(event: &SessionEvent, current_session: Option<&MediaSession>) -> Option<ServerEvent> {
     match event {
         SessionEvent::Playing { .. }
         | SessionEvent::Paused { .. }
         | SessionEvent::Stopped { .. } => {
-            // For state-change events, the client can query /api/status
-            // for full details. We send a lightweight status update.
-            Some(ServerEvent::MediaStatus {
-                state: match event {
-                    SessionEvent::Playing { .. } => "playing",
-                    SessionEvent::Paused { .. } => "paused",
-                    SessionEvent::Stopped { .. } => "idle",
-                    _ => "UNKNOWN",
-                }
-                .into(),
-                position_ms: 0,
-                duration_ms: None,
-                volume: 100,
-                source_url: None,
-                title: None,
-            })
+            let state_str = match event {
+                SessionEvent::Playing { .. } => "playing",
+                SessionEvent::Paused { .. } => "paused",
+                SessionEvent::Stopped { .. } => "idle",
+                _ => "unknown",
+            };
+
+            if let Some(s) = current_session {
+                Some(ServerEvent::MediaStatus {
+                    state: state_str.into(),
+                    position_ms: s.position_ms,
+                    duration_ms: s.duration_ms,
+                    volume: s.volume,
+                    source_url: Some(s.source_url.clone()),
+                    title: s.title.clone(),
+                })
+            } else {
+                // No active session — send minimal status.
+                Some(ServerEvent::MediaStatus {
+                    state: state_str.into(),
+                    position_ms: 0,
+                    duration_ms: None,
+                    volume: 100,
+                    source_url: None,
+                    title: None,
+                })
+            }
         },
         SessionEvent::Buffering { percent, .. } => {
             Some(ServerEvent::ResolveProgress { percent: *percent })
@@ -325,31 +404,68 @@ fn map_session_event(event: &SessionEvent) -> Option<ServerEvent> {
             Some(ServerEvent::ResolveProgress { percent: 0 })
         },
         SessionEvent::PositionUpdate { position_ms, duration_ms, .. } => {
-            Some(ServerEvent::MediaStatus {
-                state: "playing".into(),
-                position_ms: *position_ms,
-                duration_ms: *duration_ms,
-                volume: 100,
-                source_url: None,
-                title: None,
-            })
+            if let Some(s) = current_session {
+                Some(ServerEvent::MediaStatus {
+                    state: "playing".into(),
+                    position_ms: *position_ms,
+                    duration_ms: duration_ms.or(s.duration_ms),
+                    volume: s.volume,
+                    source_url: Some(s.source_url.clone()),
+                    title: s.title.clone(),
+                })
+            } else {
+                Some(ServerEvent::MediaStatus {
+                    state: "playing".into(),
+                    position_ms: *position_ms,
+                    duration_ms: *duration_ms,
+                    volume: 100,
+                    source_url: None,
+                    title: None,
+                })
+            }
         },
-        SessionEvent::VolumeChanged { volume, .. } => Some(ServerEvent::MediaStatus {
-            state: "playing".into(),
-            position_ms: 0,
-            duration_ms: None,
-            volume: *volume,
-            source_url: None,
-            title: None,
-        }),
-        SessionEvent::Seeking { position_ms, .. } => Some(ServerEvent::MediaStatus {
-            state: "seeking".into(),
-            position_ms: *position_ms,
-            duration_ms: None,
-            volume: 100,
-            source_url: None,
-            title: None,
-        }),
+        SessionEvent::VolumeChanged { volume, .. } => {
+            if let Some(s) = current_session {
+                Some(ServerEvent::MediaStatus {
+                    state: s.state.to_string(),
+                    position_ms: s.position_ms,
+                    duration_ms: s.duration_ms,
+                    volume: *volume,
+                    source_url: Some(s.source_url.clone()),
+                    title: s.title.clone(),
+                })
+            } else {
+                Some(ServerEvent::MediaStatus {
+                    state: "playing".into(),
+                    position_ms: 0,
+                    duration_ms: None,
+                    volume: *volume,
+                    source_url: None,
+                    title: None,
+                })
+            }
+        },
+        SessionEvent::Seeking { position_ms, .. } => {
+            if let Some(s) = current_session {
+                Some(ServerEvent::MediaStatus {
+                    state: "seeking".into(),
+                    position_ms: *position_ms,
+                    duration_ms: s.duration_ms,
+                    volume: s.volume,
+                    source_url: Some(s.source_url.clone()),
+                    title: s.title.clone(),
+                })
+            } else {
+                Some(ServerEvent::MediaStatus {
+                    state: "seeking".into(),
+                    position_ms: *position_ms,
+                    duration_ms: None,
+                    volume: 100,
+                    source_url: None,
+                    title: None,
+                })
+            }
+        },
     }
 }
 
@@ -422,5 +538,46 @@ mod tests {
         let json = serde_json::to_string(&event).unwrap();
         assert!(json.contains("ERROR"));
         assert!(json.contains("resolution failed"));
+    }
+
+    #[test]
+    fn map_session_event_playing_with_session() {
+        use picast_session::PlayerState;
+
+        let mut session = MediaSession::new("https://example.com/video".into());
+        session.state = PlayerState::Playing;
+        session.position_ms = 5000;
+        session.duration_ms = Some(300000);
+        session.volume = 75;
+        session.title = Some("Test Video".into());
+
+        let event = SessionEvent::Playing { id: session.id };
+        let result = map_session_event(&event, Some(&session));
+        assert!(result.is_some());
+        if let Some(ServerEvent::MediaStatus { state, position_ms, volume, source_url, title, .. }) = result {
+            assert_eq!(state, "playing");
+            assert_eq!(position_ms, 5000);
+            assert_eq!(volume, 75);
+            assert_eq!(source_url, Some("https://example.com/video".into()));
+            assert_eq!(title, Some("Test Video".into()));
+        } else {
+            panic!("expected MediaStatus");
+        }
+    }
+
+    #[test]
+    fn map_session_event_playing_without_session() {
+        let event = SessionEvent::Playing { id: uuid::Uuid::new_v4() };
+        let result = map_session_event(&event, None);
+        assert!(result.is_some());
+        if let Some(ServerEvent::MediaStatus { state, position_ms, volume, source_url, title, .. }) = result {
+            assert_eq!(state, "playing");
+            assert_eq!(position_ms, 0);
+            assert_eq!(volume, 100);
+            assert_eq!(source_url, None);
+            assert_eq!(title, None);
+        } else {
+            panic!("expected MediaStatus");
+        }
     }
 }

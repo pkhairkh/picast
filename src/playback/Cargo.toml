@@ -6,14 +6,14 @@ description = "GStreamer playback engine with V4L2 H.264 hardware decode for PiC
 
 [features]
 default = []
-hw = ["gstreamer", "gstreamer-app", "gstreamer-video", "gstreamer-audio", "picast-display/hw"]
+hw = ["gstreamer", "picast-display/hw"]
 
 [dependencies]
 picast-display = { path = "../display", default-features = false }
 gstreamer = { version = "0.23", optional = true }
-gstreamer-app = { version = "0.23", optional = true }
-gstreamer-video = { version = "0.23", optional = true }
-gstreamer-audio = { version = "0.23", optional = true }
+# gstreamer-app = { version = "0.23", optional = true }    # Future: for AppSink/AppSrc
+# gstreamer-video = { version = "0.23", optional = true }  # Future: for video caps helpers
+# gstreamer-audio = { version = "0.23", optional = true }  # Future: for audio caps helpers
 tokio = { workspace = true, features = ["sync", "time"] }
 serde = { workspace = true }
 serde_json = { workspace = true }

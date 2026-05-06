@@ -495,7 +495,7 @@ fi
 
 section "10. PiCast Process Runs as Non-Root User"
 
-PICAST_PID=$(pgrep -x picast 2>/dev/null || true)
+PICAST_PID=$(pgrep -f "picast" 2>/dev/null || true)
 
 if [[ -n "$PICAST_PID" ]]; then
     picast_user=$(ps -o user= -p "$PICAST_PID" 2>/dev/null | head -1 || true)

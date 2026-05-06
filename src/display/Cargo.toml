@@ -6,12 +6,12 @@ description = "DRM/KMS atomic modesetting display manager for PiCast on Raspberr
 
 [features]
 default = []
-hw = ["drm", "gbm", "nix"]
+hw = ["drm"]
 
 [dependencies]
 drm = { version = "0.12", optional = true }
-gbm = { version = "0.2", optional = true }
-nix = { version = "0.28", features = ["ioctl"], optional = true }
+# gbm = { version = "0.2", optional = true }  # Future: for GBM buffer allocation
+# nix = { version = "0.28", features = ["ioctl"], optional = true }  # Future: for raw ioctls
 thiserror = { workspace = true }
 tracing = { workspace = true }
 anyhow = { workspace = true }

@@ -21,17 +21,31 @@ use async_trait::async_trait;
 
 // ── Resolver ─────────────────────────────────────────────────────────
 
+/// Metadata returned by the resolver alongside the direct URL.
+#[derive(Debug, Clone)]
+pub struct ResolveInfo {
+    /// The direct, playable media URL.
+    pub direct_url: String,
+    /// Media title (e.g. from yt-dlp), if available.
+    pub title: Option<String>,
+    /// Duration in milliseconds, if known.
+    pub duration_ms: Option<u64>,
+}
+
 /// Resolves a user-supplied URL into a direct, playable media URL.
 ///
 /// Implementations may follow HTTP redirects, extract stream URLs from
 /// web pages, or route traffic through the Tor network.
 #[async_trait]
 pub trait ResolverTrait: Send + Sync {
-    /// Attempt to resolve `url` into a direct media URL.
+    /// Attempt to resolve `url` into a direct media URL with metadata.
     ///
-    /// Returns `Ok(direct_url)` on success or an error describing why
+    /// Returns `Ok(ResolveInfo)` on success or an error describing why
     /// resolution failed.
-    async fn resolve(&self, url: &str) -> Result<String, Box<dyn std::error::Error + Send + Sync>>;
+    async fn resolve(
+        &self,
+        url: &str,
+    ) -> Result<ResolveInfo, Box<dyn std::error::Error + Send + Sync>>;
 }
 
 // ── Playback ─────────────────────────────────────────────────────────
