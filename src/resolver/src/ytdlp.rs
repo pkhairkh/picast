@@ -143,21 +143,20 @@ pub async fn resolve_with_ytdlp_and_subs(
 
     cmd.arg(url);
 
-    let output = tokio::time::timeout(
-        Duration::from_secs(YTDLP_TIMEOUT_SECS),
-        cmd.output(),
-    )
-    .await
-    .map_err(|_| ResolveError::Network(format!("yt-dlp timed out after {}s", YTDLP_TIMEOUT_SECS)))?
-    .map_err(|e| {
-        if e.kind() == std::io::ErrorKind::NotFound {
-            ResolveError::TorUnavailable(
-                "yt-dlp binary not found — install with: pip install yt-dlp".into(),
-            )
-        } else {
-            ResolveError::Network(format!("failed to spawn yt-dlp: {}", e))
-        }
-    })?;
+    let output = tokio::time::timeout(Duration::from_secs(YTDLP_TIMEOUT_SECS), cmd.output())
+        .await
+        .map_err(|_| {
+            ResolveError::Network(format!("yt-dlp timed out after {}s", YTDLP_TIMEOUT_SECS))
+        })?
+        .map_err(|e| {
+            if e.kind() == std::io::ErrorKind::NotFound {
+                ResolveError::TorUnavailable(
+                    "yt-dlp binary not found — install with: pip install yt-dlp".into(),
+                )
+            } else {
+                ResolveError::Network(format!("failed to spawn yt-dlp: {}", e))
+            }
+        })?;
 
     if !output.status.success() {
         let stderr = String::from_utf8_lossy(&output.stderr);

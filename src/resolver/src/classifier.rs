@@ -333,7 +333,10 @@ mod tests {
     #[test]
     fn magnet_links() {
         assert_eq!(classify("magnet:?xt=urn:btih:abc123&dn=test"), UrlCategory::Magnet);
-        assert_eq!(classify("magnet:?xt=urn:btih:deadbeef&tr=udp://tracker.example.com:1337"), UrlCategory::Magnet);
+        assert_eq!(
+            classify("magnet:?xt=urn:btih:deadbeef&tr=udp://tracker.example.com:1337"),
+            UrlCategory::Magnet
+        );
     }
 
     #[test]
@@ -358,10 +361,7 @@ mod tests {
     #[test]
     fn url_with_fragment_preserves_category() {
         // Direct media with fragment.
-        assert_eq!(
-            classify("https://cdn.example.com/video.mp4#t=30"),
-            UrlCategory::DirectMedia
-        );
+        assert_eq!(classify("https://cdn.example.com/video.mp4#t=30"), UrlCategory::DirectMedia);
         // HLS with fragment.
         assert_eq!(
             classify("https://cdn.example.com/stream.m3u8#chapter1"),
@@ -402,10 +402,7 @@ mod tests {
     #[test]
     fn onion_takes_priority_over_media_extension() {
         // An .onion domain with a .mp4 path should classify as Onion, not DirectMedia.
-        assert_eq!(
-            classify("http://xyz123456.onion/video.mp4"),
-            UrlCategory::Onion
-        );
+        assert_eq!(classify("http://xyz123456.onion/video.mp4"), UrlCategory::Onion);
     }
 
     #[test]
@@ -527,15 +524,9 @@ mod tests {
     #[test]
     fn classification_priority_webpage_over_media_extension() {
         // A YouTube URL ending in .mp4 should still be WebPage (known domain takes priority).
-        assert_eq!(
-            classify("https://www.youtube.com/video.mp4"),
-            UrlCategory::WebPage
-        );
+        assert_eq!(classify("https://www.youtube.com/video.mp4"), UrlCategory::WebPage);
         // A Vimeo URL ending in .mp4 should also be WebPage.
-        assert_eq!(
-            classify("https://vimeo.com/video.mp4"),
-            UrlCategory::WebPage
-        );
+        assert_eq!(classify("https://vimeo.com/video.mp4"), UrlCategory::WebPage);
     }
 
     #[test]

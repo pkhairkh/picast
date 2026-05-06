@@ -6,6 +6,8 @@ effort. Tasks are ordered by execution sequence within each phase.
 
 **Status legend:** `[ ]` not started · `[~]` in progress · `[x]` done
 
+**Last verified:** 2026-05-06 — `cargo check --workspace` ✅ · `cargo test --workspace` (327 tests) ✅ · `cargo clippy --workspace -- -D warnings` ✅ · `cargo fmt --check` ✅
+
 ---
 
 ## Phase 0 — Build & CI Foundation

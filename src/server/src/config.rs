@@ -159,11 +159,8 @@ fn default_log_level() -> String {
 // ── Loading & Merging ─────────────────────────────────────────────────
 
 /// Configuration file search paths (in order of priority).
-const CONFIG_SEARCH_PATHS: &[&str] = &[
-    "picast.toml",
-    "/etc/picast/picast.toml",
-    "/usr/local/etc/picast/picast.toml",
-];
+const CONFIG_SEARCH_PATHS: &[&str] =
+    &["picast.toml", "/etc/picast/picast.toml", "/usr/local/etc/picast/picast.toml"];
 
 impl AppConfig {
     /// Load configuration from file (if found) and merge with env vars.
@@ -205,9 +202,8 @@ impl AppConfig {
                 tracing::info!(path = %path, "loading configuration file");
                 let contents = std::fs::read_to_string(&path)
                     .with_context(|| format!("failed to read config file: {}", path))?;
-                let config: AppConfig = toml::from_str(&contents).with_context(|| {
-                    format!("failed to parse config file: {}", path)
-                })?;
+                let config: AppConfig = toml::from_str(&contents)
+                    .with_context(|| format!("failed to parse config file: {}", path))?;
                 tracing::info!(path = %path, "configuration loaded from file");
                 Ok(config)
             },

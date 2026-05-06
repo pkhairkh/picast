@@ -2260,10 +2260,7 @@ mod tests {
         // Second manager: stale session should be cleaned up on startup.
         let mgr2 = SessionManager::new(db_path_str).unwrap();
         assert!(mgr2.load_session(stale_id).is_err(), "stale session should be deleted");
-        assert!(
-            mgr2.load_session(recent_id).is_ok(),
-            "recent session should still exist"
-        );
+        assert!(mgr2.load_session(recent_id).is_ok(), "recent session should still exist");
     }
 
     // ── 6. Watch channel (subscribe_state) ───────────────────────────

@@ -433,9 +433,7 @@ impl PlaybackEngine {
             return Err(PlaybackError::NoPipeline);
         }
         if !self.mock_paused.load(Ordering::Relaxed) {
-            return Err(PlaybackError::InvalidState(
-                "cannot resume — not paused".into(),
-            ));
+            return Err(PlaybackError::InvalidState("cannot resume — not paused".into()));
         }
         self.mock_playing.store(true, Ordering::Relaxed);
         self.mock_paused.store(false, Ordering::Relaxed);
@@ -737,10 +735,7 @@ mod tests {
         }
 
         // Load a URL
-        engine
-            .play("https://example.com/video.mp4", "", "")
-            .await
-            .unwrap();
+        engine.play("https://example.com/video.mp4", "", "").await.unwrap();
 
         // Seek to 5000 ms
         engine.seek(5000).await.expect("mock seek should succeed");
@@ -789,28 +784,19 @@ mod tests {
         assert!(engine.duration_ms().await.is_err());
 
         // Load a URL
-        engine
-            .play("https://example.com/video.mp4", "", "")
-            .await
-            .unwrap();
+        engine.play("https://example.com/video.mp4", "", "").await.unwrap();
 
         // Position should be 0 right after play
         let pos = engine.position_ms().await.expect("position_ms should succeed");
         assert_eq!(pos, 0, "position should be 0 after play");
 
         // Default duration is 300000 ms (5 min)
-        let dur = engine
-            .duration_ms()
-            .await
-            .expect("duration_ms should succeed");
+        let dur = engine.duration_ms().await.expect("duration_ms should succeed");
         assert_eq!(dur, Some(300_000), "default duration should be 300000 ms");
 
         // Set custom duration
         engine.mock_set_duration(600_000);
-        let dur = engine
-            .duration_ms()
-            .await
-            .expect("duration_ms should succeed");
+        let dur = engine.duration_ms().await.expect("duration_ms should succeed");
         assert_eq!(dur, Some(600_000), "duration should be updated to 600000 ms");
     }
 
@@ -823,10 +809,7 @@ mod tests {
         assert!(!health.is_buffering);
 
         // After play, buffer health should be healthy
-        engine
-            .play("https://example.com/video.mp4", "", "")
-            .await
-            .unwrap();
+        engine.play("https://example.com/video.mp4", "", "").await.unwrap();
 
         let health = engine.buffer_health().await;
         assert_eq!(health.fill_percent, 100);
@@ -886,19 +869,13 @@ mod tests {
         let engine = PlaybackEngine::new(PipelineConfig::default()).unwrap();
 
         // Load and seek to some position
-        engine
-            .play("https://example.com/video.mp4", "", "")
-            .await
-            .unwrap();
+        engine.play("https://example.com/video.mp4", "", "").await.unwrap();
         engine.seek(120_000).await.unwrap();
         let pos = engine.position_ms().await.unwrap();
         assert_eq!(pos, 120_000);
 
         // Play again — position should reset to 0
-        engine
-            .play("https://example.com/other.mp4", "", "")
-            .await
-            .unwrap();
+        engine.play("https://example.com/other.mp4", "", "").await.unwrap();
         let pos = engine.position_ms().await.unwrap();
         assert_eq!(pos, 0, "position should reset to 0 on play");
     }
@@ -908,10 +885,7 @@ mod tests {
         let engine = PlaybackEngine::new(PipelineConfig::default()).unwrap();
 
         // Load and play
-        engine
-            .play("https://example.com/video.mp4", "", "")
-            .await
-            .unwrap();
+        engine.play("https://example.com/video.mp4", "", "").await.unwrap();
 
         // Resume while playing should fail
         let result = engine.resume().await;

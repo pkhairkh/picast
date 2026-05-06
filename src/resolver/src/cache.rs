@@ -243,7 +243,11 @@ mod tests {
 
         // The entry should be expired and removed on get.
         assert!(cache.get(url).is_none(), "entry should be expired after 1ms TTL");
-        assert_eq!(cache.len(), 0, "cache should be empty after expired entry is accessed and removed");
+        assert_eq!(
+            cache.len(),
+            0,
+            "cache should be empty after expired entry is accessed and removed"
+        );
     }
 
     #[test]
@@ -278,12 +282,13 @@ mod tests {
         assert!(cache.len() <= 3, "cache should not exceed max_entries");
 
         // video0 (the oldest) should be gone.
-        assert!(cache.get("https://example.com/video0.mp4").is_none(),
-                "oldest entry should be evicted when cache is full");
+        assert!(
+            cache.get("https://example.com/video0.mp4").is_none(),
+            "oldest entry should be evicted when cache is full"
+        );
 
         // video3 (the newest) should be present.
-        assert!(cache.get(url3).is_some(),
-                "newest entry should be present after eviction");
+        assert!(cache.get(url3).is_some(), "newest entry should be present after eviction");
     }
 
     #[test]
@@ -340,7 +345,10 @@ mod tests {
         assert_eq!(cache.len(), 5, "cache should be at max capacity");
 
         // Insert one more — should trigger eviction of oldest.
-        cache.insert("https://example.com/video5.mp4", test_result("https://example.com/video5.mp4"));
+        cache.insert(
+            "https://example.com/video5.mp4",
+            test_result("https://example.com/video5.mp4"),
+        );
         assert!(cache.len() <= 5, "cache should not exceed max capacity after eviction");
     }
 

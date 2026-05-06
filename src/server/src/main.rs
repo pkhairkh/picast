@@ -245,9 +245,11 @@ async fn main() -> Result<()> {
     info!(db = %config.server.db_path, "Session manager created (subsystems wired)");
 
     // ── 6. Protocol servers ───────────────────────────────────────────
-    let http_server = picast_protocols::HttpApiServer::new(&config.server.http_addr, session.clone());
+    let http_server =
+        picast_protocols::HttpApiServer::new(&config.server.http_addr, session.clone());
     let ws_server = picast_protocols::WebSocketServer::new(&config.server.ws_addr, session.clone());
-    let dlna_renderer = picast_protocols::DlnaRenderer::new(&config.dlna.friendly_name, &config.tor.socks_addr);
+    let dlna_renderer =
+        picast_protocols::DlnaRenderer::new(&config.dlna.friendly_name, &config.tor.socks_addr);
 
     info!("all components initialised");
 
