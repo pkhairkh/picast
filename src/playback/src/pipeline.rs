@@ -400,11 +400,10 @@ impl GstPipeline {
                 tracing::error!(%msg);
 
                 // Try to get a more specific error from the bus.
-                let bus = self.pipeline.bus();
-                if let Some(bus) = bus {
-                    while let Ok(msg) = bus.timed_pop(gstreamer::ClockTime::from_mseconds(100)) {
-                        if let Some(msg) = msg {
-                            if let gstreamer::MessageView::Error(err) = msg.view() {
+                if let Some(bus) = self.pipeline.bus() {
+                    while let Some(msg) = bus.timed_pop(gstreamer::ClockTime::from_mseconds(100)) {
+                        match msg.view() {
+                            gstreamer::MessageView::Error(err) => {
                                 tracing::error!(
                                     error = %err.error(),
                                     debug = ?err.debug(),
@@ -415,7 +414,14 @@ impl GstPipeline {
                                     e,
                                     err.error()
                                 )));
-                            }
+                            },
+                            gstreamer::MessageView::Warning(w) => {
+                                tracing::warn!(
+                                    warning = %w.error(),
+                                    "GStreamer warning during preroll"
+                                );
+                            },
+                            _ => {},
                         }
                     }
                 }
