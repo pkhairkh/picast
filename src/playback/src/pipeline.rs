@@ -278,15 +278,24 @@ impl GstPipeline {
                 ))
             })?;
 
-        let kmssink = ElementFactory::make(&config.video_sink)
+        let mut kmssink_builder = ElementFactory::make(&config.video_sink)
             .property_from_str("driver-name", "vc4")
-            .property("plane-id", config.plane_id as i32)
             .property("can-scale", true)
-            .property("force-modesetting", true)
-            .build()
-            .map_err(|e| {
-                PlaybackError::PipelineCreation(format!("{}: {}", config.video_sink, e))
-            })?;
+            .property("force-modesetting", true);
+
+        // Only set plane-id if explicitly configured (> 0).
+        // When plane-id is 0 (default), kmssink auto-detects the best
+        // overlay plane, which is more reliable across kernel versions.
+        if config.plane_id > 0 {
+            kmssink_builder = kmssink_builder.property("plane-id", config.plane_id as i32);
+            tracing::info!(plane_id = config.plane_id, "kmssink: using explicit plane-id");
+        } else {
+            tracing::info!("kmssink: auto-detecting overlay plane (plane-id not set)");
+        }
+
+        let kmssink = kmssink_builder.build().map_err(|e| {
+            PlaybackError::PipelineCreation(format!("{}: {}", config.video_sink, e))
+        })?;
 
         let bin = gstreamer::Bin::new();
         bin.add_many([&video_queue, &v4l2dec, &kmssink]).map_err(|e| {
@@ -326,15 +335,19 @@ impl GstPipeline {
             .build()
             .map_err(|e| PlaybackError::PipelineCreation(format!("videoconvert: {}", e)))?;
 
-        let kmssink = ElementFactory::make(&config.video_sink)
+        let mut kmssink_builder = ElementFactory::make(&config.video_sink)
             .property_from_str("driver-name", "vc4")
-            .property("plane-id", config.plane_id as i32)
             .property("can-scale", true)
-            .property("force-modesetting", true)
-            .build()
-            .map_err(|e| {
-                PlaybackError::PipelineCreation(format!("{}: {}", config.video_sink, e))
-            })?;
+            .property("force-modesetting", true);
+
+        // Only set plane-id if explicitly configured (> 0).
+        if config.plane_id > 0 {
+            kmssink_builder = kmssink_builder.property("plane-id", config.plane_id as i32);
+        }
+
+        let kmssink = kmssink_builder.build().map_err(|e| {
+            PlaybackError::PipelineCreation(format!("{}: {}", config.video_sink, e))
+        })?;
 
         let bin = gstreamer::Bin::new();
         bin.add_many([&video_queue, &avdec, &vconv, &kmssink]).map_err(|e| {
@@ -357,10 +370,67 @@ impl GstPipeline {
     }
 
     /// Transition the pipeline to Playing.
+    ///
+    /// This first transitions to Paused (preroll), which triggers caps
+    /// negotiation and buffer allocation. Once preroll succeeds, we
+    /// transition to Playing. Going directly to Playing from Ready/Null
+    /// can produce a generic "Element failed to change its state" error
+    /// that hides the real cause; the two-step approach surfaces
+    /// negotiation failures earlier with more specific diagnostics.
     pub fn play(&mut self) -> Result<(), PlaybackError> {
+        // Step 1: Preroll — go to Paused to negotiate caps and allocate buffers.
+        let preroll_result = self.pipeline.set_state(State::Paused);
+        match preroll_result {
+            Ok(gstreamer::StateChangeSuccess::Success) => {
+                tracing::debug!("preroll succeeded synchronously");
+            },
+            Ok(gstreamer::StateChangeSuccess::NoPreroll) => {
+                tracing::debug!("preroll: no-preroll element (e.g. live source)");
+            },
+            Ok(gstreamer::StateChangeSuccess::Async) => {
+                tracing::debug!("preroll is async — waiting for ASYNC_DONE");
+                // For async preroll, we proceed to Playing and let the bus
+                // watch report any errors. The pipeline will buffer and then
+                // start playing once enough data is available.
+            },
+            Err(e) => {
+                // Preroll failed — this is where caps negotiation errors,
+                // DRM master failures, and similar issues surface.
+                let msg = format!("set_state Paused (preroll) failed: {}", e);
+                tracing::error!(%msg);
+
+                // Try to get a more specific error from the bus.
+                let bus = self.pipeline.bus();
+                if let Some(bus) = bus {
+                    while let Ok(msg) = bus.timed_pop(gstreamer::ClockTime::from_mseconds(100)) {
+                        if let Some(msg) = msg {
+                            if let gstreamer::MessageView::Error(err) = msg.view() {
+                                tracing::error!(
+                                    error = %err.error(),
+                                    debug = ?err.debug(),
+                                    "GStreamer error during preroll"
+                                );
+                                return Err(PlaybackError::Gstreamer(format!(
+                                    "preroll failed: {} — {}",
+                                    e,
+                                    err.error()
+                                )));
+                            }
+                        }
+                    }
+                }
+
+                return Err(PlaybackError::Gstreamer(msg));
+            },
+        }
+
+        // Step 2: Go to Playing.
         self.pipeline
             .set_state(State::Playing)
-            .map_err(|e| PlaybackError::Gstreamer(format!("set_state Playing: {}", e)))?;
+            .map_err(|e| {
+                tracing::error!(error = %e, "set_state Playing failed after successful preroll");
+                PlaybackError::Gstreamer(format!("set_state Playing: {}", e))
+            })?;
         self.state = PipelineState::Playing;
         tracing::debug!("pipeline transitioned to Playing");
         Ok(())

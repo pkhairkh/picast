@@ -94,9 +94,13 @@ pub enum PlaybackError {
 
 // ── Pipeline Config ──────────────────────────────────────────────────
 
-/// Default plane ID for serde backward compatibility.
+/// Default plane ID — 0 means auto-detect (let kmssink pick the best plane).
+///
+/// On Raspberry Pi 4 with vc4, kmssink can auto-select the video overlay
+/// plane. Hardcoding plane-id=1 may fail on different kernel versions or
+/// display configurations where the plane numbering differs.
 fn default_plane_id() -> u32 {
-    1
+    0
 }
 
 /// Configuration for a GStreamer pipeline instance.
@@ -116,7 +120,9 @@ pub struct PipelineConfig {
     /// Initial volume (0.0 – 1.0).
     pub volume: f64,
     /// DRM plane ID for video overlay (kmssink plane-id property).
-    /// On Pi 4, the video overlay is typically on plane 1+ (not 0, which is the primary plane).
+    /// Set to 0 to let kmssink auto-detect the best overlay plane.
+    /// On Pi 4, the video overlay is typically on plane 1+ (not 0, which is the primary plane),
+    /// but plane numbering varies by kernel version and vc4 configuration.
     #[serde(default = "default_plane_id")]
     pub plane_id: u32,
 }
@@ -129,7 +135,7 @@ impl Default for PipelineConfig {
             buffer_duration_ms: 3000,
             hw_accel: true,
             volume: 1.0,
-            plane_id: 1,
+            plane_id: 0,
         }
     }
 }
@@ -403,7 +409,17 @@ impl PlaybackEngine {
                 MessageView::Error(e) => {
                     let msg = e.error().to_string();
                     let debug_info = e.debug().map(|d| d.to_string());
-                    tracing::error!(error = %msg, debug = ?debug_info, "GStreamer error");
+                    let source_element = e.src().map(|s| {
+                        let path = s.path_string();
+                        // Shorten the path to just the element name for readability.
+                        path.rsplit(':').next().unwrap_or(&path).to_string()
+                    });
+                    tracing::error!(
+                        error = %msg,
+                        debug = ?debug_info,
+                        source = ?source_element,
+                        "GStreamer error"
+                    );
                     let _ =
                         event_tx.send(PlaybackEvent::Error { message: msg, debug: debug_info });
                     is_playing.store(false, Ordering::Relaxed);

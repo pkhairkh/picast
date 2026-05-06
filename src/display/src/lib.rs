@@ -284,13 +284,19 @@ impl DisplayManager {
 
         // Acquire DRM master — required for modesetting ioctls.
         // Without this, all set_crtc / atomic_commit calls fail with EPERM.
+        //
+        // We acquire master temporarily to enumerate resources and save CRTC
+        // state, then drop it so that kmssink (GStreamer) can acquire master
+        // when it starts playback. Only one FD can hold DRM master at a time;
+        // holding it would block kmssink from doing modesetting, causing
+        // "Element failed to change its state" errors.
         fd.acquire_master_lock().map_err(|e| {
             DisplayError::MasterAcquire(format!(
                 "set_master failed: {} (are you root?)",
                 e
             ))
         })?;
-        tracing::info!(fd = fd.as_raw_fd(), "acquired DRM master");
+        tracing::info!(fd = fd.as_raw_fd(), "acquired DRM master (temporary)");
 
         for cap in [drm::ClientCapability::UniversalPlanes, drm::ClientCapability::Atomic] {
             if let Err(e) = fd.set_client_capability(cap, true) {
@@ -414,6 +420,15 @@ impl DisplayManager {
             "acquired CRTC for display"
         );
 
+        // Drop DRM master so kmssink (GStreamer) can acquire it for playback.
+        // If we hold master, kmssink's set_state(Playing) will fail because
+        // only one FD can be DRM master at a time.
+        if let Err(e) = fd.release_master_lock() {
+            tracing::warn!(error = %e, "failed to drop DRM master after saving CRTC state");
+        } else {
+            tracing::info!("released DRM master — kmssink can now acquire it");
+        }
+
         Ok(())
     }
 
@@ -429,37 +444,57 @@ impl DisplayManager {
                 has_mode = saved.mode.is_some(),
                 "restoring saved CRTC state"
             );
-            // Restore CRTC state via atomic modeset.
+            // Restore CRTC state via set_crtc.
             // This requires the DRM fd to still be valid.
             if let Some(ref fd) = self.drm_fd {
-                let crtc_handle = match control::from_u32::<control::crtc::Handle>(saved.crtc_id) {
-                    Some(handle) => handle,
-                    None => {
-                        tracing::warn!(crtc_id = saved.crtc_id, "invalid saved CRTC id");
-                        return Ok(());
-                    },
-                };
-                if let Some(mode) = saved.mode {
-                    let framebuffer = saved
-                        .fb_id
-                        .and_then(control::from_u32::<control::framebuffer::Handle>);
-                    let restore_result = fd.set_crtc(
-                        crtc_handle,
-                        framebuffer,
-                        (saved.x, saved.y),
-                        &[],
-                        Some(mode),
+                // Re-acquire DRM master temporarily to restore the CRTC.
+                // kmssink should have released it when the pipeline went to
+                // NULL, but we handle the case where it still holds master.
+                let has_master = fd.acquire_master_lock().is_ok();
+                if !has_master {
+                    tracing::warn!(
+                        "could not re-acquire DRM master for CRTC restore — \
+                         kmssink may still hold it; skipping CRTC restore"
                     );
-                    match restore_result {
-                        Ok(()) => tracing::info!(crtc_id = saved.crtc_id, "CRTC state restored"),
-                        Err(e) => tracing::warn!(
-                            crtc_id = saved.crtc_id,
-                            error = %e,
-                            "failed to restore CRTC state"
-                        ),
-                    }
                 } else {
-                    tracing::warn!(crtc_id = saved.crtc_id, "no saved mode — cannot restore CRTC");
+                    let crtc_handle =
+                        match control::from_u32::<control::crtc::Handle>(saved.crtc_id) {
+                            Some(handle) => handle,
+                            None => {
+                                tracing::warn!(crtc_id = saved.crtc_id, "invalid saved CRTC id");
+                                let _ = fd.release_master_lock();
+                                self.active_crtc = None;
+                                self.saved_crtc = None;
+                                return Ok(());
+                            },
+                        };
+                    if let Some(mode) = saved.mode {
+                        let framebuffer = saved
+                            .fb_id
+                            .and_then(control::from_u32::<control::framebuffer::Handle>);
+                        let restore_result = fd.set_crtc(
+                            crtc_handle,
+                            framebuffer,
+                            (saved.x, saved.y),
+                            &[],
+                            Some(mode),
+                        );
+                        match restore_result {
+                            Ok(()) => tracing::info!(crtc_id = saved.crtc_id, "CRTC state restored"),
+                            Err(e) => tracing::warn!(
+                                crtc_id = saved.crtc_id,
+                                error = %e,
+                                "failed to restore CRTC state"
+                            ),
+                        }
+                    } else {
+                        tracing::warn!(
+                            crtc_id = saved.crtc_id,
+                            "no saved mode — cannot restore CRTC"
+                        );
+                    }
+                    // Drop DRM master after restoration.
+                    let _ = fd.release_master_lock();
                 }
             } else {
                 tracing::warn!("DRM fd no longer available — cannot restore CRTC state");

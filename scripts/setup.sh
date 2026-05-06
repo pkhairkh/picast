@@ -239,6 +239,7 @@ install_dependencies() {
         gstreamer1.0-plugins-bad
         gstreamer1.0-plugins-ugly
         gstreamer1.0-libav
+        gstreamer1.0-alsa
         gmediarender
         yt-dlp
         python3-pip
@@ -503,31 +504,44 @@ install_picast() {
 
     # Install TOML config file
     mkdir -p /etc/picast
-    if [ -f "${REPO_ROOT}/picast.toml.example" ]; then
+    # Prefer deploy/picast.toml (production Pi config) over picast.toml.example (generic)
+    local toml_source=""
+    if [ -f "${REPO_ROOT}/deploy/picast.toml" ]; then
+        toml_source="${REPO_ROOT}/deploy/picast.toml"
+    elif [ -f "${REPO_ROOT}/picast.toml.example" ]; then
+        toml_source="${REPO_ROOT}/picast.toml.example"
+    fi
+    if [ -n "$toml_source" ]; then
         if [ ! -f /etc/picast/picast.toml ]; then
-            cp "${REPO_ROOT}/picast.toml.example" /etc/picast/picast.toml
+            cp "$toml_source" /etc/picast/picast.toml
             chown picast:picast /etc/picast/picast.toml
             chmod 644 /etc/picast/picast.toml
-            info "Installed config to /etc/picast/picast.toml"
+            info "Installed config to /etc/picast/picast.toml (from $(basename "$toml_source"))"
         else
             info "Config already exists at /etc/picast/picast.toml — not overwriting"
         fi
     else
-        warn "picast.toml.example not found — skipping config installation"
+        warn "No picast.toml found — skipping config installation"
     fi
 
-    # Install systemd service (update ExecStart to match our binary name)
-    if [ -f "${CONFIG_DIR}/picast.service" ]; then
+    # Install systemd service (prefer deploy/ version with Pi-specific hardening)
+    local service_source=""
+    if [ -f "${REPO_ROOT}/deploy/picast.service" ]; then
+        service_source="${REPO_ROOT}/deploy/picast.service"
+    elif [ -f "${CONFIG_DIR}/picast.service" ]; then
+        service_source="${CONFIG_DIR}/picast.service"
+    fi
+    if [ -n "$service_source" ]; then
         backup_file /etc/systemd/system/picast.service
         # Patch ExecStart to use picast-server
         sed 's|ExecStart=/usr/local/bin/picast|ExecStart=/usr/local/bin/picast-server|' \
-            "${CONFIG_DIR}/picast.service" > /etc/systemd/system/picast.service
+            "$service_source" > /etc/systemd/system/picast.service
         chmod 644 /etc/systemd/system/picast.service
         systemctl daemon-reload
         systemctl enable picast
-        info "Systemd service installed and enabled"
+        info "Systemd service installed and enabled (from $(basename "$service_source"))"
     else
-        warn "picast.service not found in ${CONFIG_DIR}"
+        warn "picast.service not found — skipping service installation"
     fi
 }
 
