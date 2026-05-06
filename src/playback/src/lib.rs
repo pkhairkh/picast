@@ -192,6 +192,24 @@ impl std::fmt::Display for DecodeMode {
     }
 }
 
+// ── Negotiation error detection ──────────────────────────────────────
+
+/// Check if a GStreamer error message indicates a caps negotiation failure.
+///
+/// Negotiation errors typically contain phrases like "not negotiated",
+/// "negotiation", or reference V4L2 elements. When these occur with
+/// HW decode, we should automatically fall back to software decode.
+#[cfg(feature = "hw")]
+fn is_negotiation_error(msg: &str) -> bool {
+    let lower = msg.to_lowercase();
+    lower.contains("not negotiated")
+        || lower.contains("negotiation")
+        || lower.contains("not-negotiated")
+        || lower.contains("v4l2h264dec")
+        || lower.contains("no common format")
+        || lower.contains("could not link")
+}
+
 // ── Playback Engine ──────────────────────────────────────────────────
 
 /// The main playback engine backed by GStreamer.
@@ -228,6 +246,10 @@ pub struct PlaybackEngine {
     event_tx: tokio::sync::broadcast::Sender<PlaybackEvent>,
     /// Whether the engine is currently playing.
     is_playing: Arc<AtomicBool>,
+    /// Whether the active pipeline fell back from HW to SW decode.
+    /// Set to `true` after a successful SW fallback, reset on each new play().
+    #[cfg(feature = "hw")]
+    sw_fallback_active: Arc<AtomicBool>,
 
     // ── Mock-mode state (only compiled without `hw` feature) ──────
     /// Whether a URL is loaded in mock mode.
@@ -283,6 +305,8 @@ impl PlaybackEngine {
             #[cfg(feature = "hw")]
             event_tx: tokio::sync::broadcast::channel(64).0,
             is_playing: Arc::new(AtomicBool::new(false)),
+            #[cfg(feature = "hw")]
+            sw_fallback_active: Arc::new(AtomicBool::new(false)),
             #[cfg(not(feature = "hw"))]
             mock_loaded: AtomicBool::new(false),
             #[cfg(not(feature = "hw"))]
@@ -327,6 +351,8 @@ impl PlaybackEngine {
             #[cfg(feature = "hw")]
             event_tx,
             is_playing: Arc::new(AtomicBool::new(false)),
+            #[cfg(feature = "hw")]
+            sw_fallback_active: Arc::new(AtomicBool::new(false)),
             #[cfg(not(feature = "hw"))]
             mock_loaded: AtomicBool::new(false),
             #[cfg(not(feature = "hw"))]
@@ -371,6 +397,9 @@ impl PlaybackEngine {
         if let Some(ref mut existing) = *guard {
             let _ = existing.stop();
         }
+
+        // Reset SW fallback flag for the new playback attempt.
+        self.sw_fallback_active.store(false, Ordering::Relaxed);
 
         tracing::info!(
             url = url,
@@ -440,10 +469,124 @@ impl PlaybackEngine {
         .expect("failed to add bus watch");
         pipeline.set_bus_watch(bus_watch);
 
-        // Start playback.
-        pipeline.play()?;
-        *guard = Some(pipeline);
+        // Start playback — try HW decode first, fall back to SW on failure.
+        match pipeline.play() {
+            Ok(()) => {
+                tracing::info!("pipeline started successfully (hw_accel={})", self.config.hw_accel);
+                *guard = Some(pipeline);
+                Ok(())
+            },
+            Err(PlaybackError::Gstreamer(ref msg)) if self.config.hw_accel && is_negotiation_error(msg) => {
+                // V4L2 caps negotiation failed — fall back to software decode.
+                tracing::warn!(
+                    error = %msg,
+                    "HW decode negotiation failed — falling back to software decode"
+                );
+                drop(guard); // release lock before recursive call
+                self.play_software_fallback(url, socks_addr, isolation_username).await
+            },
+            Err(e) => {
+                tracing::error!(error = %e, "pipeline play() failed");
+                // Try SW fallback if HW accel was enabled.
+                if self.config.hw_accel {
+                    tracing::warn!("attempting software decode fallback after play failure");
+                    drop(guard);
+                    match self.play_software_fallback(url, socks_addr, isolation_username).await {
+                        Ok(()) => Ok(()),
+                        Err(fallback_err) => {
+                            tracing::error!(error = %fallback_err, "software decode fallback also failed");
+                            Err(e) // return original error
+                        },
+                    }
+                } else {
+                    Err(e)
+                }
+            },
+        }
+    }
 
+    /// Attempt software-decode fallback after HW decode failure.
+    ///
+    /// Constructs a new pipeline with `hw_accel = false` and starts
+    /// playback. This uses `avdec_h264` instead of `v4l2h264dec`,
+    /// which avoids V4L2 caps negotiation issues at the cost of
+    /// higher CPU usage.
+    #[cfg(feature = "hw")]
+    async fn play_software_fallback(
+        &self,
+        url: &str,
+        socks_addr: &str,
+        isolation_username: &str,
+    ) -> Result<(), PlaybackError> {
+        let mut guard = self.gst_pipeline.lock().await;
+
+        // Stop any existing pipeline.
+        if let Some(ref mut existing) = *guard {
+            let _ = existing.stop();
+        }
+
+        let mut sw_config = self.config.clone();
+        sw_config.hw_accel = false;
+
+        tracing::info!(
+            url = url,
+            "constructing SOFTWARE DECODE fallback pipeline (avdec_h264 → videoconvert → kmssink)"
+        );
+
+        let mut pipeline = GstPipeline::new(url, socks_addr, isolation_username, &sw_config)?;
+
+        // Set up bus watch for the fallback pipeline.
+        let event_tx = self.event_tx.clone();
+        let is_playing = self.is_playing.clone();
+        let bus = pipeline.pipeline().bus().expect("pipeline should have a bus");
+
+        let bus_watch = bus.add_watch(move |_bus, msg| {
+            use gstreamer::MessageView;
+
+            match msg.view() {
+                MessageView::StateChanged(s) => {
+                    let new_state = s.current();
+                    if new_state == State::Playing {
+                        let _ = event_tx.send(PlaybackEvent::Playing);
+                        is_playing.store(true, Ordering::Relaxed);
+                    } else if new_state == State::Paused {
+                        let _ = event_tx.send(PlaybackEvent::Paused);
+                        is_playing.store(false, Ordering::Relaxed);
+                    }
+                },
+                MessageView::Eos(_) => {
+                    tracing::info!("end of stream reached (SW decode)");
+                    let _ = event_tx.send(PlaybackEvent::EndOfStream);
+                    is_playing.store(false, Ordering::Relaxed);
+                },
+                MessageView::Error(e) => {
+                    let msg = e.error().to_string();
+                    let debug_info = e.debug().map(|d| d.to_string());
+                    tracing::error!(
+                        error = %msg,
+                        debug = ?debug_info,
+                        "GStreamer error (SW decode fallback)"
+                    );
+                    let _ = event_tx.send(PlaybackEvent::Error { message: msg, debug: debug_info });
+                    is_playing.store(false, Ordering::Relaxed);
+                },
+                MessageView::Buffering(b) => {
+                    let percent = b.percent() as u8;
+                    tracing::debug!(percent = percent, "buffering progress (SW decode)");
+                    let _ = event_tx.send(PlaybackEvent::Buffering { percent });
+                },
+                _ => {},
+            }
+
+            gstreamer::glib::ControlFlow::Continue
+        })
+        .expect("failed to add bus watch for SW fallback");
+        pipeline.set_bus_watch(bus_watch);
+
+        pipeline.play()?;
+        self.sw_fallback_active.store(true, Ordering::Relaxed);
+        tracing::info!("software decode fallback pipeline started successfully");
+        *guard = Some(pipeline);
         Ok(())
     }
 
@@ -699,11 +842,15 @@ impl PlaybackEngine {
     /// Return the current decode mode.
     ///
     /// In hardware mode, returns `Hardware` if V4L2 decode is active,
-    /// `Software` if the engine fell back to avdec_h264.
+    /// `Software` if the engine fell back to avdec_h264 (tracked by
+    /// `sw_fallback_active`), or `Software` if hw_accel was disabled
+    /// in the config.
     /// In mock mode, returns the configured decode mode.
     #[cfg(feature = "hw")]
     pub fn decode_mode(&self) -> DecodeMode {
-        if self.config.hw_accel {
+        if self.sw_fallback_active.load(Ordering::Relaxed) {
+            DecodeMode::Software
+        } else if self.config.hw_accel {
             DecodeMode::Hardware
         } else {
             DecodeMode::Software

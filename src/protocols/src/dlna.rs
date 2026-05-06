@@ -247,15 +247,22 @@ impl Drop for DlnaRenderer {
 /// Subscribes to session events and mirrors PiCast state changes
 /// to the gmediarender subprocess lifecycle:
 ///
-/// - **Playing** → ensures gmediarender is running
-/// - **Paused/Stopped/Idle** → no action (gmediarender handles
-///   its own playback via GStreamer pipeline)
-/// - **Error** → logs the error (gmediarender stays running)
+/// - **Resolving** → stops gmediarender early, before PiCast acquires
+///   the display or starts the GStreamer pipeline. Both PiCast and
+///   gmediarender use kmssink for DRM/KMS output, and only one
+///   process can hold DRM master at a time. Stopping gmediarender
+///   as soon as URL resolution begins ensures DRM master is available
+///   when kmssink needs it.
+/// - **Stopped/Idle** → starts gmediarender so DLNA controllers can
+///   discover and cast to PiCast while idle
+/// - **Paused** → gmediarender stays stopped (PiCast still holds DRM)
+/// - **Error** → starts gmediarender so DLNA is available as fallback
 ///
-/// In v1, the synchroniser ensures that gmediarender is started
-/// when a session begins and stopped when the session ends. Full
-/// bidirectional control (DLNA controller → SessionManager) is
-/// deferred to v2 when we implement a proper UPnP control point.
+/// The key insight is that PiCast and gmediarender both use kmssink
+/// for DRM/KMS output, and only one process can hold DRM master at
+/// a time. When PiCast is playing, gmediarender must be stopped;
+/// when PiCast is idle, gmediarender should be running for DLNA
+/// discovery.
 pub async fn run_dlna_sync(
     dlna: Arc<DlnaRenderer>,
     mut event_rx: broadcast::Receiver<SessionEvent>,
@@ -266,28 +273,57 @@ pub async fn run_dlna_sync(
         match event_rx.recv().await {
             Ok(event) => {
                 match &event {
-                    SessionEvent::Playing { .. } => {
-                        // Ensure gmediarender is running when playback starts.
-                        // If it's already running, this is a no-op.
+                    // Stop gmediarender as early as possible — when URL resolution
+                    // starts, not when playback starts. By the time we reach the
+                    // Playing state, the GStreamer pipeline has already been
+                    // constructed and kmssink is trying to acquire DRM master.
+                    // If gmediarender still holds it at that point, kmssink fails.
+                    SessionEvent::Resolving { .. } => {
                         if dlna.is_running().await {
-                            tracing::debug!("session playing — gmediarender already running");
-                        } else {
-                            tracing::info!("session playing — starting gmediarender");
-                            if let Err(e) = dlna.start().await {
+                            tracing::info!(
+                                "session resolving — stopping gmediarender to release DRM early"
+                            );
+                            if let Err(e) = dlna.stop().await {
                                 tracing::warn!(
                                     error = %e,
-                                    "failed to start gmediarender on play — DLNA will be unavailable"
+                                    "failed to stop gmediarender — DRM conflict may occur"
+                                );
+                            }
+                        } else {
+                            tracing::debug!(
+                                "session resolving — gmediarender not running (DRM available)"
+                            );
+                        }
+                    },
+                    // Also handle Playing as a safety net in case the Resolving
+                    // event was missed (e.g., due to broadcast lag).
+                    SessionEvent::Playing { .. } => {
+                        if dlna.is_running().await {
+                            tracing::info!(
+                                "session playing — stopping gmediarender to release DRM"
+                            );
+                            if let Err(e) = dlna.stop().await {
+                                tracing::warn!(
+                                    error = %e,
+                                    "failed to stop gmediarender — DRM conflict may occur"
                                 );
                             }
                         }
                     },
                     SessionEvent::Stopped { .. } => {
-                        // When the session stops, keep gmediarender running.
-                        // It will advertise itself on the network even when idle,
-                        // so DLNA controllers can discover PiCast at any time.
-                        tracing::debug!(
-                            "session stopped — gmediarender stays running for discovery"
-                        );
+                        // Start gmediarender when the session stops so DLNA
+                        // controllers can discover PiCast while idle.
+                        if !dlna.is_running().await {
+                            tracing::info!(
+                                "session stopped — starting gmediarender for DLNA discovery"
+                            );
+                            if let Err(e) = dlna.start().await {
+                                tracing::warn!(
+                                    error = %e,
+                                    "failed to start gmediarender after stop — DLNA unavailable"
+                                );
+                            }
+                        }
                     },
                     SessionEvent::Paused { .. } => {
                         // gmediarender handles pause/resume internally via
@@ -298,14 +334,30 @@ pub async fn run_dlna_sync(
                         // Volume changes from the session layer are not
                         // forwarded to gmediarender in v1. gmediarender
                         // has its own RenderingControl service.
-                        tracing::debug!(volume = %volume, "volume changed — DLNA renderer handles internally");
+                        tracing::debug!(
+                            volume = %volume,
+                            "volume changed — DLNA renderer handles internally"
+                        );
                     },
                     SessionEvent::Error { message, .. } => {
-                        tracing::warn!(error = %message, "session error — DLNA renderer unaffected");
+                        // Start gmediarender on session error so DLNA is
+                        // available as a fallback input method.
+                        tracing::warn!(
+                            error = %message,
+                            "session error — starting gmediarender as fallback"
+                        );
+                        if !dlna.is_running().await {
+                            if let Err(e) = dlna.start().await {
+                                tracing::warn!(
+                                    error = %e,
+                                    "failed to start gmediarender after error"
+                                );
+                            }
+                        }
                     },
                     _ => {
-                        // Other events (Resolving, Buffering, etc.) are not
-                        // relevant to the DLNA renderer in v1.
+                        // Other events (Created, Resolved, Buffering, etc.)
+                        // are not relevant to the DLNA renderer in v1.
                     },
                 }
             },
