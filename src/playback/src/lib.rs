@@ -486,24 +486,13 @@ impl PlaybackEngine {
         .expect("failed to add bus watch");
         pipeline.set_bus_watch(bus_watch);
 
-        // Move pipeline.play() to a blocking thread so we don't block the
-        // tokio runtime.  pipeline.play() can block for up to 10 seconds
-        // waiting for GStreamer async preroll.  If we block the tokio
-        // runtime, the systemd watchdog heartbeat (sent every 10s) can't
-        // be dispatched, and systemd kills the process after WatchdogSec=30.
-        //
-        // The mutex is NOT held during this blocking call, so stop() and
-        // other operations can still acquire the lock while play() is
-        // waiting for preroll.
-        let (pipeline, play_result) = tokio::task::spawn_blocking(move || {
-            let mut p = pipeline;
-            let result = p.play();
-            (p, result)
-        })
-        .await
-        .map_err(|e| PlaybackError::Gstreamer(format!("play task panicked: {}", e)))?;
+        // pipeline.play() is non-blocking — it calls set_state(Playing) which
+        // starts the async state transition and returns immediately. GStreamer
+        // handles CDN connection, preroll, and caps negotiation in the background.
+        // Errors surface on the bus and are handled by the bus watch above.
+        let play_result = pipeline.play();
 
-        // Re-acquire the lock and handle the result.
+        // Store pipeline and handle result.
         let mut guard = self.gst_pipeline.lock().await;
 
         // Start playback — try HW decode first, fall back to SW on failure.
@@ -641,19 +630,12 @@ impl PlaybackEngine {
         .expect("failed to add bus watch for SW fallback");
         pipeline.set_bus_watch(bus_watch);
 
-        // Use spawn_blocking so pipeline.play() doesn't block the tokio runtime.
-        let (pipeline, play_result) = tokio::task::spawn_blocking(move || {
-            let mut p = pipeline;
-            let result = p.play();
-            (p, result)
-        })
-        .await
-        .map_err(|e| PlaybackError::Gstreamer(format!("SW fallback play task panicked: {}", e)))?;
-
-        let mut guard = self.gst_pipeline.lock().await;
-        play_result?;
+        // pipeline.play() is non-blocking.
+        pipeline.play()?;
         self.sw_fallback_active.store(true, Ordering::Relaxed);
         tracing::info!("software decode fallback pipeline started successfully");
+
+        let mut guard = self.gst_pipeline.lock().await;
         *guard = Some(pipeline);
         Ok(())
     }

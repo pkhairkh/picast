@@ -556,135 +556,53 @@ impl GstPipeline {
 
     /// Transition the pipeline to Playing.
     ///
-    /// This first transitions to Paused (preroll), which triggers caps
-    /// negotiation and buffer allocation. Once preroll succeeds, we
-    /// transition to Playing. Going directly to Playing from Ready/Null
-    /// can produce a generic "Element failed to change its state" error
-    /// that hides the real cause; the two-step approach surfaces
-    /// negotiation failures earlier with more specific diagnostics.
+    /// Sets the pipeline directly to Playing. GStreamer internally goes
+    /// through the Paused (preroll) state first, but we don't block
+    /// waiting for preroll — the state change happens asynchronously.
+    /// When the CDN is slow, preroll can take many seconds, and blocking
+    /// would starve the tokio runtime (watchdog heartbeat, API handlers).
+    ///
+    /// Errors from caps negotiation or DRM failures surface on the GStreamer
+    /// bus and are handled by the bus watch in PlaybackEngine.
     pub fn play(&mut self) -> Result<(), PlaybackError> {
-        // Step 1: Preroll — go to Paused to negotiate caps and allocate buffers.
-        let preroll_result = self.pipeline.set_state(State::Paused);
-        match preroll_result {
+        // Go directly to Playing. GStreamer will internally transition
+        // through Paused (preroll) first. When set_state returns:
+        //   Ok(Success) — pipeline is already Playing (e.g. local file)
+        //   Ok(Async)   — pipeline is transitioning asynchronously
+        //   Ok(NoPreroll) — live source, no preroll needed
+        //   Err(...)    — immediate failure (rare; most errors are async)
+        let result = self.pipeline.set_state(State::Playing);
+        match result {
             Ok(gstreamer::StateChangeSuccess::Success) => {
-                tracing::info!("preroll succeeded synchronously");
-            },
-            Ok(gstreamer::StateChangeSuccess::NoPreroll) => {
-                tracing::info!("preroll: no-preroll element (e.g. live source)");
+                tracing::info!("pipeline transitioned to Playing synchronously");
             },
             Ok(gstreamer::StateChangeSuccess::Async) => {
-                tracing::info!("preroll is async — waiting for state change to complete");
-                // When set_state(Paused) returns Async, caps negotiation and
-                // buffer allocation happen asynchronously. We MUST wait for the
-                // state change to complete before proceeding to Playing — otherwise
-                // caps negotiation failures (e.g. v4l2h264dec ↔ kmssink) are only
-                // reported on the bus *after* play() returns Ok, which means the
-                // SW fallback in PlaybackEngine never triggers.
-                //
-                // state() blocks until the state change succeeds or fails.
-                // On failure, it returns Err and we can read the specific error
-                // from the bus. The timeout is set to 10 seconds — well below
-                // the systemd WatchdogSec=30 to ensure we return before the
-                // watchdog kills the process. 10s is enough for most CDN sources
-                // to buffer the first frames; if not, the error is caught and
-                // the SW fallback or a retry can be attempted.
-                //
-                // IMPORTANT: The caller (PlaybackEngine) MUST wrap this call in
-                // tokio::task::spawn_blocking() to avoid blocking the tokio
-                // runtime, which would prevent the watchdog heartbeat from being
-                // sent and cause systemd to kill the process.
-                //
-                // Note: gstreamer-rs 0.23 names this method `state()`, not
-                // `get_state()`. It returns a 3-tuple:
-                //   (Result<StateChangeSuccess, StateChangeError>, current, pending)
-                let (state_result, current, pending) =
-                    self.pipeline.state(gstreamer::ClockTime::from_seconds(10));
-                match state_result {
-                    Ok(gstreamer::StateChangeSuccess::Success) => {
-                        tracing::info!(
-                            ?current,
-                            ?pending,
-                            "async preroll completed successfully"
-                        );
-                    },
-                    Ok(gstreamer::StateChangeSuccess::NoPreroll) => {
-                        tracing::info!(
-                            ?current,
-                            ?pending,
-                            "async preroll completed (no-preroll element)"
-                        );
-                    },
-                    Ok(gstreamer::StateChangeSuccess::Async) => {
-                        // The 10s timeout expired but the state change is still
-                        // in progress (current=Ready/Paused, pending=Paused/Playing).
-                        // This is common for slow CDN sources that take time to
-                        // buffer the first frames. Rather than failing, we proceed
-                        // to Playing — GStreamer will complete the transition
-                        // asynchronously. If there's a real error, it will surface
-                        // on the bus as an Error message and the bus watch will
-                        // handle it.
-                        tracing::warn!(
-                            ?current,
-                            ?pending,
-                            "async preroll timed out after 10s — \
-                             proceeding to Playing (state change still in progress)"
-                        );
-                    },
-                    Err(e) => {
-                        let msg = format!("async preroll failed: {}", e);
-                        tracing::error!(%msg);
-
-                        // Try to get a more specific error from the bus.
-                        if let Some(bus) = self.pipeline.bus() {
-                            while let Some(bus_msg) =
-                                bus.timed_pop(gstreamer::ClockTime::from_mseconds(500))
-                            {
-                                match bus_msg.view() {
-                                    gstreamer::MessageView::Error(err) => {
-                                        tracing::error!(
-                                            error = %err.error(),
-                                            debug = ?err.debug(),
-                                            "GStreamer error during async preroll"
-                                        );
-                                        return Err(PlaybackError::Gstreamer(format!(
-                                            "async preroll failed: {} — {}",
-                                            e,
-                                            err.error()
-                                        )));
-                                    },
-                                    gstreamer::MessageView::Warning(w) => {
-                                        tracing::warn!(
-                                            warning = %w.error(),
-                                            "GStreamer warning during async preroll"
-                                        );
-                                    },
-                                    _ => {},
-                                }
-                            }
-                        }
-
-                        return Err(PlaybackError::Gstreamer(msg));
-                    },
-                }
+                tracing::info!(
+                    "pipeline state change to Playing accepted (async — \
+                     GStreamer is connecting to CDN and prerolling in the background)"
+                );
+            },
+            Ok(gstreamer::StateChangeSuccess::NoPreroll) => {
+                tracing::info!("pipeline transitioned to Playing (no-preroll / live source)");
             },
             Err(e) => {
-                // Preroll failed — this is where caps negotiation errors,
-                // DRM master failures, and similar issues surface.
-                let msg = format!("set_state Paused (preroll) failed: {}", e);
+                let msg = format!("set_state Playing failed: {}", e);
                 tracing::error!(%msg);
 
                 // Try to get a more specific error from the bus.
                 if let Some(bus) = self.pipeline.bus() {
-                    while let Some(msg) = bus.timed_pop(gstreamer::ClockTime::from_mseconds(100)) {
-                        match msg.view() {
+                    while let Some(bus_msg) =
+                        bus.timed_pop(gstreamer::ClockTime::from_mseconds(500))
+                    {
+                        match bus_msg.view() {
                             gstreamer::MessageView::Error(err) => {
                                 tracing::error!(
                                     error = %err.error(),
                                     debug = ?err.debug(),
-                                    "GStreamer error during preroll"
+                                    "GStreamer error during set_state Playing"
                                 );
                                 return Err(PlaybackError::Gstreamer(format!(
-                                    "preroll failed: {} — {}",
+                                    "{} — {}",
                                     e,
                                     err.error()
                                 )));
@@ -692,7 +610,7 @@ impl GstPipeline {
                             gstreamer::MessageView::Warning(w) => {
                                 tracing::warn!(
                                     warning = %w.error(),
-                                    "GStreamer warning during preroll"
+                                    "GStreamer warning during set_state Playing"
                                 );
                             },
                             _ => {},
@@ -704,15 +622,7 @@ impl GstPipeline {
             },
         }
 
-        // Step 2: Go to Playing.
-        self.pipeline
-            .set_state(State::Playing)
-            .map_err(|e| {
-                tracing::error!(error = %e, "set_state Playing failed after successful preroll");
-                PlaybackError::Gstreamer(format!("set_state Playing: {}", e))
-            })?;
         self.state = PipelineState::Playing;
-        tracing::info!("pipeline transitioned to Playing");
         Ok(())
     }
 
