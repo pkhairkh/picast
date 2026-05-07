@@ -25,8 +25,15 @@ use tokio::time::timeout;
 const UA: &str = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36";
 
 /// Build a reqwest client with cookie jar and browser-like defaults.
-fn build_client() -> Result<reqwest::Client, ResolveError> {
-    reqwest::Client::builder()
+///
+/// When `socks5_proxy` is provided, all requests route through the given
+/// SOCKS5h proxy (e.g. `socks5h://picast-hash@127.0.0.1:9050`).
+/// This is CRITICAL for CDN token validity: the CDN binds its download
+/// tokens to the requesting IP. If the resolver fetches the page through
+/// clearnet but the playback fetches through Tor, the IPs won't match
+/// and the CDN returns 403 Forbidden. Both MUST use the same Tor circuit.
+fn build_client(socks5_proxy: Option<&str>) -> Result<reqwest::Client, ResolveError> {
+    let mut builder = reqwest::Client::builder()
         .timeout(Duration::from_secs(CUSTOM_RESOLVER_TIMEOUT_SECS))
         .user_agent(UA)
         .cookie_store(true)
@@ -34,7 +41,16 @@ fn build_client() -> Result<reqwest::Client, ResolveError> {
         .redirect(reqwest::redirect::Policy::limited(10))
         // Accept gzip/br to look like a real browser.
         .gzip(true)
-        .brotli(true)
+        .brotli(true);
+
+    if let Some(proxy_url) = socks5_proxy {
+        let proxy = reqwest::Proxy::all(proxy_url)
+            .map_err(|e| ResolveError::Network(format!("failed to configure SOCKS5 proxy: {}", e)))?;
+        builder = builder.proxy(proxy);
+        tracing::info!(proxy = %proxy_url, "custom resolver: routing through Tor SOCKS5h proxy (same circuit as playback)");
+    }
+
+    builder
         .build()
         .map_err(|e| ResolveError::Network(format!("failed to build HTTP client: {}", e)))
 }
@@ -111,8 +127,13 @@ pub fn is_doodstream_domain(host: &str) -> bool {
 /// 3. Try Method 7: decode the MKGMa-encoded source.
 /// 4. Try Method 6: decode the `a168c` Base64-encoded source.
 /// 5. Fallback: search for `var source = '...'` and direct `.mp4`/`.m3u8` URLs.
-pub async fn resolve_voe(url: &str) -> Result<ResolveResult, ResolveError> {
-    let client = build_client()?;
+///
+/// `socks5_proxy` should be a full SOCKS5h proxy URL with isolation
+/// username, e.g. `socks5h://picast-abc123@127.0.0.1:9050`. This ensures
+/// the page fetch goes through the same Tor circuit as the media fetch,
+/// so the CDN's IP-bound token matches.
+pub async fn resolve_voe(url: &str, socks5_proxy: Option<&str>) -> Result<ResolveResult, ResolveError> {
+    let client = build_client(socks5_proxy)?;
 
     // Follow the initial URL, then check for JS redirects.
     let html_text = fetch_page(&client, url, None).await?;
@@ -171,8 +192,13 @@ pub async fn resolve_voe(url: &str) -> Result<ResolveResult, ResolveError> {
 /// 1. Fetch the page and look for an embed iframe (`/e/...`).
 /// 2. Fetch the embed page and look for the `download` link.
 /// 3. Extract the direct media URL from the download page.
-pub async fn resolve_doodstream(url: &str) -> Result<ResolveResult, ResolveError> {
-    let client = build_client()?;
+///
+/// `socks5_proxy` should be a full SOCKS5h proxy URL with isolation
+/// username, e.g. `socks5h://picast-abc123@127.0.0.1:9050`. This ensures
+/// the page fetch goes through the same Tor circuit as the media fetch,
+/// so the CDN's IP-bound token matches.
+pub async fn resolve_doodstream(url: &str, socks5_proxy: Option<&str>) -> Result<ResolveResult, ResolveError> {
+    let client = build_client(socks5_proxy)?;
 
     // DoodStream pages often sit behind Cloudflare.  The main /d/ page may
     // return 403, but the /e/ (embed) page is usually less protected because

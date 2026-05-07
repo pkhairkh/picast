@@ -276,9 +276,24 @@ impl Resolver {
             UrlCategory::WebPage => {
                 // Check custom resolvers first (Voe, DoodStream, etc.)
                 if let Some(host) = parsed.host_str() {
+                    // Build the SOCKS5h proxy URL with isolation username for
+                    // the custom resolvers. This is CRITICAL: CDNs like Voe
+                    // bind their download tokens to the requesting IP. If the
+                    // custom resolver fetches the page through clearnet (real
+                    // IP) but the playback pipeline fetches through Tor
+                    // (different IP), the CDN returns 403 Forbidden. Both
+                    // MUST go through the same Tor circuit so the IP matches.
+                    let socks_addr = self.tor.socks_addr();
+                    let isolation = picast_tor::TorManager::isolation_username(host);
+                    let socks5_proxy = if !socks_addr.is_empty() {
+                        Some(format!("socks5h://{}@{}", isolation, socks_addr))
+                    } else {
+                        None
+                    };
+
                     if custom::is_voe_domain(host) {
                         tracing::info!(url = url, resolver = "voe", "using Voe custom resolver");
-                        let mut result = custom::resolve_voe(url).await?;
+                        let mut result = custom::resolve_voe(url, socks5_proxy.as_deref()).await?;
                         result.category = UrlCategory::WebPage;
                         // Cache before returning so subsequent requests hit the cache.
                         {
@@ -289,7 +304,7 @@ impl Resolver {
                     }
                     if custom::is_doodstream_domain(host) {
                         tracing::info!(url = url, resolver = "doodstream", "using DoodStream custom resolver");
-                        let mut result = custom::resolve_doodstream(url).await?;
+                        let mut result = custom::resolve_doodstream(url, socks5_proxy.as_deref()).await?;
                         result.category = UrlCategory::WebPage;
                         // Cache before returning so subsequent requests hit the cache.
                         {
