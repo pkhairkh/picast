@@ -504,7 +504,19 @@ impl GstPipeline {
         // use it (and skip driver-name).  Otherwise, use driver-name to
         // let kmssink find and open the device itself.
         let mut kmssink_builder = ElementFactory::make(&config.video_sink)
-            .property("can-scale", true);
+            .property("can-scale", true)
+            // Set async=false so kmssink does NOT block the pipeline's
+            // READY→PAUSED transition waiting for the first video frame
+            // to be decoded and rendered.  Without this, kmssink stays
+            // ASYNC during preroll and the entire pipeline gets stuck at
+            // READY with pending=PLAYING — video never appears.
+            //
+            // With async=false, kmssink completes its state change
+            // immediately, and when video frames eventually arrive from
+            // v4l2h264dec, they render normally.  This is the same
+            // approach used for alsasink (see audio sink construction
+            // for the detailed rationale).
+            .property("async", false);
 
         if let Some(drm_fd) = config.drm_fd {
             if drm_fd >= 0 {
@@ -585,9 +597,8 @@ impl GstPipeline {
             .map_err(|e| PlaybackError::PipelineCreation(format!("videoconvert: {}", e)))?;
 
         let mut kmssink_builder = ElementFactory::make(&config.video_sink)
-            .property("can-scale", true);
-
-        // fd and driver-name are mutually exclusive in kmssink.
+            .property("can-scale", true)
+            .property("async", false);
         if let Some(drm_fd) = config.drm_fd {
             if drm_fd >= 0 {
                 kmssink_builder = kmssink_builder.property("fd", drm_fd);

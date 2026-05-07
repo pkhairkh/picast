@@ -475,9 +475,6 @@ impl PlaybackEngine {
         let event_tx = self.event_tx.clone();
         let is_playing = self.is_playing.clone();
         let bus = pipeline.pipeline().bus().expect("pipeline should have a bus");
-        // We need a weak reference to push the Paused→Playing transition
-        // after preroll completes (see StateChanged handler below).
-        let pipeline_weak = pipeline.pipeline().downgrade();
 
         let bus_watch = bus.add_watch(move |_bus, msg| {
             use gstreamer::MessageView;
@@ -786,7 +783,6 @@ impl PlaybackEngine {
         let event_tx = self.event_tx.clone();
         let is_playing = self.is_playing.clone();
         let bus = pipeline.pipeline().bus().expect("pipeline should have a bus");
-        let pipeline_weak = pipeline.pipeline().downgrade();
 
         let bus_watch = bus.add_watch(move |_bus, msg| {
             use gstreamer::MessageView;
