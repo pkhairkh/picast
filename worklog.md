@@ -39,3 +39,29 @@ Stage Summary:
 - With the domain now in the list, the custom Voe resolver will be used
 - This means the SOCKS5 auth fix can be properly tested on next deploy
 - User needs to `git pull && ./deploy.sh` on the Pi to test
+
+---
+Task ID: 3
+Agent: main
+Task: Fix low FPS and Bluetooth audio
+
+Work Log:
+- Identified that Tor throughput (~1-5 Mbps) can't sustain 25fps 720p without buffering
+- Enabled use-buffering=true on queue2 with 100MB buffer (was 50MB, use-buffering=false)
+- Added proper BUFFERING message handling in bus watch:
+  - Initial buffering: wait for 80% fill before playing
+  - During playback: pause at <10%, resume at >=80%
+  - Added initial_buffering flag to prevent premature auto-play
+- Added FPS measurement via position sampling in 20s diagnostic
+- Added pulsesink support for Bluetooth audio:
+  - Pipeline now supports audio_sink="pulsesink" config
+  - /api/audio-devices now detects PulseAudio sinks (including Bluetooth)
+  - POST /api/audio-device now accepts sink_type parameter
+  - Added set_audio_sink() through entire stack
+- Committed and pushed as a020f57
+
+Stage Summary:
+- FPS fix: buffering mode with 100MB buffer should smooth out Tor throughput
+- Audio fix: pulsesink + PulseAudio detection enables Bluetooth audio
+- User needs to git pull && ./deploy.sh
+- For Bluetooth: connect device, set sink_type to pulsesink via API
