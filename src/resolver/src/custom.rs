@@ -61,15 +61,35 @@ const CUSTOM_RESOLVER_TIMEOUT_SECS: u64 = 15;
 /// Known Voe CDN front-end domains. Voe rotates these frequently; the
 /// list below covers the most common ones. The `voe.sx` domain itself
 /// simply redirects to one of these CDN domains.
+///
+/// IMPORTANT: When a Voe video fails to resolve (especially if it falls
+/// through to yt-dlp and fails), check the domain in the URL. If it's
+/// not in this list, add it — otherwise the custom Voe resolver won't
+/// be triggered and yt-dlp will be used instead (which often fails for
+/// Voe front-ends due to their obfuscation).
 const VOE_DOMAINS: &[&str] = &[
     "voe.sx",
+    // Active front-end domains (rotated frequently by Voe)
     "charlessheimprove.com",
+    "brittanyaheadnew.com",
     "cactusheadroomscaling.com",
     "chaliceguzzlerlandlord.com",
     "reedunpack.com",
+    "ventilationfacility.com",
+    "emberexactly.com",
+    "butterflyblow.com",
+    "antelopeheat.com",
+    "lightninglight.com",
+    "bubblyland.com",
+    "fanaticallyten.com",
+    "fringeoutcast.com",
+    "ballisticdisease.com",
+    // Unblock proxies
     "voe-unblock.com",
     "voeunblock.com",
     "voeunbl0ck.com",
+    "voe-unblk.com",
+    "voeunblk.com",
 ];
 
 /// Known DoodStream front-end domains.
@@ -859,6 +879,7 @@ mod tests {
     fn test_is_voe_domain() {
         assert!(is_voe_domain("voe.sx"));
         assert!(is_voe_domain("charlessheimprove.com"));
+        assert!(is_voe_domain("brittanyaheadnew.com"));
         assert!(is_voe_domain("sub.charlessheimprove.com"));
         assert!(!is_voe_domain("youtube.com"));
     }
