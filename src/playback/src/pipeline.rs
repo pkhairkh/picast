@@ -155,25 +155,20 @@ impl GstPipeline {
             tracing::debug!("souphttpsrc: extra-headers configured");
         }
 
-        // Configure SOCKS5h proxy if provided. The proxy is only used when:
+        // Configure SOCKS5h proxy if provided. The proxy is used when:
         //   1. A proxy address is configured (Tor is available)
         //   2. The URL is NOT a loopback address
-        //   3. The URL is an .onion address (requires Tor to reach)
         //
-        // Clearnet CDN URLs are fetched DIRECTLY — routing multi-megabyte
-        // video downloads through Tor is extremely slow (often < 100 KB/s)
-        // and causes souphttpsrc to time out during preroll. The Tor proxy
-        // is needed for URL *resolution* (bypassing Cloudflare, accessing
-        // onion sites), but the resolved CDN media URL should be fetched
-        // directly for acceptable throughput.
+        // ALL non-loopback traffic goes through Tor — this is a core
+        // security property of PiCast. Routing media through Tor is slower
+        // than direct, but privacy is non-negotiable: the user's ISP must
+        // never see which content is being accessed. The Tor SOCKS proxy
+        // handles DNS resolution (SOCKS5h) to prevent DNS leaks as well.
         let is_loopback_url = url.starts_with("http://127.0.0.1:")
             || url.starts_with("http://localhost:")
             || url.starts_with("http://[::1]:");
-        let is_onion_url = url.contains(".onion/")
-            || url.contains(".onion:")
-            || url.ends_with(".onion");
 
-        let use_proxy = !socks_addr.is_empty() && !is_loopback_url && is_onion_url;
+        let use_proxy = !socks_addr.is_empty() && !is_loopback_url;
 
         if use_proxy {
             let parts: Vec<&str> = socks_addr.split(':').collect();
@@ -191,7 +186,7 @@ impl GstPipeline {
                     host = host,
                     port = port,
                     user = isolation_username,
-                    "SOCKS5h proxy configured on souphttpsrc (onion URL)"
+                    "SOCKS5h proxy configured on souphttpsrc (all traffic through Tor)"
                 );
             } else if src.find_property("proxy").is_some() {
                 let proxy = format!("socks5h://{}@{}:{}", isolation_username, host, port);
@@ -200,7 +195,7 @@ impl GstPipeline {
                     host = host,
                     port = port,
                     user = isolation_username,
-                    "SOCKS proxy URI configured on souphttpsrc (onion URL)"
+                    "SOCKS proxy URI configured on souphttpsrc (all traffic through Tor)"
                 );
             } else {
                 tracing::warn!(
@@ -209,10 +204,8 @@ impl GstPipeline {
             }
         } else if is_loopback_url {
             tracing::debug!("loopback media URL detected; skipping playback proxy");
-        } else if !is_onion_url && !socks_addr.is_empty() {
-            tracing::info!(
-                "clearnet media URL detected; fetching directly (not through Tor proxy) for performance"
-            );
+        } else if socks_addr.is_empty() {
+            tracing::info!("no Tor proxy configured; fetching media directly");
         }
 
         // ── Buffer element ──────────────────────────────────────────
@@ -675,14 +668,34 @@ impl GstPipeline {
         v4l2dec.set_property_from_str("capture-io-mode", "dmabuf");
 
         // Verify the properties were actually set by reading them back.
-        // GEnum properties return the nick name as a string.
-        let output_mode = v4l2dec.property::<String>("output-io-mode");
-        let capture_mode = v4l2dec.property::<String>("capture-io-mode");
+        // GEnum properties return integer values, not strings.
+        // v4l2h264dec io-mode enum: 0=auto, 1=rw, 2=mmap, 3=dmabuf, 4=dmabuf-import
+        let output_mode: i32 = v4l2dec.property("output-io-mode");
+        let capture_mode: i32 = v4l2dec.property("capture-io-mode");
+        let mode_name = |v: i32| -> &'static str {
+            match v {
+                0 => "auto",
+                1 => "rw",
+                2 => "mmap",
+                3 => "dmabuf",
+                4 => "dmabuf-import",
+                _ => "unknown",
+            }
+        };
         tracing::info!(
-            output_io_mode = %output_mode,
-            capture_io_mode = %capture_mode,
+            output_io_mode = %mode_name(output_mode),
+            output_io_mode_raw = output_mode,
+            capture_io_mode = %mode_name(capture_mode),
+            capture_io_mode_raw = capture_mode,
             "v4l2h264dec: io-mode properties set (expect 'dmabuf' for zero-copy)"
         );
+        if output_mode != 3 || capture_mode != 3 {
+            tracing::error!(
+                output_io_mode = %mode_name(output_mode),
+                capture_io_mode = %mode_name(capture_mode),
+                "v4l2h264dec: FAILED to set dmabuf io-mode! Zero-copy will NOT work."
+            );
+        }
 
         // Build kmssink.  The fd and driver-name properties are mutually
         // exclusive in kmssink: setting both causes a warning "Can't set
