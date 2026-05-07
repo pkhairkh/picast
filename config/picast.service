@@ -29,6 +29,8 @@ CapabilityBoundingSet=CAP_SYS_ADMIN
 Environment=RUST_LOG=picast=info
 Environment=HOME=/var/lib/picast
 Environment=XDG_CACHE_HOME=/var/lib/picast/.cache
+Environment=PICAST_RUNTIME_DIR=/run/picast
+Environment=TMPDIR=/run/picast
 
 # Main executable
 ExecStart=/usr/local/bin/picast-server --config /etc/picast/picast.toml
@@ -44,11 +46,16 @@ RestartSec=5
 # If no heartbeat is received within 30s, systemd restarts the service.
 WatchdogSec=30
 
+RuntimeDirectory=picast
+RuntimeDirectoryMode=0755
+StateDirectory=picast
+StateDirectoryMode=0755
+
 # Hardening
 NoNewPrivileges=true
 ProtectSystem=strict
 ProtectHome=true
-ReadWritePaths=/tmp/picast /var/lib/picast /etc/picast
+ReadWritePaths=/run/picast /var/lib/picast /etc/picast
 PrivateTmp=false
 ProtectKernelTunables=true
 ProtectKernelModules=true

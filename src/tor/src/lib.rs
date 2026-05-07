@@ -15,13 +15,19 @@
 
 use hex::ToHex;
 use sha2::{Digest, Sha256};
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use thiserror::Error;
 use tokio::io::{AsyncBufReadExt, AsyncReadExt, AsyncWriteExt, BufReader};
 use tokio::net::TcpStream;
 use tokio::process::{Child, Command};
 use tokio::sync::Mutex;
+
+fn runtime_dir() -> PathBuf {
+    std::env::var_os("PICAST_RUNTIME_DIR")
+        .map(PathBuf::from)
+        .unwrap_or_else(|| PathBuf::from("/tmp/picast"))
+}
 
 // ── Stream Isolation ─────────────────────────────────────────────────
 
@@ -243,9 +249,9 @@ impl TorManager {
         let tor_path = which_tor()?;
 
         // Ensure the DataDirectory exists so Tor can write its state.
-        let data_dir = std::path::Path::new("/tmp/picast/tor-data");
+        let data_dir = runtime_dir().join("tor-data");
         if !data_dir.exists() {
-            let _ = std::fs::create_dir_all(data_dir);
+            let _ = std::fs::create_dir_all(&data_dir);
         }
 
         // Spawn Tor as a child process.
@@ -383,9 +389,9 @@ impl TorManager {
                                 }
                             };
 
-                            let data_dir = std::path::Path::new("/tmp/picast/tor-data");
+                            let data_dir = runtime_dir().join("tor-data");
                             if !data_dir.exists() {
-                                let _ = std::fs::create_dir_all(data_dir);
+                                let _ = std::fs::create_dir_all(&data_dir);
                             }
 
                             match Command::new(&tor_path)

@@ -805,7 +805,7 @@ impl PlaybackEngine {
 
                             // Point to GStreamer debug log for details
                             tracing::warn!(
-                                "check /tmp/picast/gst-debug.log for detailed kmssink/v4l2h264dec debug output. \
+                                "check GST_DEBUG_FILE, usually /run/picast/gst-debug.log under systemd, for detailed kmssink/v4l2h264dec debug output. \
                                  For caps negotiation issues, set GST_DEBUG=kmssink:6,v4l2h264dec:6,h264parse:5,GST_CAPS:6,GST_PADS:5"
                             );
                         }
