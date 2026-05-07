@@ -46,6 +46,18 @@ pub trait ResolverTrait: Send + Sync {
         &self,
         url: &str,
     ) -> Result<ResolveInfo, Box<dyn std::error::Error + Send + Sync>>;
+
+    /// Invalidate any cached resolution result for `url`.
+    ///
+    /// This forces the next `resolve()` call to make a fresh network
+    /// request instead of returning a stale result. Used when the CDN
+    /// returns 403 Forbidden due to an IP-bound token that no longer
+    /// matches the current Tor exit IP — re-resolving gets a fresh
+    /// URL bound to the current exit IP.
+    async fn invalidate_cache(
+        &self,
+        url: &str,
+    );
 }
 
 // ── Playback ─────────────────────────────────────────────────────────

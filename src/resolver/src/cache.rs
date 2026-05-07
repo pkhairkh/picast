@@ -189,6 +189,24 @@ impl ResolveCache {
         let _ = conn.execute("DELETE FROM resolved_urls", []);
     }
 
+    /// Delete a specific entry from the cache by source URL.
+    ///
+    /// Used when the CDN returns 403 Forbidden due to an IP-bound token
+    /// that no longer matches the current Tor exit IP. Deleting the entry
+    /// forces the next `resolve()` call to make a fresh network request,
+    /// which will get a URL bound to the current exit IP.
+    pub fn delete(&self, url: &str) {
+        let conn = self.conn.lock().unwrap();
+        match conn.execute("DELETE FROM resolved_urls WHERE source_url = ?", params![url]) {
+            Ok(deleted) => {
+                if deleted > 0 {
+                    tracing::info!(url = url, deleted = deleted, "deleted cache entry for re-resolve");
+                }
+            },
+            Err(e) => tracing::warn!(error = %e, url = url, "failed to delete cache entry"),
+        }
+    }
+
     /// Clean up entries older than the cleanup age (1 hour).
     fn cleanup_stale(&self, conn: &Connection) {
         let now = now_epoch_secs();

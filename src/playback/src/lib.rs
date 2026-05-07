@@ -92,6 +92,17 @@ pub enum PlaybackError {
     /// Hardware playback is not available (compiled without the `hw` feature).
     #[error("hardware playback unavailable — compile with the 'hw' feature")]
     HardwareUnavailable,
+
+    /// CDN IP mismatch — the Tor exit IP doesn't match the CDN URL's IP-binding
+    /// token. This means the Tor circuit has rotated since URL resolution, and
+    /// the CDN will return 403 Forbidden. The URL needs to be re-resolved.
+    #[error("CDN IP mismatch: URL bound to prefix {url_ip_prefix} but Tor exits via {exit_ip} — re-resolve needed")]
+    CdnIpMismatch {
+        /// The first two octets from the CDN URL's `&i=` parameter.
+        url_ip_prefix: String,
+        /// The actual Tor exit IP address.
+        exit_ip: String,
+    },
 }
 
 // ── Pipeline Config ──────────────────────────────────────────────────
@@ -674,16 +685,38 @@ impl PlaybackEngine {
                     let msg = e.error().to_string();
                     let debug_info = e.debug().map(|d| d.to_string());
                     let source_element = e.src().map(|s| s.path_string());
-                    tracing::error!(
-                        error = %msg,
-                        debug = ?debug_info,
-                        source = ?source_element,
-                        "GStreamer error"
-                    );
+
+                    // Detect CDN 403 Forbidden errors specifically.
+                    // GStreamer surfaces HTTP 403s as "Forbidden" in the error
+                    // message, and the debug info contains the HTTP status code
+                    // and URL. When a 403 occurs, the Tor circuit has likely
+                    // rotated since URL resolution, and the CDN's IP-bound token
+                    // no longer matches the fetcher's exit IP. The session layer
+                    // should re-resolve the URL and retry playback.
+                    let is_cdn_forbidden = msg.contains("Forbidden")
+                        || debug_info.as_ref().map(|d| d.contains("Forbidden (403)")).unwrap_or(false);
+
+                    if is_cdn_forbidden {
+                        tracing::warn!(
+                            error = %msg,
+                            debug = ?debug_info,
+                            source = ?source_element,
+                            "CDN 403 Forbidden detected — emitting CdnForbidden event for re-resolve"
+                        );
+                        let _ = event_tx.send(PlaybackEvent::CdnForbidden);
+                    } else {
+                        tracing::error!(
+                            error = %msg,
+                            debug = ?debug_info,
+                            source = ?source_element,
+                            "GStreamer error"
+                        );
+                        let _ =
+                            event_tx.send(PlaybackEvent::Error { message: msg, debug: debug_info });
+                    }
+
                     // Clear auto-play flag on error to prevent spurious transitions.
                     pending_auto_play_bus.store(false, Ordering::Relaxed);
-                    let _ =
-                        event_tx.send(PlaybackEvent::Error { message: msg, debug: debug_info });
                     is_playing.store(false, Ordering::Relaxed);
                 },
                 MessageView::Buffering(b) => {

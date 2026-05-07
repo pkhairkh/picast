@@ -444,6 +444,15 @@ impl ResolverTrait for Resolver {
             duration_ms: result.duration,
         })
     }
+
+    async fn invalidate_cache(
+        &self,
+        url: &str,
+    ) {
+        tracing::info!(url = url, "invalidating resolver cache for re-resolve");
+        let cache = self.cache.lock().await;
+        cache.delete(url);
+    }
 }
 
 #[cfg(test)]

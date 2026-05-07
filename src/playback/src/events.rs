@@ -35,6 +35,11 @@ pub enum PlaybackEvent {
         debug: Option<String>,
     },
 
+    /// CDN returned 403 Forbidden — the Tor circuit has likely rotated
+    /// since URL resolution, or the CDN token has expired. The session
+    /// layer should re-resolve the URL and retry playback.
+    CdnForbidden,
+
     /// Buffering progress update.
     Buffering {
         /// Buffer fill percentage (0–100).
@@ -71,6 +76,7 @@ mod tests {
                 message: "decode failed".into(),
                 debug: Some("v4l2h264dec: negotiation failed".into()),
             },
+            PlaybackEvent::CdnForbidden,
             PlaybackEvent::Buffering { percent: 50 },
             PlaybackEvent::PositionUpdate { position_ms: 5000, duration_ms: Some(300000) },
             PlaybackEvent::Latency { latency_ms: 42 },

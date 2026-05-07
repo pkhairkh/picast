@@ -265,14 +265,26 @@ impl GstPipeline {
                         );
                     }
 
-                    // Diagnostic: check the Tor exit IP to verify circuit isolation.
-                    // If the exit IP doesn't match the 'i=' parameter in the CDN URL,
-                    // the CDN will return 403 Forbidden.
-                    let diag_socks = socks_addr.to_string();
-                    let diag_username = isolation_username.to_string();
-                    tokio::spawn(async move {
-                        SocksForwarder::check_exit_ip(&diag_socks, &diag_username).await;
-                    });
+                    // Proactive IP-mismatch check: verify that the Tor exit IP
+                    // matches the 'i=' parameter in the CDN URL. If the circuit
+                    // has rotated since resolution, the CDN will return 403.
+                    // Checking now lets us fail fast and trigger a re-resolve
+                    // instead of waiting for the inevitable 403.
+                    let exit_ip = SocksForwarder::check_exit_ip(socks_addr, isolation_username).await;
+                    if let Some(ref ip) = exit_ip {
+                        if let Some(mismatch) = check_cdn_ip_mismatch(url, ip) {
+                            tracing::error!(
+                                url_ip_prefix = %mismatch.url_ip_prefix,
+                                exit_ip = %ip,
+                                "CDN IP mismatch detected — Tor circuit has rotated since URL resolution. \
+                                 The CDN token is bound to a different IP. Re-resolve needed."
+                            );
+                            return Err(PlaybackError::CdnIpMismatch {
+                                url_ip_prefix: mismatch.url_ip_prefix,
+                                exit_ip: ip.clone(),
+                            });
+                        }
+                    }
 
                     socks_forwarder = Some(forwarder);
                 }
@@ -1173,6 +1185,63 @@ impl GstPipeline {
         self.preroll()?;
 
         Ok(())
+    }
+}
+
+/// Result of an IP mismatch check between the CDN URL's `&i=` parameter
+/// and the actual Tor exit IP.
+struct CdnIpMismatch {
+    /// The first two octets from the CDN URL's `&i=` parameter (e.g. "192.42").
+    url_ip_prefix: String,
+}
+
+/// Check if the CDN URL's `&i=` parameter matches the actual Tor exit IP.
+///
+/// Many CDNs (Voe, DoodStream) bind their download tokens to the client's
+/// IP address. The `&i=` parameter in the URL contains the first two octets
+/// of the IP that was used during URL resolution. If the Tor circuit has
+/// rotated since resolution, the fetcher's exit IP will differ, and the
+/// CDN will return 403 Forbidden.
+///
+/// Returns `Some(CdnIpMismatch)` if there's a mismatch, `None` if the IPs
+/// match or the URL doesn't contain an `&i=` parameter.
+fn check_cdn_ip_mismatch(url: &str, exit_ip: &str) -> Option<CdnIpMismatch> {
+    // Extract the `&i=` or `?i=` parameter from the URL.
+    // Example URL: ...&i=192.42&sp=380&asn=215125...
+    // Also handle ?i= if it's the first query parameter.
+    let url_ip_prefix = url
+        .split("?i=").nth(1)
+        .or_else(|| url.split("&i=").nth(1))
+        .and_then(|rest| rest.split('&').next())
+        .and_then(|val| {
+            // The `&i=` value should be the first two octets (e.g. "192.42").
+            // Validate it looks like an IP prefix (digits.digits).
+            let parts: Vec<&str> = val.split('.').collect();
+            if parts.len() == 2 && parts[0].parse::<u8>().is_ok() && parts[1].parse::<u8>().is_ok() {
+                Some(val.to_string())
+            } else {
+                None
+            }
+        });
+
+    let url_prefix = url_ip_prefix?;
+
+    // Extract the first two octets of the actual Tor exit IP.
+    let exit_prefix = exit_ip
+        .split('.')
+        .take(2)
+        .collect::<Vec<_>>()
+        .join(".");
+
+    if url_prefix == exit_prefix {
+        tracing::info!(
+            url_ip_prefix = %url_prefix,
+            exit_ip = %exit_ip,
+            "CDN IP check passed — Tor exit IP matches URL's &i= parameter"
+        );
+        None
+    } else {
+        Some(CdnIpMismatch { url_ip_prefix: url_prefix })
     }
 }
 

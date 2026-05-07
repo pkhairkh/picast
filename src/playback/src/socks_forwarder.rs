@@ -124,11 +124,13 @@ impl SocksForwarder {
     }
 
     /// Check the Tor exit IP by connecting through SOCKS5 to an IP echo service.
-    /// This diagnostic helps verify that the resolver and fetcher are using
+    /// Returns the exit IP as a string (e.g. "185.100.87.166") if successful.
+    ///
+    /// This is used to verify that the resolver and fetcher are using
     /// the same Tor circuit (and thus the same exit IP). If the exit IP
     /// doesn't match the `i=` parameter in the CDN URL, the CDN will
     /// return 403 Forbidden.
-    pub async fn check_exit_ip(socks_addr: &str, isolation_username: &str) {
+    pub async fn check_exit_ip(socks_addr: &str, isolation_username: &str) -> Option<String> {
         tracing::info!("Checking Tor exit IP for circuit isolation diagnostic...");
 
         // Connect to api.ipify.org:80 through Tor SOCKS5
@@ -138,7 +140,7 @@ impl SocksForwarder {
                 let request = b"GET / HTTP/1.1\r\nHost: api.ipify.org\r\nConnection: close\r\n\r\n";
                 if let Err(e) = stream.write_all(request).await {
                     tracing::warn!(error = %e, "exit IP check: failed to send HTTP request");
-                    return;
+                    return None;
                 }
 
                 // Read the response
@@ -152,33 +154,39 @@ impl SocksForwarder {
                         // Parse the IP from the HTTP response body
                         // Response format: HTTP/1.1 200 OK\r\n...\r\n<IP>
                         if let Some(body) = response.split("\r\n\r\n").nth(1) {
-                            let ip = body.trim();
+                            let ip = body.trim().to_string();
                             tracing::info!(
                                 exit_ip = %ip,
                                 username = %isolation_username,
                                 "Tor exit IP diagnostic: this is the IP the CDN will see. \
                                  Compare with the 'i=' parameter in the CDN URL."
                             );
+                            Some(ip)
                         } else {
                             tracing::warn!(
                                 response = %response,
                                 "exit IP check: couldn't parse HTTP response body"
                             );
+                            None
                         }
                     },
                     Ok(Ok(_)) => {
                         tracing::warn!("exit IP check: empty response from ipify");
+                        None
                     },
                     Ok(Err(e)) => {
                         tracing::warn!(error = %e, "exit IP check: failed to read response");
+                        None
                     },
                     Err(_) => {
                         tracing::warn!("exit IP check: timed out waiting for response");
+                        None
                     },
                 }
             },
             Err(e) => {
                 tracing::warn!(error = %e, "exit IP check: failed to connect through Tor SOCKS5");
+                None
             },
         }
     }

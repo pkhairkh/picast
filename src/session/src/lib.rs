@@ -44,6 +44,16 @@ use thiserror::Error;
 use tokio::sync::{broadcast, watch};
 use uuid::Uuid;
 
+/// Check if a playback error is retryable by re-resolving the URL.
+///
+/// CDN IP mismatch errors are retryable because they indicate the Tor
+/// circuit has rotated since URL resolution. Re-resolving gets a fresh
+/// URL bound to the current exit IP.
+fn is_cdn_retryable_error(error: &Box<dyn std::error::Error + Send + Sync>) -> bool {
+    let msg = error.to_string();
+    msg.contains("CDN IP mismatch") || msg.contains("re-resolve needed")
+}
+
 // ── Errors ───────────────────────────────────────────────────────────
 
 /// Errors that can originate from the session layer.
@@ -222,6 +232,8 @@ pub enum SessionEvent {
     Stopped { id: Uuid },
     /// An error occurred.
     Error { id: Uuid, message: String },
+    /// CDN 403 Forbidden — the Tor circuit may have rotated; re-resolve needed.
+    CdnForbidden { id: Uuid },
     /// Buffering progress.
     Buffering { id: Uuid, percent: u8 },
     /// Position update.
@@ -773,27 +785,89 @@ impl SessionManager {
         self.try_transition(id, PlayerState::Buffering)?;
 
         // Start playback via the playback subsystem.
-        if let Some(ref playback) = self.playback {
-            let socks_addr = self.tor.as_ref().map(|t| t.socks_addr()).unwrap_or_default();
-            let isolation_username = self
-                .tor
-                .as_ref()
-                .map(|t| {
-                    t.isolation_username(
-                        url::Url::parse(url)
-                            .ok()
-                            .and_then(|u| u.host_str().map(|h| h.to_owned()))
-                            .unwrap_or_default()
-                            .as_str(),
-                    )
-                })
-                .unwrap_or_default();
+        //
+        // CDN 403 Retry Logic: If the CDN returns 403 Forbidden or an IP
+        // mismatch is detected (Tor circuit rotated since URL resolution),
+        // we invalidate the resolver cache, re-resolve the URL through the
+        // current Tor circuit, and retry playback. This ensures the CDN
+        // token is bound to the current exit IP. Maximum 2 retries.
+        let socks_addr = self.tor.as_ref().map(|t| t.socks_addr()).unwrap_or_default();
+        let isolation_username = self
+            .tor
+            .as_ref()
+            .map(|t| {
+                t.isolation_username(
+                    url::Url::parse(url)
+                        .ok()
+                        .and_then(|u| u.host_str().map(|h| h.to_owned()))
+                        .unwrap_or_default()
+                        .as_str(),
+                )
+            })
+            .unwrap_or_default();
 
-            playback.play(&resolve_info.direct_url, url, &socks_addr, &isolation_username).await.map_err(|e| SessionError::PlaybackError(e.to_string())).inspect_err(|_| {
-                // Transition to Error state on playback failure.
-                let _ = self.try_transition(id, PlayerState::Error);
-                let _ = self.clear_active_session();
-            })?;
+        let mut current_resolve = resolve_info;
+        let max_retries = 2;
+        let mut attempt = 0;
+
+        loop {
+            attempt += 1;
+
+            if let Some(ref playback) = self.playback {
+                let play_result = playback
+                    .play(&current_resolve.direct_url, url, &socks_addr, &isolation_username)
+                    .await;
+
+                match play_result {
+                    Ok(()) => break, // Success — exit the retry loop
+                    Err(ref e) if attempt <= max_retries && is_cdn_retryable_error(e) => {
+                        tracing::warn!(
+                            error = %e,
+                            attempt = attempt,
+                            max_retries = max_retries,
+                            "CDN retryable error — invalidating cache and re-resolving URL"
+                        );
+
+                        // Invalidate the resolver cache so we get a fresh URL
+                        if let Some(ref resolver) = self.resolver {
+                            resolver.invalidate_cache(url).await;
+                        }
+
+                        // Re-resolve through Tor to get a URL bound to the
+                        // current exit IP.
+                        match self.re_resolve(url, id).await {
+                            Ok(new_resolve) => {
+                                current_resolve = new_resolve;
+                                tracing::info!(
+                                    attempt = attempt,
+                                    new_url = %current_resolve.direct_url,
+                                    "re-resolve succeeded — retrying playback"
+                                );
+                                continue; // Retry the play() call
+                            },
+                            Err(re_resolve_err) => {
+                                tracing::error!(
+                                    error = %re_resolve_err,
+                                    "re-resolve failed after CDN error — giving up"
+                                );
+                                play_result.map_err(|e| {
+                                    let _ = self.try_transition(id, PlayerState::Error);
+                                    let _ = self.clear_active_session();
+                                    SessionError::PlaybackError(e.to_string())
+                                })?;
+                            },
+                        }
+                    },
+                    Err(e) => {
+                        // Non-retryable error or retries exhausted
+                        let _ = self.try_transition(id, PlayerState::Error);
+                        let _ = self.clear_active_session();
+                        return Err(SessionError::PlaybackError(e.to_string()));
+                    },
+                }
+            } else {
+                break; // No playback subsystem
+            }
         }
 
         // Transition: Buffering → Playing.
@@ -1023,6 +1097,45 @@ impl SessionManager {
             .map_err(|e| SessionError::Subsystem(format!("lock poisoned: {}", e)))?;
         *guard = None;
         Ok(())
+    }
+
+    /// Re-resolve a URL through the resolver (after cache invalidation).
+    ///
+    /// Used when the CDN returns 403 Forbidden due to a stale IP-bound
+    /// token. The re-resolved URL will be bound to the current Tor exit IP.
+    async fn re_resolve(
+        &self,
+        url: &str,
+        session_id: Uuid,
+    ) -> Result<interfaces::ResolveInfo, SessionError> {
+        let resolve_result = if let Some(ref resolver) = self.resolver {
+            resolver.resolve(url).await.map_err(|e| {
+                SessionError::ResolutionFailed(e.to_string())
+            })?
+        } else {
+            return Err(SessionError::Subsystem("no resolver configured".into()));
+        };
+
+        // Update the session with the new resolved URL
+        {
+            let db = self
+                .db
+                .lock()
+                .map_err(|e| SessionError::Subsystem(format!("db lock poisoned: {}", e)))?;
+            let now = Utc::now().to_rfc3339();
+            db.execute(
+                "UPDATE sessions SET resolved_url = ?1, title = ?2, duration_ms = ?3, updated_at = ?4 WHERE id = ?5",
+                rusqlite::params![
+                    resolve_result.direct_url,
+                    resolve_result.title,
+                    resolve_result.duration_ms.map(|d| d as i64),
+                    now,
+                    session_id.to_string(),
+                ],
+            )?;
+        }
+
+        Ok(resolve_result)
     }
 
     // ── Public helpers (for main.rs background tasks) ───────────────

@@ -355,6 +355,15 @@ pub async fn run_dlna_sync(
                             }
                         }
                     },
+                    SessionEvent::CdnForbidden { .. } => {
+                        // CDN 403 — don't start gmediarender yet.
+                        // The session manager may retry with a re-resolved URL.
+                        // If the retries fail, the session will transition to
+                        // Error state and gmediarender will be started then.
+                        tracing::warn!(
+                            "CDN 403 Forbidden — not starting gmediarender (re-resolve may be attempted)"
+                        );
+                    },
                     _ => {
                         // Other events (Created, Resolved, Buffering, etc.)
                         // are not relevant to the DLNA renderer in v1.
