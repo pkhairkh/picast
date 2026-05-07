@@ -907,13 +907,13 @@ impl PlaybackEngine {
                             if let (Some(p1), Some(p2)) = (pos1, pos2) {
                                 let elapsed_ms = (p2 - p1).mseconds() as f64;
                                 if elapsed_ms > 0.0 {
-                                    let effective_fps = elapsed_ms / 1000.0 * 25.0 / (2.0); // 2s sample, assuming 25fps source
+                                    let playback_rate = elapsed_ms / 2000.0; // 2s wall-clock sample
                                     tracing::info!(
                                         position_ms_1 = p1.mseconds(),
                                         position_ms_2 = p2.mseconds(),
                                         elapsed_ms = elapsed_ms,
-                                        effective_playback_rate = format!("{:.1}x", elapsed_ms / 2000.0),
-                                        "FPS diagnostic: measured playback rate (1.0x = full speed at 25fps)"
+                                        effective_playback_rate = format!("{:.2}x", playback_rate),
+                                        "FPS diagnostic: measured playback rate (1.0x = real-time)"
                                     );
                                 }
                             } else {
