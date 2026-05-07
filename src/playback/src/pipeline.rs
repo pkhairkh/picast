@@ -353,30 +353,46 @@ impl GstPipeline {
 
             let is_audio = media_type.as_ref().map(|t| t.starts_with("audio/")).unwrap_or(false);
 
+            // Log every pad that parsebin creates — this is critical for
+            // diagnosing cases where video never appears on screen.
+            let pad_name = pad.name().to_string();
+            let caps_str = caps.as_ref().map(|c| c.to_string()).unwrap_or_default();
+            tracing::info!(
+                pad = %pad_name,
+                media_type = ?media_type,
+                is_video = is_video,
+                is_audio = is_audio,
+                caps = %caps_str,
+                "parsebin pad-added"
+            );
+
             if is_video {
-                if let Some(vbin) = video_bin_weak.upgrade() {
-                    let sink_pad =
-                        vbin.static_pad("sink").expect("video bin should have a sink pad");
-                    if sink_pad.is_linked() {
-                        tracing::info!("video pad already linked, skipping");
-                        return;
-                    }
-                    let caps_str = caps
-                        .as_ref()
-                        .map(|c| c.to_string())
-                        .unwrap_or_default();
-                    if let Err(e) = pad.link(&sink_pad) {
+                match video_bin_weak.upgrade() {
+                    Some(vbin) => {
+                        let sink_pad =
+                            vbin.static_pad("sink").expect("video bin should have a sink pad");
+                        if sink_pad.is_linked() {
+                            tracing::info!("video pad already linked, skipping");
+                            return;
+                        }
+                        if let Err(e) = pad.link(&sink_pad) {
+                            tracing::error!(
+                                error = ?e,
+                                caps = %caps_str,
+                                "failed to link parsebin video pad"
+                            );
+                        } else {
+                            tracing::info!(
+                                caps = %caps_str,
+                                "linked parsebin → video bin"
+                            );
+                        }
+                    },
+                    None => {
                         tracing::error!(
-                            error = ?e,
-                            caps = %caps_str,
-                            "failed to link parsebin video pad"
+                            "video_bin_weak.upgrade() failed — video bin was dropped, video pad will be unlinked!"
                         );
-                    } else {
-                        tracing::info!(
-                            caps = %caps_str,
-                            "linked parsebin → video bin"
-                        );
-                    }
+                    },
                 }
             } else if is_audio {
                 if let Some(aq) = audio_queue_weak.upgrade() {
