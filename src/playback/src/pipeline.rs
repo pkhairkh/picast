@@ -171,8 +171,39 @@ impl GstPipeline {
         // default headers.
         if src.find_property("extra-headers").is_some() {
             let mut headers = gstreamer::Structure::new_empty("extra-headers");
-            headers.set("Accept", "video/webm,video/mp4,video/*;q=0.9,application/ogg,*/*;q=0.7");
+
+            // Accept header: browser-like for video content. Using */*
+            // because some CDNs reject requests with restrictive Accept
+            // headers that don't match the content type they serve.
+            headers.set("Accept", "*/*");
+
             headers.set("Accept-Language", "en-US,en;q=0.5");
+
+            // Sec-Fetch-* headers: Many CDN anti-bot systems (Cloudflare,
+            // Voe, DoodStream) check these headers to verify the request
+            // comes from a real browser. A <video> element loading a media
+            // URL sends these specific values:
+            //   Sec-Fetch-Dest: video
+            //   Sec-Fetch-Mode: no-cors
+            //   Sec-Fetch-Site: cross-site (CDN domain != page domain)
+            headers.set("Sec-Fetch-Dest", "video");
+            headers.set("Sec-Fetch-Mode", "no-cors");
+            // Determine Sec-Fetch-Site based on whether CDN domain
+            // differs from the source page domain.
+            let fetch_site = if !source_url.is_empty() {
+                // Check if CDN and source page share the same origin
+                let same_origin = url::Url::parse(url).ok()
+                    .zip(url::Url::parse(source_url).ok())
+                    .map(|(cdn, src)| {
+                        cdn.scheme() == src.scheme() && cdn.host_str() == src.host_str()
+                    })
+                    .unwrap_or(false);
+                if same_origin { "same-origin" } else { "cross-site" }
+            } else {
+                "none"
+            };
+            headers.set("Sec-Fetch-Site", fetch_site);
+
             // Derive Referer from the SOURCE URL's origin (the page the
             // user cast), falling back to the media URL's origin if no
             // source URL is available. This matches what the resolver
@@ -186,12 +217,12 @@ impl GstPipeline {
                     tracing::info!(
                         referer = %referer,
                         source_url = %source_url,
-                        "souphttpsrc: Referer header set from source URL origin (matches resolver)"
+                        fetch_site = %fetch_site,
+                        "souphttpsrc: headers configured (Referer + Sec-Fetch-* for CDN anti-bot)"
                     );
                 }
             }
             src.set_property("extra-headers", &headers);
-            tracing::debug!("souphttpsrc: extra-headers configured");
         }
 
         // Configure Tor proxy for media routing. ALL non-loopback

@@ -19,6 +19,16 @@
 //! The resolver (yt-dlp / reqwest) also uses `socks5h://picast-HASH@127.0.0.1:9050`
 //! with the SAME username. Tor's `IsolateSOCKSAuth` maps identical usernames
 //! to the same circuit, so both resolution and fetch exit through the same IP.
+//!
+//! ## Critical: Auth Method Selection
+//!
+//! We ONLY offer username/password auth (0x02) in the SOCKS5 greeting.
+//! Previously, we offered both no-auth (0x00) and username/password (0x02),
+//! which allowed Tor to choose no-auth. When Tor chose no-auth, the
+//! isolation username was never sent, and the stream was assigned to a
+//! different circuit than the resolver's — causing CDN 403 errors due to
+//! IP mismatch. By offering only username/password auth, we guarantee
+//! Tor uses the isolation username for circuit selection.
 
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::{TcpListener, TcpStream};
@@ -177,13 +187,19 @@ async fn handle_connect(
     let target = parts[1]; // e.g. "cdn.example.com:443"
 
     // Connect to the target through Tor's SOCKS5 proxy.
-    tracing::debug!(
+    tracing::info!(
         target = %target,
         username = %isolation_username,
-        "SOCKS5 forwarder: connecting through Tor"
+        socks_addr = %socks_addr,
+        "SOCKS5 forwarder: connecting through Tor (same circuit as resolver)"
     );
 
     let remote = socks5_connect(socks_addr, target, isolation_username).await?;
+
+    tracing::info!(
+        target = %target,
+        "SOCKS5 forwarder: tunnel established through Tor — CDN will see resolver's exit IP"
+    );
 
     // Send "200 Connection Established" to souphttpsrc.
     client
@@ -231,10 +247,26 @@ async fn socks5_connect(
         .map_err(|e| format!("connect to SOCKS5 {}: {}", socks_addr, e))?;
 
     // ── SOCKS5 handshake: greeting ─────────────────────────────
-    // We offer two auth methods: 0x00 (no auth) and 0x02 (username/password).
-    // Tor with IsolateSOCKSAuth requires username/password auth.
+    // CRITICAL: We ONLY offer username/password auth (0x02).
+    //
+    // Previously we offered both no-auth (0x00) and username/password
+    // (0x02). When Tor's IsolateSOCKSAuth is enabled and we offer both,
+    // Tor may choose no-auth (0x00), which means the isolation username
+    // is NEVER sent. The stream then gets assigned to a DIFFERENT
+    // circuit (one for empty/no auth) than the resolver's circuit (which
+    // used username/password auth with the isolation username). The CDN
+    // sees a different Tor exit IP → 403 Forbidden.
+    //
+    // By offering ONLY username/password auth, we guarantee that Tor
+    // uses the isolation username, which assigns the stream to the same
+    // circuit as the resolver. Same circuit = same exit IP = CDN token
+    // matches = no 403.
+    //
+    // This matches reqwest's behavior: when a SOCKS5 URL includes a
+    // username (socks5h://picast-HASH@...), reqwest also only offers
+    // username/password auth.
     stream
-        .write_all(&[0x05, 0x02, 0x00, 0x02])
+        .write_all(&[0x05, 0x01, 0x02]) // VER=5, NMETHODS=1, METHOD=0x02
         .await
         .map_err(|e| format!("SOCKS5 greet: {}", e))?;
 
@@ -248,46 +280,41 @@ async fn socks5_connect(
         return Err(format!("not SOCKS5: version {}", reply[0]));
     }
 
-    match reply[1] {
-        0x00 => {
-            // No auth required — proceed to CONNECT.
-            tracing::debug!("SOCKS5: server chose no-auth");
-        }
-        0x02 => {
-            // Username/password auth (RFC 1929).
-            let username_bytes = username.as_bytes();
-            let password_bytes = b""; // Tor doesn't check the password
-            if username_bytes.len() > 255 {
-                return Err("SOCKS5 username too long".into());
-            }
-            let mut auth_req = vec![0x01, username_bytes.len() as u8];
-            auth_req.extend_from_slice(username_bytes);
-            auth_req.push(password_bytes.len() as u8);
-            auth_req.extend_from_slice(password_bytes);
-
-            stream
-                .write_all(&auth_req)
-                .await
-                .map_err(|e| format!("SOCKS5 auth write: {}", e))?;
-
-            let mut auth_reply = [0u8; 2];
-            stream
-                .read_exact(&mut auth_reply)
-                .await
-                .map_err(|e| format!("SOCKS5 auth reply: {}", e))?;
-
-            if auth_reply[1] != 0x00 {
-                return Err(format!("SOCKS5 auth rejected: status {}", auth_reply[1]));
-            }
-            tracing::debug!(username = %username, "SOCKS5: authenticated");
-        }
-        0xFF => {
-            return Err("SOCKS5: no acceptable auth method".into());
-        }
-        other => {
-            return Err(format!("SOCKS5: unknown auth method {}", other));
-        }
+    // Tor MUST choose username/password auth since that's all we offered.
+    if reply[1] != 0x02 {
+        return Err(format!(
+            "SOCKS5: expected username/password auth (0x02), got {} — \
+             Tor may not support IsolateSOCKSAuth or SOCKS port is misconfigured",
+            reply[1]
+        ));
     }
+
+    // ── SOCKS5 username/password authentication (RFC 1929) ─────
+    let username_bytes = username.as_bytes();
+    let password_bytes = b""; // Tor doesn't check the password
+    if username_bytes.len() > 255 {
+        return Err("SOCKS5 username too long".into());
+    }
+    let mut auth_req = vec![0x01, username_bytes.len() as u8];
+    auth_req.extend_from_slice(username_bytes);
+    auth_req.push(password_bytes.len() as u8);
+    auth_req.extend_from_slice(password_bytes);
+
+    stream
+        .write_all(&auth_req)
+        .await
+        .map_err(|e| format!("SOCKS5 auth write: {}", e))?;
+
+    let mut auth_reply = [0u8; 2];
+    stream
+        .read_exact(&mut auth_reply)
+        .await
+        .map_err(|e| format!("SOCKS5 auth reply: {}", e))?;
+
+    if auth_reply[1] != 0x00 {
+        return Err(format!("SOCKS5 auth rejected: status {}", auth_reply[1]));
+    }
+    tracing::info!(username = %username, "SOCKS5: authenticated with isolation username (same circuit as resolver)");
 
     // ── SOCKS5 CONNECT request (domain name, not resolved) ────
     // This is SOCKS5h — we send the domain name and let Tor resolve
