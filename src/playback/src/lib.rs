@@ -906,7 +906,7 @@ impl PlaybackEngine {
                 let _ = failed_pipeline.stop();
                 drop(failed_pipeline);
                 drop(guard); // release lock before fallback call
-                self.play_software_fallback(url, socks_addr, isolation_username).await
+                self.play_software_fallback(url, source_url, socks_addr, isolation_username).await
             },
             Err(e) => {
                 tracing::error!(error = %e, "pipeline play() failed");
@@ -918,7 +918,7 @@ impl PlaybackEngine {
                 if self.config.hw_accel {
                     tracing::warn!("attempting software decode fallback after play failure");
                     drop(guard);
-                    match self.play_software_fallback(url, socks_addr, isolation_username).await {
+                    match self.play_software_fallback(url, source_url, socks_addr, isolation_username).await {
                         Ok(()) => Ok(()),
                         Err(fallback_err) => {
                             tracing::error!(error = %fallback_err, "software decode fallback also failed");
@@ -942,6 +942,7 @@ impl PlaybackEngine {
     async fn play_software_fallback(
         &self,
         url: &str,
+        source_url: &str,
         socks_addr: &str,
         isolation_username: &str,
     ) -> Result<(), PlaybackError> {
@@ -962,7 +963,7 @@ impl PlaybackEngine {
             "constructing SOFTWARE DECODE fallback pipeline (avdec_h264 → videoconvert → kmssink)"
         );
 
-        let mut pipeline = GstPipeline::new(url, socks_addr, isolation_username, &sw_config).await?;
+        let mut pipeline = GstPipeline::new(url, source_url, socks_addr, isolation_username, &sw_config).await?;
 
         // Set up bus watch for the fallback pipeline.
         let event_tx = self.event_tx.clone();

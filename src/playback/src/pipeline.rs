@@ -1089,6 +1089,7 @@ impl GstPipeline {
     pub async fn rebuild_sw(
         &mut self,
         url: &str,
+        source_url: &str,
         _socks_addr: &str,
         _isolation_username: &str,
         config: &PipelineConfig,
@@ -1101,7 +1102,7 @@ impl GstPipeline {
         // Build a new pipeline with HW accel disabled.
         let mut sw_config = config.clone();
         sw_config.hw_accel = false;
-        let new = Self::new(url, _socks_addr, _isolation_username, &sw_config).await?;
+        let new = Self::new(url, source_url, _socks_addr, _isolation_username, &sw_config).await?;
 
         // Replace self with the new pipeline.
         *self = new;
