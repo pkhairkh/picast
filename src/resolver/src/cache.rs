@@ -93,6 +93,21 @@ impl ResolveCache {
         )
         .expect("failed to create cache table");
 
+        // Schema migration: add audio_url column if it doesn't exist.
+        // This column was added after the initial schema, so databases
+        // created by earlier versions won't have it.  CREATE TABLE IF
+        // NOT EXISTS doesn't alter existing tables, so we need an
+        // explicit migration.  SQLite doesn't support IF NOT EXISTS on
+        // ALTER TABLE ADD COLUMN (until 3.35.0), so we just try it and
+        // ignore the "duplicate column" error.
+        if let Err(e) = conn.execute("ALTER TABLE resolved_urls ADD COLUMN audio_url TEXT", []) {
+            let msg = e.to_string();
+            if !msg.contains("duplicate column") {
+                tracing::warn!(error = %msg, "cache migration: unexpected error adding audio_url column");
+            }
+            // "duplicate column" is expected when the column already exists — no action needed.
+        }
+
         Self { conn: Mutex::new(conn), ttl }
     }
 

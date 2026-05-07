@@ -504,8 +504,16 @@ impl PlaybackEngine {
                     // state changes are logged above but should not trigger
                     // PlaybackEvent broadcasts — they fire constantly during
                     // preroll and would confuse the session layer.
+                    //
+                    // The pipeline element's GStreamer path is exactly
+                    // "/GstPipeline:pipeline0" — it has no "/" after the
+                    // first segment.  Child elements have paths like
+                    // "/GstPipeline:pipeline0/GstAlsaSink:alsasink0".
+                    // Using contains("pipeline0") was wrong because every
+                    // child's path also contains that substring, causing
+                    // false PlaybackEvent::Paused broadcasts during startup.
                     let src_name = msg.src().map(|s| s.path_string()).unwrap_or_default();
-                    let is_pipeline = src_name.contains("pipeline0");
+                    let is_pipeline = src_name.starts_with("/GstPipeline:") && !src_name[1..].contains('/');
 
                     if new_state == State::Playing && is_pipeline {
                         let _ = event_tx.send(PlaybackEvent::Playing);
@@ -803,9 +811,10 @@ impl PlaybackEngine {
                         );
                     }
 
-                    // Only emit application-level events for the pipeline element.
+                    // Only emit application-level events for the pipeline element itself,
+                    // not sub-elements.  See primary bus watch handler for rationale.
                     let src_name = msg.src().map(|s| s.path_string()).unwrap_or_default();
-                    let is_pipeline = src_name.contains("pipeline0");
+                    let is_pipeline = src_name.starts_with("/GstPipeline:") && !src_name[1..].contains('/');
 
                     if new_state == State::Playing && is_pipeline {
                         let _ = event_tx.send(PlaybackEvent::Playing);
