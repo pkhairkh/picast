@@ -619,22 +619,25 @@ impl PlaybackEngine {
                 // at 15s to identify which element is blocking preroll.
                 let pipeline_weak_diag = guard.as_ref().unwrap().pipeline().downgrade();
                 tokio::spawn(async move {
-                    // First check at 5s — nudge pipeline to Playing if stuck at Paused,
+                    // First check at 8s — nudge pipeline to Playing if stuck at Paused,
                     // and check whether the video pad was ever linked.
-                    tokio::time::sleep(std::time::Duration::from_secs(5)).await;
+                    // We wait 8s instead of 5s because parsebin may need ~5-6s to
+                    // demux the MP4 container and emit source pads (especially over
+                    // network).  Checking too early reports "ZERO source pads" falsely.
+                    tokio::time::sleep(std::time::Duration::from_secs(8)).await;
                     if let Some(pipe) = pipeline_weak_diag.upgrade() {
                         let (result, current, pending) = pipe.state(gstreamer::ClockTime::from_mseconds(0));
                         tracing::info!(
                             result = ?result,
                             current = ?current,
                             pending = ?pending,
-                            "pipeline state check after 5s"
+                            "pipeline state check after 8s"
                         );
                         if current != State::Playing {
                             tracing::warn!(
                                 current = ?current,
                                 pending = ?pending,
-                                "pipeline NOT playing after 5s — nudging to Playing"
+                                "pipeline NOT playing after 8s — nudging to Playing"
                             );
                             let _ = pipe.set_state(State::Playing);
                         }
@@ -702,14 +705,14 @@ impl PlaybackEngine {
                             }
                             if !video_linked {
                                 tracing::error!(
-                                    "NO video pad linked after 5s — parsebin did not connect video to the video bin. \
+                                    "NO video pad linked after 8s — parsebin did not connect video to the video bin. \
                                      Possible causes: (1) the stream has no video track, (2) parsebin's pad-added signal \
                                      fired before the callback was connected (race condition), (3) the video bin's sink \
                                      pad ghost pad is misconfigured."
                                 );
                             }
                             if !audio_linked {
-                                tracing::warn!("no audio pad linked after 5s — audio track may be missing");
+                                tracing::warn!("no audio pad linked after 8s — audio track may be missing");
                             }
 
                             // Also check parsebin's source pads directly
@@ -736,7 +739,7 @@ impl PlaybackEngine {
                                 }
                                 if pad_count == 0 {
                                     tracing::error!(
-                                        "parsebin has ZERO source pads after 5s — it hasn't demuxed any streams yet. \
+                                        "parsebin has ZERO source pads after 8s — it hasn't demuxed any streams yet. \
                                          This typically means souphttpsrc is not providing data (network error, CDN 403, etc.)."
                                     );
                                 }
@@ -744,21 +747,21 @@ impl PlaybackEngine {
                         }
                     }
 
-                    // Second check at 15s — detailed per-element state dump
-                    tokio::time::sleep(std::time::Duration::from_secs(10)).await;
+                    // Second check at 20s — detailed per-element state dump
+                    tokio::time::sleep(std::time::Duration::from_secs(12)).await;
                     if let Some(pipe) = pipeline_weak_diag.upgrade() {
                         let (result, current, pending) = pipe.state(gstreamer::ClockTime::from_mseconds(0));
                         tracing::info!(
                             result = ?result,
                             current = ?current,
                             pending = ?pending,
-                            "pipeline state check after 15s"
+                            "pipeline state check after 20s"
                         );
 
                         // Walk all elements and log their states to find
                         // which one is stuck and blocking preroll.
                         if current != State::Playing {
-                            tracing::warn!("pipeline NOT playing after 15s — dumping per-element state:");
+                            tracing::warn!("pipeline NOT playing after 20s — dumping per-element state:");
                             if let Ok(bin) = pipe.dynamic_cast::<gstreamer::Bin>() {
                                 let mut elem_iter = bin.iterate_elements();
                                 loop {

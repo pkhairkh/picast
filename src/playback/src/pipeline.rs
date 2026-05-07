@@ -8,8 +8,8 @@
 //!
 //! ```text
 //! ┌──────────┐    ┌────────┐    ┌──────────┐    ┌───────┐    ┌──────────┐    ┌───────────┐    ┌──────────┐    ┌─────────┐
-//! │souphttpsrc│───►│queue2  │───►│parsebin  │──┬►│queue  │───►│h264parse │───►│capssetter │───►│v4l2h264dec│──►│kmssink  │
-//! │(SOCKS5h) │    │(buffer)│    │(demux)   │  │ │       │    │          │    │(bt709)    │    │(HW decode)│   │(DRM/KMS)│
+//! │souphttpsrc│───►│queue2  │───►│parsebin  │──┬►│queue  │───►│h264parse │───►│v4l2h264dec│───►│capssetter │──►│kmssink  │
+//! │(SOCKS5h) │    │(buffer)│    │(demux)   │  │ │       │    │          │    │(HW decode)│    │(bt709)   │   │(DRM/KMS)│
 //! └──────────┘    └────────┘    └──────────┘  │ └───────┘    └──────────┘    └───────────┘    └──────────┘    └─────────┘
 //!                                               │
 //!                                               │ ┌───────┐    ┌──────────────┐    ┌──────────────┐    ┌────────┐    ┌─────────┐
@@ -581,14 +581,21 @@ impl GstPipeline {
     }
 
     /// Build the hardware-accelerated video branch:
-    /// `h264parse → capssetter(colorimetry=bt709) → v4l2h264dec(mmap) → kmssink`
+    /// `h264parse → v4l2h264dec(mmap) → capssetter(colorimetry=bt709) → kmssink`
     ///
-    /// The colorimetry override via capssetter is critical on Raspberry Pi 4:
-    /// the bcm2835-codec V4L2 decoder reports colorimetry from the H.264
-    /// bitstream VUI parameters, and some streams (especially those from
-    /// Apple encoders) use colorimetry values (e.g. 1:3:5:1) that
-    /// GStreamer's caps system does not recognise, causing "not-negotiated"
-    /// between v4l2h264dec and kmssink.  Forcing bt709 resolves this.
+    /// The colorimetry override via capssetter is placed AFTER the decoder
+    /// so it modifies decoded raw video caps (video/x-raw), not encoded
+    /// H.264 caps.  Placing capssetter before the decoder with
+    /// `replace=true` destroyed essential H.264 fields (stream-format,
+    /// alignment, profile, level, parsed), causing "not-negotiated" from
+    /// v4l2h264dec because it couldn't recognise the input format.
+    ///
+    /// On Raspberry Pi 4, the bcm2835-codec V4L2 decoder reports
+    /// colorimetry from the H.264 bitstream VUI parameters, and some
+    /// streams (especially Apple encoders) use values (e.g. 1:3:5:1)
+    /// that GStreamer's caps system doesn't recognise, causing
+    /// "not-negotiated" between v4l2h264dec and kmssink.  Forcing
+    /// bt709 on the decoded output resolves this.
     ///
     /// We also use `capture-io-mode=mmap` instead of `dmabuf` because
     /// dmabuf adds `memory:DMABuf` caps features that kmssink may not
@@ -608,19 +615,6 @@ impl GstPipeline {
                 PlaybackError::PipelineCreation(format!("h264parse: {}", e))
             })?;
 
-        // capssetter overrides the colorimetry to bt709, which is the most
-        // common colour space for H.264 content.  Without this, streams
-        // with unusual VUI colorimetry (e.g. Apple's 1:3:5:1) cause
-        // "not-negotiated" between v4l2h264dec and kmssink.
-        let capssetter = ElementFactory::make("capssetter")
-            .property_from_str("caps", "video/x-h264,colorimetry=bt709")
-            .property("join", false)
-            .property("replace", true)
-            .build()
-            .map_err(|e| {
-                PlaybackError::PipelineCreation(format!("capssetter: {}", e))
-            })?;
-
         // V4L2 hardware H.264 decoder using bcm2835-codec on Pi 4.
         // Use mmap mode — dmabuf mode adds memory:DMABuf caps features
         // that kmssink may not negotiate correctly.
@@ -632,6 +626,29 @@ impl GstPipeline {
                     "v4l2h264dec (may not be available): {}",
                     e
                 ))
+            })?;
+
+        // capssetter overrides colorimetry to bt709 on the DECODED output.
+        // It MUST be placed after v4l2h264dec, not before it:
+        //
+        //   WRONG: h264parse → capssetter("video/x-h264,...") → v4l2h264dec
+        //   RIGHT: h264parse → v4l2h264dec → capssetter("video/x-raw,...") → kmssink
+        //
+        // When placed before the decoder with replace=true, capssetter
+        // strips essential H.264 caps fields (stream-format, alignment,
+        // profile, level, parsed) that v4l2h264dec requires on its sink
+        // pad.  This causes "not-negotiated (-4)" and no video output.
+        //
+        // After the decoder, the output is video/x-raw (decoded frames),
+        // and we only override the colorimetry field, leaving all other
+        // raw video caps (format, width, height, framerate, etc.) intact.
+        let capssetter = ElementFactory::make("capssetter")
+            .property_from_str("caps", "video/x-raw,colorimetry=bt709")
+            .property("join", true)
+            .property("replace", true)
+            .build()
+            .map_err(|e| {
+                PlaybackError::PipelineCreation(format!("capssetter: {}", e))
             })?;
 
         // Build kmssink.  The fd and driver-name properties are mutually
@@ -696,12 +713,12 @@ impl GstPipeline {
         })?;
 
         let bin = gstreamer::Bin::new();
-        bin.add_many([&video_queue, &h264parse, &capssetter, &v4l2dec, &kmssink]).map_err(|e| {
+        bin.add_many([&video_queue, &h264parse, &v4l2dec, &capssetter, &kmssink]).map_err(|e| {
             PlaybackError::PipelineCreation(format!("add video elements to bin: {}", e))
         })?;
 
-        Element::link_many([&video_queue, &h264parse, &capssetter, &v4l2dec, &kmssink]).map_err(|e| {
-            PlaybackError::PipelineCreation(format!("link video_queue→h264parse→capssetter→v4l2h264dec→kmssink: {}", e))
+        Element::link_many([&video_queue, &h264parse, &v4l2dec, &capssetter, &kmssink]).map_err(|e| {
+            PlaybackError::PipelineCreation(format!("link video_queue→h264parse→v4l2h264dec→capssetter→kmssink: {}", e))
         })?;
 
         // Create ghost pads for the bin (on the queue element, which is the entry point).
