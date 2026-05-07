@@ -62,6 +62,21 @@
           the buffer runs low.
         </p>
       </div>
+
+      <div class="field">
+        <label for="audioDevice">Audio Output Device</label>
+        <select id="audioDevice">
+          <option value="">Default</option>
+        </select>
+        <p class="help">
+          Select the ALSA audio output device on the Pi. Choose <strong>plughw:1,0</strong>
+          for HDMI audio if your monitor is connected via HDMI. <strong>plughw:0,0</strong>
+          is typically the headphone jack. Click <em>Refresh Devices</em> to query the Pi
+          for available outputs.
+        </p>
+        <button class="btn-test" id="refreshDevicesBtn" style="margin-top:4px">Refresh Devices</button>
+        <span id="refreshResult" class="test-result"></span>
+      </div>
     </div>
 
     <div class="card">

@@ -300,6 +300,10 @@ async fn main() -> Result<()> {
         pipeline_config.connector_id = Some(conn_id);
         info!(connector_id = conn_id, "playback engine configured with explicit connector ID");
     }
+    if !config.playback.audio_device.is_empty() {
+        pipeline_config.audio_device = config.playback.audio_device.clone();
+        info!(audio_device = %config.playback.audio_device, "playback engine configured with explicit ALSA device");
+    }
     #[cfg(feature = "hw")]
     let playback_engine: Arc<picast_playback::PlaybackEngine> = {
         Arc::new(picast_playback::PlaybackEngine::new(pipeline_config)?)

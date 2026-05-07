@@ -53,6 +53,9 @@ pub struct AppConfig {
     /// Display/DRM configuration.
     #[serde(default)]
     pub display: DisplayConfig,
+    /// Playback pipeline configuration.
+    #[serde(default)]
+    pub playback: PlaybackConfig,
     /// DLNA renderer configuration.
     #[serde(default)]
     pub dlna: DlnaConfig,
@@ -132,6 +135,21 @@ pub struct DisplayConfig {
     /// DRM device path (empty = auto-detect).
     #[serde(default)]
     pub drm_device: String,
+}
+
+/// Playback pipeline configuration.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct PlaybackConfig {
+    /// ALSA device string for audio output (e.g. "plughw:1,0" for HDMI).
+    /// When empty, alsasink uses the ALSA default device.
+    #[serde(default)]
+    pub audio_device: String,
+}
+
+impl Default for PlaybackConfig {
+    fn default() -> Self {
+        Self { audio_device: String::new() }
+    }
 }
 
 /// DLNA renderer configuration.
@@ -281,6 +299,9 @@ impl AppConfig {
         }
         if let Ok(v) = std::env::var("PICAST_DRM_DEVICE") {
             self.display.drm_device = v;
+        }
+        if let Ok(v) = std::env::var("PICAST_AUDIO_DEVICE") {
+            self.playback.audio_device = v;
         }
         if let Ok(v) = std::env::var("PICAST_DLNA_NAME") {
             self.dlna.friendly_name = v;

@@ -805,6 +805,15 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
       return true;
     }
 
+    case "FETCH_AUDIO_DEVICES": {
+      const devHost = message.host;
+      const devPort = message.port;
+      fetchAudioDevicesFromBackground(devHost, devPort)
+        .then((result) => sendResponse(result))
+        .catch((err) => sendResponse({ devices: [] }));
+      return true;
+    }
+
     case "GRANT_PERMISSION": {
       // This must be called from a user-gesture context (popup/options)
       // We can't call chrome.permissions.request() from the background script,
@@ -882,6 +891,36 @@ async function testConnectionFromBackground(host, port) {
 }
 
 // ─── Discovery ────────────────────────────────────────────────────
+
+/**
+ * Fetch ALSA audio devices from the PiCast receiver.
+ * Queries /api/audio-devices and returns the list.
+ */
+async function fetchAudioDevicesFromBackground(host, port) {
+  // Try HTTPS first, then HTTP
+  for (const scheme of ["https", "http"]) {
+    const url = `${scheme}://${host}:${port}/api/audio-devices`;
+    const controller = new AbortController();
+    const timeout = setTimeout(() => controller.abort(), 5000);
+
+    try {
+      const response = await fetch(url, {
+        method: "GET",
+        signal: controller.signal,
+      });
+      clearTimeout(timeout);
+
+      if (response.ok) {
+        const data = await response.json();
+        return { devices: Array.isArray(data) ? data : [] };
+      }
+    } catch (e) {
+      clearTimeout(timeout);
+      // Try next scheme
+    }
+  }
+  return { devices: [] };
+}
 
 /**
  * Attempt to discover a PiCast device on the local network.

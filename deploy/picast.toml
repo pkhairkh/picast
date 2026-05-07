@@ -13,6 +13,15 @@ cookie_path = "/run/tor/control.authcookie"
 [display]
 drm_device = ""
 
+[playback]
+# ALSA audio output device. Empty = ALSA default.
+# Common values on Raspberry Pi:
+#   "plughw:0,0"  — Headphones (3.5mm jack)
+#   "plughw:1,0"  — HDMI 0 (vc4hdmi0)
+#   "plughw:2,0"  — HDMI 1 (vc4hdmi1)
+# Use "plughw" (not "hw") so ALSA can convert formats.
+audio_device = ""
+
 [dlna]
 friendly_name = "PiCast"
 port = 49152

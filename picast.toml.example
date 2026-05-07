@@ -33,6 +33,16 @@ cookie_path = "/run/tor/control.authcookie"
 # DRM device path (empty = auto-detect, "mock" = no hardware).
 drm_device = ""
 
+[playback]
+# ALSA audio output device. Empty = ALSA default.
+# Common values on Raspberry Pi:
+#   "plughw:0,0"  — Headphones (3.5mm jack)
+#   "plughw:1,0"  — HDMI 0 (vc4hdmi0)
+#   "plughw:2,0"  — HDMI 1 (vc4hdmi1)
+# Use "plughw" (not "hw") so ALSA can convert formats.
+# Override with PICAST_AUDIO_DEVICE env var.
+audio_device = ""
+
 [dlna]
 # Friendly name advertised on the local network via SSDP.
 friendly_name = "PiCast"

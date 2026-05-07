@@ -15,6 +15,7 @@
 //! | POST   | `/api/volume`   | Set volume 0–100                |
 //! | GET    | `/api/status`   | Current player state & metadata |
 //! | GET    | `/api/health`   | Health check                    |
+//! | GET    | `/api/audio-devices` | List ALSA playback devices |
 
 use anyhow::Result;
 use http_body_util::Full;
@@ -84,6 +85,19 @@ struct ErrorResponse {
 #[derive(Debug, Serialize)]
 struct HealthResponse {
     status: String,
+}
+
+/// An ALSA playback device returned by `/api/audio-devices`.
+#[derive(Debug, Serialize)]
+struct AlsaDevice {
+    /// ALSA device string (e.g. "plughw:1,0").
+    device: String,
+    /// Human-readable card name (e.g. "vc4hdmi0").
+    card_name: String,
+    /// Card index number.
+    card_index: u32,
+    /// Device index number.
+    device_index: u32,
 }
 
 // ── HTTP API Server ──────────────────────────────────────────────────
@@ -209,6 +223,12 @@ async fn handle_request(
         (Method::GET, "/api/health") => {
             let resp = HealthResponse { status: "ok".into() };
             json_response(StatusCode::OK, &resp)
+        },
+
+        // ALSA playback devices.
+        (Method::GET, "/api/audio-devices") => {
+            let devices = list_alsa_devices();
+            json_response(StatusCode::OK, &devices)
         },
 
         // Status.
@@ -386,6 +406,113 @@ fn is_safe_cast_url(url: &str) -> Result<()> {
         "javascript" => Err(anyhow::anyhow!("javascript: URLs are not allowed")),
         scheme => Err(anyhow::anyhow!("unsupported URL scheme: {} — use http:// or https://", scheme)),
     }
+}
+
+/// List available ALSA playback devices by parsing `/proc/asound/cards` and
+/// `/proc/asound/pcm`.  Returns a default entry plus one per detected card.
+///
+/// This runs on the Pi itself, so it reads local procfs.  If procfs is
+/// unavailable (e.g. running in a container), falls back to an empty list
+/// with just the "default" entry.
+fn list_alsa_devices() -> Vec<AlsaDevice> {
+    let mut devices = vec![AlsaDevice {
+        device: "default".into(),
+        card_name: "ALSA Default".into(),
+        card_index: 0,
+        device_index: 0,
+    }];
+
+    // Parse /proc/asound/cards for card indices and names.
+    // Format: " 0 [Headphones   ]: ... - bcm2835 Headphones ..."
+    //         " 1 [vc4hdmi0     ]: ... - vc4-hdmi ..."
+    let cards_content = match std::fs::read_to_string("/proc/asound/cards") {
+        Ok(c) => c,
+        Err(_) => return devices,
+    };
+
+    // Parse card entries: "index [shortname]: ... - longname"
+    let mut cards: Vec<(u32, String, String)> = Vec::new();
+    for line in cards_content.lines() {
+        let line = line.trim();
+        if line.is_empty() {
+            continue;
+        }
+        // Each card spans 2 lines; the first line has the index and names.
+        // Format: "0 [Headphones     ]: bcm2835_0 - bcm2835 Headphones"
+        if let Some(bracket_end) = line.find(']') {
+            let before_bracket = &line[..bracket_end];
+            // Extract card index from before the bracket
+            if let Some(idx_str) = before_bracket.split_whitespace().next() {
+                if let Ok(card_idx) = idx_str.parse::<u32>() {
+                    // Extract short name from between brackets
+                    let short_name = before_bracket
+                        .find('[')
+                        .map(|pos| before_bracket[pos + 1..].trim().to_string())
+                        .unwrap_or_default();
+                    // Extract long name from after " - "
+                    let long_name = line
+                        .split(" - ")
+                        .nth(1)
+                        .map(|s| s.trim().to_string())
+                        .unwrap_or_else(|| short_name.clone());
+                    cards.push((card_idx, short_name, long_name));
+                }
+            }
+        }
+    }
+
+    // Parse /proc/asound/pcm for playback devices per card.
+    // Format: "00-00: bcm2835 ALSA : bcm2835 Headphones : playback 1"
+    //         "01-00: vc4-hdmi : vc4-hdmi 0 : playback 1"
+    let pcm_content = match std::fs::read_to_string("/proc/asound/pcm") {
+        Ok(c) => c,
+        Err(_) => {
+            // No pcm info — add one plughw device per card
+            for (card_idx, _short, long) in &cards {
+                devices.push(AlsaDevice {
+                    device: format!("plughw:{},0", card_idx),
+                    card_name: long.clone(),
+                    card_index: *card_idx,
+                    device_index: 0,
+                });
+            }
+            return devices;
+        }
+    };
+
+    for line in pcm_content.lines() {
+        let line = line.trim();
+        if !line.contains("playback") {
+            continue;
+        }
+        // Parse "CC-DD: ..." where CC = card index, DD = device index
+        let parts: Vec<&str> = line.splitn(2, ':').collect();
+        if parts.len() < 2 {
+            continue;
+        }
+        let id_parts: Vec<&str> = parts[0].trim().split('-').collect();
+        if id_parts.len() < 2 {
+            continue;
+        }
+        if let (Ok(card_idx), Ok(dev_idx)) =
+            (id_parts[0].trim().parse::<u32>(), id_parts[1].trim().parse::<u32>())
+        {
+            // Find the card name
+            let card_name = cards
+                .iter()
+                .find(|(idx, _, _)| *idx == card_idx)
+                .map(|(_, _, long)| long.as_str())
+                .unwrap_or("Unknown");
+            devices.push(AlsaDevice {
+                device: format!("plughw:{},{}", card_idx, dev_idx),
+                card_name: card_name.to_string(),
+                card_index: card_idx,
+                device_index: dev_idx,
+            });
+        }
+    }
+
+    devices
 }
 
 impl StatusResponse {

@@ -7,15 +7,15 @@
 //! ## Pipeline Topology
 //!
 //! ```text
-//! ┌──────────┐    ┌────────┐    ┌──────────┐    ┌───────┐    ┌──────────┐    ┌───────────┐    ┌─────────┐
-//! │souphttpsrc│───►│queue2  │───►│parsebin  │──┬►│queue  │───►│h264parse │───►│v4l2h264dec│───►│kmssink  │
-//! │(SOCKS5h) │    │(buffer)│    │(demux)   │  │ │       │    │          │    │(HW decode)│    │(DRM/KMS)│
-//! └──────────┘    └────────┘    └──────────┘  │ └───────┘    └──────────┘    └───────────┘    └─────────┘
-//!                                               │
-//!                                               │ ┌───────┐    ┌──────────────┐    ┌──────────────┐    ┌────────┐    ┌─────────┐
-//!                                               └►│queue  │───►│audioconvert  │───►│audioresample │───►│volume │───►│alsasink │
-//!                                                 │       │    │              │    │              │    │        │    │(HDMI)   │
-//!                                                 └───────┘    └──────────────┘    └──────────────┘    └────────┘    └─────────┘
+//! ┌──────────┐    ┌────────┐    ┌──────────┐    ┌───────┐    ┌──────────┐    ┌────────────────────┐    ┌──────────────┐
+//! │souphttpsrc│───►│queue2  │───►│parsebin  │──┬►│queue  │───►│h264parse │───►│v4l2h264dec(dmabuf)│───►│kmssink       │
+//! │(SOCKS5h) │    │(buffer)│    │(demux)   │  │ │       │    │          │    │(zero-copy HW dec) │    │(DRM/KMS,     │
+//! └──────────┘    └────────┘    └──────────┘  │ └───────┘    └──────────┘    └────────────────────┘    │ max-lateness) │
+//!                                               │                                                         └──────────────┘
+//!                                               │ ┌───────┐    ┌──────────────┐    ┌──────────────┐    ┌────────┐    ┌─────────────────────┐
+//!                                               └►│queue  │───►│audioconvert  │───►│audioresample │───►│volume │───►│alsasink             │
+//!                                                 │       │    │              │    │              │    │        │    │(device=plughw:C,D)  │
+//!                                                 └───────┘    └──────────────┘    └──────────────┘    └────────┘    └─────────────────────┘
 //! ```
 //!
 //! ## Fallback
@@ -293,20 +293,31 @@ impl GstPipeline {
             .build()
             .map_err(|e| PlaybackError::PipelineCreation(format!("volume: {}", e)))?;
 
-        // audio sink (alsasink) — async=false so it does NOT block
-        // the pipeline's Paused state change when no audio pad is linked.
+        // audio sink (alsasink) — with configurable ALSA device.
         //
-        // With kmssink using async=true (preroll-aware), the pipeline
-        // only reaches Playing after kmssink has received the first video
-        // frame.  Since both video and audio pads are linked at roughly
-        // the same time by parsebin, audio data reaches alsasink before
-        // or during the pipeline's Paused→Playing transition.  This means
-        // audio buffers are NOT late when the clock starts.
+        // Previous versions used async=false to prevent alsasink from
+        // blocking preroll, but this caused clock/sync issues: audio
+        // buffers could be scheduled incorrectly relative to the pipeline
+        // clock.  Now both kmssink and alsasink use the default async=true,
+        // so the pipeline waits for both sinks to preroll before starting
+        // the clock, ensuring audio and video are properly synchronised.
         //
-        // If no audio stream exists, alsasink never receives data but
-        // doesn't block the pipeline either (async=false).
-        let audiosink = ElementFactory::make(&config.audio_sink)
-            .property("async", false)
+        // The `device` property routes audio to a specific ALSA output
+        // (e.g. "plughw:1,0" for HDMI).  When empty, ALSA's default
+        // device is used.  Use `plughw` (not `hw`) because plughw allows
+        // ALSA to convert formats — HDMI devices may not accept the exact
+        // F32LE format that GStreamer negotiates.
+        let mut audiosink_builder = ElementFactory::make(&config.audio_sink);
+        if !config.audio_device.is_empty() {
+            audiosink_builder = audiosink_builder.property("device", &config.audio_device);
+            tracing::info!(
+                device = %config.audio_device,
+                "alsasink: using explicit ALSA device"
+            );
+        } else {
+            tracing::info!("alsasink: using ALSA default device (no device property set)");
+        }
+        let audiosink = audiosink_builder
             .build()
             .map_err(|e| {
                 PlaybackError::PipelineCreation(format!("{}: {}", config.audio_sink, e))
@@ -585,7 +596,7 @@ impl GstPipeline {
     }
 
     /// Build the hardware-accelerated video branch:
-    /// `h264parse → v4l2h264dec(mmap) → kmssink`
+    /// `h264parse → v4l2h264dec(dmabuf) → kmssink`
     ///
     /// No `capssetter` is used.  Previous versions used capssetter to
     /// force `colorimetry=bt709` on the decoded output, but this caused
@@ -604,9 +615,13 @@ impl GstPipeline {
     /// kmssink properties or a GStreamer video-filter that only
     /// modifies the colorimetry field without touching other caps.
     ///
-    /// We use `capture-io-mode=mmap` instead of `dmabuf` because
-    /// dmabuf adds `memory:DMABuf` caps features that kmssink may not
-    /// properly negotiate on older GStreamer versions (< 1.22).
+    /// We use `capture-io-mode=dmabuf` (and `output-io-mode=dmabuf`)
+    /// to enable the Pi zero-copy decode path.  With dmabuf, decoded
+    /// frames stay in GPU/DMA memory and are passed directly to kmssink
+    /// without copying through CPU/system memory.  This is the single
+    /// most important property for PiCast's performance on Pi 4 —
+    /// without it, `mmap` mode forces frames through system memory,
+    /// which causes high CPU usage and frequent dropped buffers.
     fn build_hw_video_bin(config: &PipelineConfig) -> Result<(Element, Element), PlaybackError> {
         let video_queue = ElementFactory::make("queue")
             .property("max-size-buffers", 60u32)
@@ -623,10 +638,14 @@ impl GstPipeline {
             })?;
 
         // V4L2 hardware H.264 decoder using bcm2835-codec on Pi 4.
-        // Use mmap mode — dmabuf mode adds memory:DMABuf caps features
-        // that kmssink may not negotiate correctly.
+        // Use dmabuf mode for zero-copy decode — decoded frames stay in
+        // DMA memory and are passed directly to kmssink without CPU copies.
+        // Without capture-io-mode=dmabuf, the decoder allocates system
+        // memory buffers and the zero-copy path is broken, causing low
+        // FPS and dropped buffers ("A lot of buffers are being dropped").
         let v4l2dec = ElementFactory::make("v4l2h264dec")
-            .property_from_str("capture-io-mode", "mmap")
+            .property_from_str("output-io-mode", "dmabuf")
+            .property_from_str("capture-io-mode", "dmabuf")
             .build()
             .map_err(|e| {
                 PlaybackError::PipelineCreation(format!(
@@ -642,7 +661,8 @@ impl GstPipeline {
         // use it (and skip driver-name).  Otherwise, use driver-name to
         // let kmssink find and open the device itself.
         let mut kmssink_builder = ElementFactory::make(&config.video_sink)
-            .property("can-scale", true);
+            .property("can-scale", true)
+            .property("max-lateness", 40_000_000i64); // 40ms — default 5ms is too aggressive on Pi
         // NOTE: kmssink uses the default async=true (preroll-aware).
         //
         // Previous versions set async=false to avoid preroll stalls, but

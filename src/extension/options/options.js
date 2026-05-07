@@ -15,6 +15,7 @@ var DEFAULTS = {
   showNotifications: true,
   autoCast: false,
   quality: "720p",
+  audioDevice: "",
 };
 
 // ─── DOM Elements ──────────────────────────────────────────────────
@@ -23,11 +24,14 @@ var piHost = document.getElementById("piHost");
 var httpPort = document.getElementById("httpPort");
 var wsPort = document.getElementById("wsPort");
 var quality = document.getElementById("quality");
+var audioDevice = document.getElementById("audioDevice");
 var torMode = document.getElementById("torMode");
 var showNotifications = document.getElementById("showNotifications");
 var autoCast = document.getElementById("autoCast");
 var testBtn = document.getElementById("testBtn");
 var testResult = document.getElementById("testResult");
+var refreshDevicesBtn = document.getElementById("refreshDevicesBtn");
+var refreshResult = document.getElementById("refreshResult");
 var saveBtn = document.getElementById("saveBtn");
 var resetBtn = document.getElementById("resetBtn");
 var saveStatus = document.getElementById("saveStatus");
@@ -43,6 +47,10 @@ function loadSettings() {
     torMode.value = settings.torMode;
     showNotifications.checked = settings.showNotifications;
     autoCast.checked = settings.autoCast;
+    // Load audio device — populate list first, then set value
+    loadAudioDevices(function () {
+      audioDevice.value = settings.audioDevice || "";
+    });
   });
 }
 
@@ -90,6 +98,7 @@ function saveSettings() {
     httpPort: http,
     wsPort: ws,
     quality: quality.value,
+    audioDevice: audioDevice.value,
     torMode: torMode.value,
     showNotifications: showNotifications.checked,
     autoCast: autoCast.checked,
@@ -172,6 +181,54 @@ function testConnection() {
 saveBtn.addEventListener("click", saveSettings);
 resetBtn.addEventListener("click", resetSettings);
 testBtn.addEventListener("click", testConnection);
+refreshDevicesBtn.addEventListener("click", function () {
+  loadAudioDevices(function () {
+    refreshResult.textContent = "Devices refreshed!";
+    refreshResult.className = "test-result success";
+    setTimeout(function () { refreshResult.textContent = ""; }, 2000);
+  });
+});
+
+// ─── Load Audio Devices from Pi ─────────────────────────────────────
+
+function loadAudioDevices(callback) {
+  var host = piHost.value.trim() || DEFAULTS.piHost;
+  try {
+    var u = new URL(host.startsWith("http") ? host : "http://" + host);
+    host = u.hostname;
+  } catch (e) {}
+  var port = parseInt(httpPort.value, 10) || DEFAULTS.httpPort;
+
+  chrome.runtime.sendMessage(
+    { type: "FETCH_AUDIO_DEVICES", host: host, port: port },
+    function (result) {
+      if (chrome.runtime.lastError || !result || !result.devices) {
+        // Failed to fetch — keep existing options
+        if (callback) callback();
+        return;
+      }
+      populateAudioDeviceSelect(result.devices);
+      if (callback) callback();
+    }
+  );
+}
+
+function populateAudioDeviceSelect(devices) {
+  // Preserve current selection
+  var current = audioDevice.value;
+  // Clear all except default
+  audioDevice.innerHTML = '<option value="">Default</option>';
+  devices.forEach(function (d) {
+    var opt = document.createElement("option");
+    opt.value = d.device;
+    opt.textContent = d.card_name + " (" + d.device + ")";
+    audioDevice.appendChild(opt);
+  });
+  // Restore selection
+  if (current) {
+    audioDevice.value = current;
+  }
+}
 
 // ─── Init ──────────────────────────────────────────────────────────
 

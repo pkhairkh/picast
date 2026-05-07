@@ -113,6 +113,13 @@ pub struct PipelineConfig {
     pub video_sink: String,
     /// GStreamer audio sink element (e.g. `"alsasink"`, `"pulseaudio"`).
     pub audio_sink: String,
+    /// ALSA device string for the audio sink (e.g. `"plughw:1,0"` for HDMI).
+    /// When empty, alsasink uses the ALSA default device.
+    /// Use `plughw` (not `hw`) because plughw allows ALSA format
+    /// conversion — HDMI devices may not accept the exact F32LE
+    /// format that GStreamer negotiates.
+    #[serde(default)]
+    pub audio_device: String,
     /// Buffer duration in milliseconds for the stream buffer.
     pub buffer_duration_ms: u64,
     /// Whether to enable hardware-accelerated decoding (V4L2 M2M).
@@ -146,6 +153,7 @@ impl Default for PipelineConfig {
         Self {
             video_sink: "kmssink".into(),
             audio_sink: "alsasink".into(),
+            audio_device: String::new(), // empty = ALSA default
             buffer_duration_ms: 3000,
             hw_accel: true,
             volume: 1.0,
