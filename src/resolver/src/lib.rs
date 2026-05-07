@@ -280,12 +280,22 @@ impl Resolver {
                         tracing::info!(url = url, resolver = "voe", "using Voe custom resolver");
                         let mut result = custom::resolve_voe(url).await?;
                         result.category = UrlCategory::WebPage;
+                        // Cache before returning so subsequent requests hit the cache.
+                        {
+                            let cache = self.cache.lock().await;
+                            cache.insert(url, result.clone());
+                        }
                         return Ok(result);
                     }
                     if custom::is_doodstream_domain(host) {
                         tracing::info!(url = url, resolver = "doodstream", "using DoodStream custom resolver");
                         let mut result = custom::resolve_doodstream(url).await?;
                         result.category = UrlCategory::WebPage;
+                        // Cache before returning so subsequent requests hit the cache.
+                        {
+                            let cache = self.cache.lock().await;
+                            cache.insert(url, result.clone());
+                        }
                         return Ok(result);
                     }
                 }

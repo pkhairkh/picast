@@ -173,7 +173,7 @@ impl WebSocketServer {
                                         message: format!("too many connections (max {})", MAX_CONNECTIONS),
                                     };
                                     if let Ok(json) = serde_json::to_string(&err) {
-                                        let _ = ws_err.send(Message::Text(json)).await;
+                                        let _ = ws_err.send(Message::text(json)).await;
                                     }
                                     let _ = ws_err.send(Message::Close(None)).await;
                                 }
@@ -280,7 +280,7 @@ async fn handle_client(
     // Send connected event.
     let connected = ServerEvent::Connected;
     let connected_json = serde_json::to_string(&connected)?;
-    ws.send(Message::Text(connected_json)).await?;
+    ws.send(Message::text(connected_json)).await?;
 
     // Ping interval.
     let mut ping_interval = tokio::time::interval(Duration::from_secs(30));
@@ -291,11 +291,12 @@ async fn handle_client(
             msg = ws.next() => {
                 match msg {
                     Some(Ok(Message::Text(text))) => {
+                        // tungstenite 0.24: Text wraps Utf8Bytes which derefs to &str
                         match serde_json::from_str::<ClientCommand>(&text) {
                             Ok(ClientCommand::Ping) => {
                                 // Application-level ping — respond with Pong immediately.
                                 let pong_json = serde_json::to_string(&ServerEvent::Pong)?;
-                                ws.send(Message::Text(pong_json)).await?;
+                                ws.send(Message::text(pong_json)).await?;
                             },
                             Ok(cmd) => {
                                 if let Err(e) = handle_command(&session, cmd).await {
@@ -303,7 +304,7 @@ async fn handle_client(
                                         message: e.to_string(),
                                     };
                                     let err_json = serde_json::to_string(&err_event)?;
-                                    ws.send(Message::Text(err_json)).await?;
+                                    ws.send(Message::text(err_json)).await?;
                                 }
                             }
                             Err(e) => {
@@ -311,7 +312,7 @@ async fn handle_client(
                                     message: format!("invalid command: {}", e),
                                 };
                                 let err_json = serde_json::to_string(&err_event)?;
-                                ws.send(Message::Text(err_json)).await?;
+                                ws.send(Message::text(err_json)).await?;
                             }
                         }
                     }
@@ -329,7 +330,7 @@ async fn handle_client(
                                 if let Err(e) = handle_command(&session, cmd).await {
                                     let err_event = ServerEvent::Error { message: e.to_string() };
                                     let err_json = serde_json::to_string(&err_event)?;
-                                    ws.send(Message::Text(err_json)).await?;
+                                    ws.send(Message::text(err_json)).await?;
                                 }
                             }
                         }
@@ -367,7 +368,7 @@ async fn handle_client(
                         let server_event = map_session_event(&session_event, current_session.as_ref());
                         if let Some(event) = server_event {
                             let json = serde_json::to_string(&event)?;
-                            ws.send(Message::Text(json)).await?;
+                            ws.send(Message::text(json)).await?;
                         }
                     }
                     Err(broadcast::error::RecvError::Lagged(count)) => {

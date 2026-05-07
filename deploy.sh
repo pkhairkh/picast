@@ -31,6 +31,34 @@ echo ""
 # ── Build ──────────────────────────────────────────────────────────────
 if [[ "$SKIP_BUILD" == false ]]; then
     echo "[1/5] Building release binary with hw feature..."
+
+    # Ensure rustc meets the MSRV (1.88).  Several transitive dependencies
+    # (time 0.3.46+, cookie_store 0.22+, idna 1.x / ICU4X 2.x) require
+    # rustc 1.88 or newer.  If rustup is available we install the
+    # minimum required toolchain automatically.
+    MIN_RUSTC_MAJOR=1
+    MIN_RUSTC_MINOR=88
+    RUSTC_VER=$(rustc --version 2>/dev/null | sed -n 's/rustc \([0-9]*\)\.\([0-9]*\).*/\1 \2/p')
+    if [[ -z "$RUSTC_VER" ]]; then
+        echo "      ERROR: rustc not found.  Install via https://rustup.rs"
+        exit 1
+    fi
+    RUSTC_MAJOR=$(echo "$RUSTC_VER" | awk '{print $1}')
+    RUSTC_MINOR=$(echo "$RUSTC_VER" | awk '{print $2}')
+    if [[ "$RUSTC_MAJOR" -lt "$MIN_RUSTC_MAJOR" ]] || \
+       [[ "$RUSTC_MAJOR" -eq "$MIN_RUSTC_MAJOR" && "$RUSTC_MINOR" -lt "$MIN_RUSTC_MINOR" ]]; then
+        echo "      rustc $RUSTC_MAJOR.$RUSTC_MINOR is too old (need >= $MIN_RUSTC_MAJOR.$MIN_RUSTC_MINOR)"
+        if command -v rustup &>/dev/null; then
+            echo "      Installing rustc $MIN_RUSTC_MAJOR.$MIN_RUSTC_MINOR.0 via rustup …"
+            rustup install "$MIN_RUSTC_MAJOR.$MIN_RUSTC_MINOR.0"
+            rustup default "$MIN_RUSTC_MAJOR.$MIN_RUSTC_MINOR.0"
+            echo "      Now using $(rustc --version)"
+        else
+            echo "      ERROR: Please upgrade rustc manually (https://rustup.rs)"
+            exit 1
+        fi
+    fi
+
     (cd "$REPO_DIR" && cargo build --release --features hw)
     echo "      Build complete."
 else
@@ -63,7 +91,7 @@ if [[ ! -d "$CONFIG_DIR" ]]; then
 fi
 if [[ ! -f "$CONFIG_DIR/picast.toml" ]]; then
     echo "      WARNING: No config file at $CONFIG_DIR/picast.toml"
-    echo "               Copy config/picast.toml there before starting."
+    echo "               Copy deploy/picast.toml there before starting."
 fi
 
 # ── Restart service ───────────────────────────────────────────────────
