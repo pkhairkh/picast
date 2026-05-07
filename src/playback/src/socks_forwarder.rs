@@ -20,7 +20,6 @@
 //! with the SAME username. Tor's `IsolateSOCKSAuth` maps identical usernames
 //! to the same circuit, so both resolution and fetch exit through the same IP.
 
-use std::sync::Arc;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::{TcpListener, TcpStream};
 use tokio::sync::oneshot;
@@ -184,7 +183,7 @@ async fn handle_connect(
         "SOCKS5 forwarder: connecting through Tor"
     );
 
-    let remote = socks5_connect(socks_addr, target, isolation_username).await?;
+    let mut remote = socks5_connect(socks_addr, target, isolation_username).await?;
 
     // Send "200 Connection Established" to souphttpsrc.
     client
@@ -193,15 +192,18 @@ async fn handle_connect(
         .map_err(|e| format!("write 200: {}", e))?;
 
     // Tunnel data bidirectionally between client and remote.
-    let (mut cr, mut cw) = client.split();
-    let (mut rr, mut rw) = remote.split();
+    // Use into_split() to get owned halves (required for tokio::spawn which
+    // needs 'static). split() returns borrowed halves tied to &mut TcpStream
+    // which can't outlive this function.
+    let (cr, cw) = client.into_split();
+    let (rr, rw) = remote.into_split();
 
     let client_to_remote = tokio::spawn(async move {
-        let _ = tokio::io::copy(&mut cr, &mut rw).await;
+        let _ = tokio::io::copy(&mut std::pin::pin!(cr), &mut std::pin::pin!(rw)).await;
         let _ = rw.shutdown().await;
     });
     let remote_to_client = tokio::spawn(async move {
-        let _ = tokio::io::copy(&mut rr, &mut cw).await;
+        let _ = tokio::io::copy(&mut std::pin::pin!(rr), &mut std::pin::pin!(cw)).await;
         let _ = cw.shutdown().await;
     });
 
