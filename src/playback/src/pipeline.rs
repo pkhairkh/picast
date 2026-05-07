@@ -341,20 +341,57 @@ impl GstPipeline {
         }
 
         // ── Dynamic pad linking (parsebin → video/audio) ────────────
+        //
+        // parsebin emits "pad-added" for each stream it discovers in the
+        // container.  The handler must link each pad to the appropriate
+        // branch (video bin or audio chain).
+        //
+        // IMPORTANT: when parsebin creates a source pad, current_caps()
+        // may return None if caps negotiation hasn't completed yet.  This
+        // is especially common for the *first* pad (usually video) — the
+        // demuxer creates the pad before the downstream decoder has
+        // responded with its accepted caps.  If we only check
+        // current_caps(), we miss the video pad and the screen stays
+        // black forever.
+        //
+        // Strategy:
+        //   1. Try current_caps() (already-negotiated caps).
+        //   2. If None, fall back to query_caps(None) which returns the
+        //      pad's template caps — these describe what media type the
+        //      pad *will* produce (e.g. "video/x-h264") even before
+        //      negotiation completes.
+        //   3. If we still can't determine the type, try linking to the
+        //      video bin first (most common case for unknown pads) and
+        //      fall back to audio if that fails.
         let video_bin_weak = video_bin.downgrade();
         let audio_queue_weak = audio_queue.downgrade();
         let pipeline_weak = pipeline.downgrade();
 
         parsebin.connect_pad_added(move |_parsebin, pad| {
-            let caps = pad.current_caps();
+            // Step 1: Try already-negotiated caps
+            let current_caps = pad.current_caps();
+
+            // Step 2: Fallback to template/query caps
+            let caps = current_caps.or_else(|| {
+                let query = pad.query_caps(None);
+                if query.is_fixed() || !query.is_empty() {
+                    tracing::info!(
+                        pad = %pad.name(),
+                        query_caps = %query.to_string(),
+                        "current_caps was empty — using query_caps (template caps) to determine media type"
+                    );
+                    Some(query)
+                } else {
+                    None
+                }
+            });
+
             let media_type = caps.as_ref().and_then(|c| c.structure(0).map(|s| s.name().to_string()));
 
             let is_video = media_type.as_ref().map(|t| t.starts_with("video/")).unwrap_or(false);
-
             let is_audio = media_type.as_ref().map(|t| t.starts_with("audio/")).unwrap_or(false);
 
-            // Log every pad that parsebin creates — this is critical for
-            // diagnosing cases where video never appears on screen.
+            // Log every pad that parsebin creates
             let pad_name = pad.name().to_string();
             let caps_str = caps.as_ref().map(|c| c.to_string()).unwrap_or_default();
             tracing::info!(
@@ -451,6 +488,90 @@ impl GstPipeline {
                                 }
                             }
                         },
+                    }
+                }
+            } else {
+                // Neither video nor audio — could be a subtitle, metadata,
+                // or (most critically) a video/audio pad whose caps aren't
+                // available yet.  Try to link it to the video bin first
+                // (the most common case for uncategorised pads), and if
+                // that fails, try the audio chain.
+                tracing::warn!(
+                    pad = %pad_name,
+                    media_type = ?media_type,
+                    caps = %caps_str,
+                    "parsebin pad with unrecognised media type — attempting to link as video first, then audio"
+                );
+
+                // Try video bin
+                let mut linked = false;
+                if let Some(vbin) = video_bin_weak.upgrade() {
+                    let sink_pad =
+                        vbin.static_pad("sink").expect("video bin should have a sink pad");
+                    if !sink_pad.is_linked() {
+                        match pad.link(&sink_pad) {
+                            Ok(_) => {
+                                tracing::info!("linked unknown pad → video bin (heuristic)");
+                                linked = true;
+                            },
+                            Err(e) => {
+                                tracing::warn!(
+                                    error = ?e,
+                                    "unknown pad failed to link as video — trying audio"
+                                );
+                            },
+                        }
+                    }
+                }
+
+                // Try audio chain
+                if !linked {
+                    if let Some(aq) = audio_queue_weak.upgrade() {
+                        let sink_pad =
+                            aq.static_pad("sink").expect("audio_queue should have a sink pad");
+                        if !sink_pad.is_linked() {
+                            match pad.link(&sink_pad) {
+                                Ok(_) => {
+                                    tracing::info!("linked unknown pad → audio_queue (heuristic)");
+                                    linked = true;
+                                },
+                                Err(e) => {
+                                    tracing::warn!(
+                                        error = ?e,
+                                        "unknown pad failed to link as audio — adding fakesink"
+                                    );
+                                },
+                            }
+                        }
+                    }
+                }
+
+                // If nothing worked, add fakesink to prevent pipeline death
+                if !linked {
+                    tracing::warn!(
+                        pad = %pad_name,
+                        "could not link unknown pad to video or audio — adding fakesink to prevent pipeline error"
+                    );
+                    if let Some(pipe) = pipeline_weak.upgrade() {
+                        match ElementFactory::make("fakesink")
+                            .property("sync", false)
+                            .property("silent", true)
+                            .build()
+                        {
+                            Ok(fakesink) => {
+                                if let Err(add_err) = pipe.add(&fakesink) {
+                                    tracing::warn!(error = %add_err, "failed to add fakesink for unknown pad");
+                                } else if let Err(link_err) = pad.link(&fakesink.static_pad("sink").expect("fakesink sink pad")) {
+                                    tracing::warn!(error = ?link_err, "failed to link unknown pad to fakesink");
+                                } else {
+                                    let _ = fakesink.set_state(State::Ready);
+                                    tracing::info!("fakesink added for unrecognised pad");
+                                }
+                            },
+                            Err(mk_err) => {
+                                tracing::warn!(error = %mk_err, "failed to create fakesink for unknown pad");
+                            },
+                        }
                     }
                 }
             }
