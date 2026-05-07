@@ -264,6 +264,16 @@ impl GstPipeline {
                             "souphttpsrc has no 'proxy' property; cannot route media through Tor"
                         );
                     }
+
+                    // Diagnostic: check the Tor exit IP to verify circuit isolation.
+                    // If the exit IP doesn't match the 'i=' parameter in the CDN URL,
+                    // the CDN will return 403 Forbidden.
+                    let diag_socks = socks_addr.to_string();
+                    let diag_username = isolation_username.to_string();
+                    tokio::spawn(async move {
+                        SocksForwarder::check_exit_ip(&diag_socks, &diag_username).await;
+                    });
+
                     socks_forwarder = Some(forwarder);
                 }
                 Err(e) => {

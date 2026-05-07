@@ -123,6 +123,66 @@ impl SocksForwarder {
         })
     }
 
+    /// Check the Tor exit IP by connecting through SOCKS5 to an IP echo service.
+    /// This diagnostic helps verify that the resolver and fetcher are using
+    /// the same Tor circuit (and thus the same exit IP). If the exit IP
+    /// doesn't match the `i=` parameter in the CDN URL, the CDN will
+    /// return 403 Forbidden.
+    pub async fn check_exit_ip(socks_addr: &str, isolation_username: &str) {
+        tracing::info!("Checking Tor exit IP for circuit isolation diagnostic...");
+
+        // Connect to api.ipify.org:80 through Tor SOCKS5
+        match socks5_connect(socks_addr, "api.ipify.org:80", isolation_username).await {
+            Ok(mut stream) => {
+                // Send a simple HTTP GET request
+                let request = b"GET / HTTP/1.1\r\nHost: api.ipify.org\r\nConnection: close\r\n\r\n";
+                if let Err(e) = stream.write_all(request).await {
+                    tracing::warn!(error = %e, "exit IP check: failed to send HTTP request");
+                    return;
+                }
+
+                // Read the response
+                let mut buf = vec![0u8; 1024];
+                match tokio::time::timeout(
+                    std::time::Duration::from_secs(10),
+                    stream.read(&mut buf),
+                ).await {
+                    Ok(Ok(n)) if n > 0 => {
+                        let response = String::from_utf8_lossy(&buf[..n]);
+                        // Parse the IP from the HTTP response body
+                        // Response format: HTTP/1.1 200 OK\r\n...\r\n<IP>
+                        if let Some(body) = response.split("\r\n\r\n").nth(1) {
+                            let ip = body.trim();
+                            tracing::info!(
+                                exit_ip = %ip,
+                                username = %isolation_username,
+                                "Tor exit IP diagnostic: this is the IP the CDN will see. \
+                                 Compare with the 'i=' parameter in the CDN URL."
+                            );
+                        } else {
+                            tracing::warn!(
+                                response = %response,
+                                "exit IP check: couldn't parse HTTP response body"
+                            );
+                        }
+                    },
+                    Ok(Ok(_)) => {
+                        tracing::warn!("exit IP check: empty response from ipify");
+                    },
+                    Ok(Err(e)) => {
+                        tracing::warn!(error = %e, "exit IP check: failed to read response");
+                    },
+                    Err(_) => {
+                        tracing::warn!("exit IP check: timed out waiting for response");
+                    },
+                }
+            },
+            Err(e) => {
+                tracing::warn!(error = %e, "exit IP check: failed to connect through Tor SOCKS5");
+            },
+        }
+    }
+
     /// The local HTTP proxy address (e.g. "127.0.0.1:42321").
     /// Set souphttpsrc's `proxy` property to `http://{local_addr}`.
     pub fn proxy_url(&self) -> String {
@@ -354,7 +414,7 @@ async fn socks5_connect(
 
     // Consume the bound address based on ATYP.
     let atyp = reply_header[3];
-    match atyp {
+    let bound_addr_str = match atyp {
         0x01 => {
             // IPv4: 4 bytes + 2 port
             let mut addr = [0u8; 6];
@@ -362,6 +422,7 @@ async fn socks5_connect(
                 .read_exact(&mut addr)
                 .await
                 .map_err(|e| format!("SOCKS5 addr read: {}", e))?;
+            format!("{}.{}.{}.{}:{}", addr[0], addr[1], addr[2], addr[3], u16::from_be_bytes([addr[4], addr[5]]))
         }
         0x03 => {
             // Domain name: 1 len + name + 2 port
@@ -375,6 +436,7 @@ async fn socks5_connect(
                 .read_exact(&mut domain)
                 .await
                 .map_err(|e| format!("SOCKS5 domain read: {}", e))?;
+            format!("<domain>")
         }
         0x04 => {
             // IPv6: 16 bytes + 2 port
@@ -383,16 +445,18 @@ async fn socks5_connect(
                 .read_exact(&mut addr)
                 .await
                 .map_err(|e| format!("SOCKS5 IPv6 addr: {}", e))?;
+            format!("<ipv6>")
         }
         other => {
             return Err(format!("SOCKS5 unknown ATYP {}", other));
         }
-    }
+    };
 
-    tracing::debug!(
+    tracing::info!(
         host = %host,
         port = port,
-        "SOCKS5 CONNECT established through Tor"
+        bound_addr = %bound_addr_str,
+        "SOCKS5 CONNECT established through Tor (bound_addr is the exit-side address)"
     );
 
     Ok(stream)
