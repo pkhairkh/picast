@@ -39,8 +39,17 @@ struct CastRequest {
 
 #[derive(Debug, Deserialize)]
 struct AudioDeviceRequest {
-    /// ALSA device string (e.g. "plughw:1,0").  Empty = ALSA default.
+    /// Device string (e.g. "plughw:1,0" for ALSA, "pulse" for PulseAudio).
+    /// Empty = ALSA default.
     device: String,
+    /// GStreamer sink element to use ("alsasink" or "pulsesink").
+    /// Defaults to "alsasink" if not specified.
+    #[serde(default = "default_sink_type")]
+    sink_type: String,
+}
+
+fn default_sink_type() -> String {
+    "alsasink".into()
 }
 
 #[derive(Debug, Deserialize)]
@@ -93,17 +102,19 @@ struct HealthResponse {
     status: String,
 }
 
-/// An ALSA playback device returned by `/api/audio-devices`.
+/// An audio playback device returned by `/api/audio-devices`.
 #[derive(Debug, Serialize)]
 struct AlsaDevice {
-    /// ALSA device string (e.g. "plughw:1,0").
+    /// Device string (e.g. "plughw:1,0" for ALSA, or "pulse" for PulseAudio).
     device: String,
-    /// Human-readable card name (e.g. "vc4hdmi0").
+    /// Human-readable card name (e.g. "vc4hdmi0", "Bluetooth Headset").
     card_name: String,
     /// Card index number.
     card_index: u32,
     /// Device index number.
     device_index: u32,
+    /// GStreamer sink element to use ("alsasink" or "pulsesink").
+    sink_type: String,
 }
 
 // ── HTTP API Server ──────────────────────────────────────────────────
@@ -349,13 +360,27 @@ async fn handle_request(
             }
         },
 
-        // Set audio device.
+        // Set audio device and sink type.
         (Method::POST, "/api/audio-device") => {
             let payload = read_body_json::<AudioDeviceRequest>(body).await?;
+            // Set the device first
             match session.set_audio_device(payload.device.clone()).await {
                 Ok(()) => {
-                    tracing::info!(device = %payload.device, "audio device updated via API");
-                    json_response(StatusCode::OK, &serde_json::json!({"device": payload.device}))
+                    // Then set the sink type (alsasink or pulsesink)
+                    if payload.sink_type != "alsasink" {
+                        if let Err(e) = session.set_audio_sink(payload.sink_type.clone()).await {
+                            tracing::warn!(error = %e, "failed to set audio sink type");
+                        }
+                    }
+                    tracing::info!(
+                        device = %payload.device,
+                        sink_type = %payload.sink_type,
+                        "audio device updated via API"
+                    );
+                    json_response(StatusCode::OK, &serde_json::json!({
+                        "device": payload.device,
+                        "sink_type": payload.sink_type,
+                    }))
                 },
                 Err(e) => error_response(StatusCode::INTERNAL_SERVER_ERROR, &e.to_string()),
             }
@@ -446,7 +471,59 @@ fn list_alsa_devices() -> Vec<AlsaDevice> {
         card_name: "ALSA Default".into(),
         card_index: 0,
         device_index: 0,
+        sink_type: "alsasink".into(),
     }];
+
+    // Check for PulseAudio — if running, add it as an option.
+    // PulseAudio handles Bluetooth audio routing automatically.
+    // On Pi with Bluetooth headphones/speakers, PulseAudio is the
+    // easiest way to get audio working.
+    if std::path::Path::new("/run/pulse/native").exists()
+        || std::path::Path::new("/var/run/pulse/native").exists()
+        || std::process::Command::new("pactl")
+            .arg("info")
+            .output()
+            .map(|o| o.status.success())
+            .unwrap_or(false)
+    {
+        devices.push(AlsaDevice {
+            device: "pulse".into(),
+            card_name: "PulseAudio (auto Bluetooth)".into(),
+            card_index: 99,
+            device_index: 0,
+            sink_type: "pulsesink".into(),
+        });
+
+        // Try to list PulseAudio sinks for more specific options.
+        if let Ok(output) = std::process::Command::new("pactl")
+            .args(["list", "short", "sinks"])
+            .output()
+        {
+            if let Ok(stdout) = String::from_utf8(output.stdout) {
+                for line in stdout.lines() {
+                    // Format: "id\tname\tmodule\tsample_spec\tstate"
+                    let parts: Vec<&str> = line.split_whitespace().collect();
+                    if parts.len() >= 2 {
+                        let sink_name = parts[1].to_string();
+                        let display_name = if sink_name.contains("bluez") || sink_name.contains("bluetooth") {
+                            format!("PulseAudio Bluetooth ({})", sink_name)
+                        } else if sink_name.contains("hdmi") {
+                            format!("PulseAudio HDMI ({})", sink_name)
+                        } else {
+                            format!("PulseAudio ({})", sink_name)
+                        };
+                        devices.push(AlsaDevice {
+                            device: sink_name.clone(),
+                            card_name: display_name,
+                            card_index: 99,
+                            device_index: parts[0].parse().unwrap_or(0),
+                            sink_type: "pulsesink".into(),
+                        });
+                    }
+                }
+            }
+        }
+    }
 
     // Parse /proc/asound/cards for card indices and names.
     // Format: " 0 [Headphones   ]: ... - bcm2835 Headphones ..."
@@ -500,6 +577,7 @@ fn list_alsa_devices() -> Vec<AlsaDevice> {
                     card_name: long.clone(),
                     card_index: *card_idx,
                     device_index: 0,
+                    sink_type: "alsasink".into(),
                 });
             }
             return devices;
@@ -534,6 +612,7 @@ fn list_alsa_devices() -> Vec<AlsaDevice> {
                 card_name: card_name.to_string(),
                 card_index: card_idx,
                 device_index: dev_idx,
+                sink_type: "alsasink".into(),
             });
         }
     }

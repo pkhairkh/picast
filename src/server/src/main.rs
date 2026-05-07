@@ -142,6 +142,14 @@ impl picast_session::interfaces::PlaybackTrait for PlaybackAdapter {
         Ok(())
     }
 
+    async fn set_audio_sink(
+        &self,
+        sink: String,
+    ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+        self.0.set_audio_sink(sink);
+        Ok(())
+    }
+
     async fn audio_device(&self) -> Result<String, Box<dyn std::error::Error + Send + Sync>> {
         Ok(self.0.audio_device())
     }

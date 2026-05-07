@@ -286,25 +286,28 @@ impl GstPipeline {
         // ── Buffer element ──────────────────────────────────────────
         //
         // queue2 sits between souphttpsrc and parsebin and provides a
-        // download buffer for network resilience.  The key configuration
-        // decision is `use-buffering`:
+        // download buffer for network resilience.
         //
-        // With `use-buffering=true`, queue2 blocks the pipeline from
-        // prerolling until the buffer reaches `high-percent`.  This
-        // requires the application to handle BUFFERING messages on the
-        // bus and pause/resume the pipeline accordingly.  Without proper
-        // handling, preroll blocks forever (the state change from Ready
-        // to Paused never completes), and video never starts playing.
+        // With `use-buffering=true`, queue2 emits BUFFERING messages
+        // and the pipeline waits for the buffer to fill before playing.
+        // This is essential for Tor-routed streams where throughput is
+        // variable (typically 1-5 Mbps). Without buffering, the queue
+        // empties faster than Tor can refill it, causing stalls and
+        // low effective FPS.
         //
-        // With `use-buffering=false` (our choice), queue2 acts as a
-        // simple data queue — preroll completes as soon as the first
-        // buffer arrives from souphttpsrc, and the pipeline starts
-        // playing immediately.  If the network is slower than the
-        // playback rate, the queue may run empty and cause brief stalls,
-        // but this is preferable to never starting at all.
+        // The bus watch handles BUFFERING messages:
+        // - Buffer < low-percent (10%): pause the pipeline
+        // - Buffer >= high-percent (80%): resume/allow playing
+        //
+        // During initial preroll, we suppress auto-play until buffering
+        // reaches high-percent, ensuring enough data is buffered before
+        // playback starts. This prevents the "buffer underrun → low FPS"
+        // cycle.
         let queue2 = ElementFactory::make("queue2")
-            .property("max-size-bytes", 50_000_000u32) // 50 MB
-            .property("use-buffering", false)
+            .property("max-size-bytes", 100_000_000u32) // 100 MB — large buffer for Tor
+            .property("use-buffering", true)
+            .property("high-percent", 80u32)  // start playing when 80% full
+            .property("low-percent", 10u32)   // pause when buffer drops to 10%
             .build()
             .map_err(|e| PlaybackError::PipelineCreation(format!("queue2: {}", e)))?;
 
@@ -375,15 +378,35 @@ impl GstPipeline {
         // device is used.  Use `plughw` (not `hw`) because plughw allows
         // ALSA to convert formats — HDMI devices may not accept the exact
         // F32LE format that GStreamer negotiates.
+        //
+        // For Bluetooth audio, PulseAudio is typically required on Pi.
+        // If `audio_sink` is "pulsesink", the `device` property sets the
+        // PulseAudio sink name (not ALSA device). If empty, pulsesink
+        // uses PulseAudio's default sink (which auto-routes to Bluetooth
+        // if configured).
         let mut audiosink_builder = ElementFactory::make(&config.audio_sink);
         if !config.audio_device.is_empty() {
-            audiosink_builder = audiosink_builder.property("device", &config.audio_device);
-            tracing::info!(
-                device = %config.audio_device,
-                "alsasink: using explicit ALSA device"
-            );
+            // For alsasink: device="plughw:1,0"
+            // For pulsesink: device="alsa_output.bluetooth" (PulseAudio sink name)
+            if config.audio_sink == "pulsesink" {
+                audiosink_builder = audiosink_builder.property("device", &config.audio_device);
+                tracing::info!(
+                    device = %config.audio_device,
+                    "pulsesink: using PulseAudio sink device"
+                );
+            } else {
+                audiosink_builder = audiosink_builder.property("device", &config.audio_device);
+                tracing::info!(
+                    device = %config.audio_device,
+                    "alsasink: using explicit ALSA device"
+                );
+            }
         } else {
-            tracing::info!("alsasink: using ALSA default device (no device property set)");
+            if config.audio_sink == "pulsesink" {
+                tracing::info!("pulsesink: using PulseAudio default sink (auto-routes to Bluetooth if configured)");
+            } else {
+                tracing::info!("alsasink: using ALSA default device (no device property set)");
+            }
         }
         let audiosink = audiosink_builder
             .build()

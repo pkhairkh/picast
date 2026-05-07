@@ -98,6 +98,14 @@ pub trait PlaybackTrait: Send + Sync {
         device: String,
     ) -> Result<(), Box<dyn std::error::Error + Send + Sync>>;
 
+    /// Set the GStreamer audio sink element (e.g. "alsasink" or "pulsesink").
+    /// Takes effect on the next play() call; does not affect a running pipeline.
+    /// Use "pulsesink" for Bluetooth audio via PulseAudio.
+    async fn set_audio_sink(
+        &self,
+        sink: String,
+    ) -> Result<(), Box<dyn std::error::Error + Send + Sync>>;
+
     /// Get the current ALSA audio device string.
     async fn audio_device(&self) -> Result<String, Box<dyn std::error::Error + Send + Sync>>;
 }

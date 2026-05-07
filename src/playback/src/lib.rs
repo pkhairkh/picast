@@ -566,10 +566,21 @@ impl PlaybackEngine {
         let bus = pipeline.pipeline().bus().expect("pipeline should have a bus");
 
         // Flag to indicate that the pipeline should auto-transition from
-        // Paused to Playing once preroll completes.  Set during initial
-        // startup, cleared once Playing is reached or on error.
+        // Paused to Playing once preroll completes AND buffering is sufficient.
+        // Set during initial startup, cleared once Playing is reached or on error.
+        // With use-buffering=true, we suppress auto-play until buffering
+        // reaches high-percent, ensuring enough data is buffered before
+        // playback starts (critical for Tor-routed streams with variable throughput).
         let pending_auto_play = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(true));
         let pending_auto_play_bus = pending_auto_play.clone();
+
+        // Track whether we're in initial buffering (haven't played yet).
+        // During initial buffering, BUFFERING messages should NOT pause the
+        // pipeline — we're still in the Paused state waiting for the buffer
+        // to fill. Only after we've started playing do BUFFERING messages
+        // trigger pause/resume.
+        let initial_buffering = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(true));
+        let initial_buffering_bus = initial_buffering.clone();
 
         // Weak reference to the pipeline element for the bus watch to
         // trigger the Paused→Playing auto-transition.
@@ -604,32 +615,47 @@ impl PlaybackEngine {
                     let is_pipeline = src_name.starts_with("/GstPipeline:") && !src_name[1..].contains('/');
 
                     if new_state == State::Playing && is_pipeline {
-                        // Pipeline reached Playing — clear the auto-play flag.
+                        // Pipeline reached Playing — clear flags.
                         pending_auto_play_bus.store(false, Ordering::Relaxed);
+                        initial_buffering_bus.store(false, Ordering::Relaxed);
                         let _ = event_tx.send(PlaybackEvent::Playing);
                         is_playing.store(true, Ordering::Relaxed);
                     } else if new_state == State::Paused && pending == State::VoidPending && is_pipeline {
                         // Pipeline reached Paused with no pending state change.
                         //
-                        // During initial startup, we set the pipeline to Paused
-                        // and wait for preroll.  When preroll completes (kmssink
-                        // has received its first video frame), the pipeline reaches
-                        // Paused with no pending state change.  At this point, we
-                        // auto-transition to Playing — this starts the clock at
-                        // the correct time so that buffer timestamps are not "late".
+                        // During initial startup with use-buffering=true, we set
+                        // the pipeline to Paused and wait for both preroll AND
+                        // buffering to reach high-percent before transitioning to
+                        // Playing. This ensures enough data is buffered for smooth
+                        // playback, which is critical for Tor-routed streams.
+                        //
+                        // The auto-transition to Playing is triggered from the
+                        // BUFFERING handler when buffer reaches high-percent.
+                        // We only auto-play if:
+                        //   1. pending_auto_play is true (initial startup)
+                        //   2. NOT in initial buffering phase (buffer is already filled)
                         //
                         // For user-initiated pauses, pending_auto_play is false,
                         // so we don't auto-play.
                         if pending_auto_play_bus.load(Ordering::Relaxed) {
-                            tracing::info!(
-                                "pipeline prerolled (Paused with no pending) — \
-                                 auto-transitioning to Playing"
-                            );
-                            if let Some(pipe) = pipeline_weak_bus.upgrade() {
-                                let _ = pipe.set_state(State::Playing);
+                            if initial_buffering_bus.load(Ordering::Relaxed) {
+                                // Still in initial buffering — don't auto-play yet.
+                                // The BUFFERING handler will trigger Playing when
+                                // buffer reaches high-percent.
+                                tracing::info!(
+                                    "pipeline prerolled but still buffering — \
+                                     waiting for buffer to fill before playing"
+                                );
+                            } else {
+                                // Buffering is sufficient — auto-transition to Playing.
+                                tracing::info!(
+                                    "pipeline prerolled and buffer ready — \
+                                     auto-transitioning to Playing"
+                                );
+                                if let Some(pipe) = pipeline_weak_bus.upgrade() {
+                                    let _ = pipe.set_state(State::Playing);
+                                }
                             }
-                            // Don't clear pending_auto_play here — it will be
-                            // cleared when the pipeline reaches Playing.
                         } else {
                             tracing::info!(
                                 "pipeline reached Paused — genuine pause (no auto-play)"
@@ -665,20 +691,56 @@ impl PlaybackEngine {
                     tracing::info!(percent = percent, "buffering progress");
                     let _ = event_tx.send(PlaybackEvent::Buffering { percent });
 
-                    // IMPORTANT: Do NOT pause/resume the pipeline from this
-                    // handler.  Even though our queue2 has use-buffering=false,
-                    // other elements (e.g. souphttpsrc) can still post
-                    // BUFFERING messages.  Calling set_state(Paused) here
-                    // cancels the pending Paused→Playing async transition,
-                    // leaving the pipeline stuck at Paused with no video.
-                    // This was the root cause of the "no video" bug: the
-                    // buffering handler was killing the state transition.
+                    // With use-buffering=true on queue2, we must handle
+                    // BUFFERING messages to pause/resume the pipeline.
                     //
-                    // If we switch to use-buffering=true in the future,
-                    // buffering control must be done by a dedicated
-                    // component that tracks whether the pipeline is still
-                    // prerolling and doesn't interrupt the initial
-                    // Ready→Paused→Playing sequence.
+                    // During initial buffering (before first play):
+                    //   - Buffer >= high-percent (80%): transition to Playing
+                    //     and clear initial_buffering flag so the StateChanged
+                    //     handler allows auto-play.
+                    //   - Buffer < high-percent: stay Paused, keep buffering.
+                    //
+                    // After initial play (during playback):
+                    //   - Buffer < low-percent (10%): pause to refill
+                    //   - Buffer >= high-percent (80%): resume playing
+                    //
+                    // We use the pipeline_weak reference to change state.
+                    // Only act on significant buffering changes to avoid log spam.
+                    if let Some(pipe) = pipeline_weak_bus.upgrade() {
+                        if percent >= 80 {
+                            // Buffer is sufficiently full — start/resume playing.
+                            if initial_buffering_bus.load(Ordering::Relaxed) {
+                                tracing::info!(
+                                    percent = percent,
+                                    "buffering reached high-percent — \
+                                     clearing initial_buffering flag and starting playback"
+                                );
+                                initial_buffering_bus.store(false, Ordering::Relaxed);
+                            }
+                            // Only resume if currently Paused (don't call set_state
+                            // unnecessarily, which can cause log spam).
+                            let (_, current, _) = pipe.state(gstreamer::ClockTime::from_mseconds(0));
+                            if current == State::Paused {
+                                tracing::info!(
+                                    percent = percent,
+                                    "buffer sufficiently full — resuming playback"
+                                );
+                                let _ = pipe.set_state(State::Playing);
+                            }
+                        } else if percent < 10 && !initial_buffering_bus.load(Ordering::Relaxed) {
+                            // Buffer too low during playback — pause to refill.
+                            // Only pause if we're NOT in initial buffering (we're
+                            // already paused during initial buffering).
+                            let (_, current, _) = pipe.state(gstreamer::ClockTime::from_mseconds(0));
+                            if current == State::Playing {
+                                tracing::warn!(
+                                    percent = percent,
+                                    "buffer critically low — pausing to refill"
+                                );
+                                let _ = pipe.set_state(State::Paused);
+                            }
+                        }
+                    }
                 },
                 MessageView::Latency(_l) => {
                     // Latency message — not forwarding in v1.
@@ -823,7 +885,7 @@ impl PlaybackEngine {
                         }
                     }
 
-                    // Second check at 20s — detailed per-element state dump
+                    // Second check at 20s — detailed state dump + FPS measurement
                     tokio::time::sleep(std::time::Duration::from_secs(12)).await;
                     if let Some(pipe) = pipeline_weak_diag.upgrade() {
                         let (result, current, pending) = pipe.state(gstreamer::ClockTime::from_mseconds(0));
@@ -833,6 +895,31 @@ impl PlaybackEngine {
                             pending = ?pending,
                             "pipeline state check after 20s"
                         );
+
+                        // Measure FPS by querying the current playback position.
+                        // If the pipeline is playing, we sample the position now
+                        // and again 2 seconds later to compute effective FPS.
+                        if current == State::Playing {
+                            let pos1 = pipe.query_position::<gstreamer::ClockTime>();
+                            tokio::time::sleep(std::time::Duration::from_secs(2)).await;
+                            let pos2 = pipe.query_position::<gstreamer::ClockTime>();
+
+                            if let (Some(p1), Some(p2)) = (pos1, pos2) {
+                                let elapsed_ms = (p2 - p1).mseconds() as f64;
+                                if elapsed_ms > 0.0 {
+                                    let effective_fps = elapsed_ms / 1000.0 * 25.0 / (2.0); // 2s sample, assuming 25fps source
+                                    tracing::info!(
+                                        position_ms_1 = p1.mseconds(),
+                                        position_ms_2 = p2.mseconds(),
+                                        elapsed_ms = elapsed_ms,
+                                        effective_playback_rate = format!("{:.1}x", elapsed_ms / 2000.0),
+                                        "FPS diagnostic: measured playback rate (1.0x = full speed at 25fps)"
+                                    );
+                                }
+                            } else {
+                                tracing::warn!("FPS diagnostic: could not query pipeline position");
+                            }
+                        }
 
                         // Walk all elements and log their states to find
                         // which one is stuck and blocking preroll.
@@ -1332,6 +1419,22 @@ impl PlaybackEngine {
         let config_ptr = &self.config as *const PipelineConfig as *mut PipelineConfig;
         unsafe {
             (*config_ptr).audio_device = device;
+        }
+    }
+
+    /// Set the GStreamer audio sink element for the next playback pipeline.
+    ///
+    /// This updates the runtime config so that the *next* `play()` call
+    /// uses the specified sink element (e.g. "alsasink" or "pulsesink").
+    /// It does NOT affect a currently-running pipeline.
+    ///
+    /// Use "pulsesink" for Bluetooth audio (PulseAudio handles the
+    /// Bluetooth routing automatically).
+    pub fn set_audio_sink(&self, sink: String) {
+        tracing::info!(old = %self.config.audio_sink, new = %sink, "audio sink element updated");
+        let config_ptr = &self.config as *const PipelineConfig as *mut PipelineConfig;
+        unsafe {
+            (*config_ptr).audio_sink = sink;
         }
     }
 

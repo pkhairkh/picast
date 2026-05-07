@@ -85,6 +85,21 @@ impl PlaybackTrait for MockPlayback {
     async fn duration_ms(&self) -> Result<Option<u64>, Box<dyn std::error::Error + Send + Sync>> {
         Ok(Some(300000))
     }
+    async fn set_audio_device(
+        &self,
+        _device: String,
+    ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+        Ok(())
+    }
+    async fn set_audio_sink(
+        &self,
+        _sink: String,
+    ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+        Ok(())
+    }
+    async fn audio_device(&self) -> Result<String, Box<dyn std::error::Error + Send + Sync>> {
+        Ok("plughw:1,0".into())
+    }
 }
 
 struct MockDisplay;
