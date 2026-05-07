@@ -653,44 +653,43 @@ impl PlaybackEngine {
                                             .map(|f: gstreamer::ElementFactory| f.name().to_string())
                                             .unwrap_or_default();
 
-                                        // Check video bin sink pad
+                                        // Check video bin sink pad — dynamic_cast consumes e,
+                                        // so get the sink pad first.
                                         if factory_name == "GstBin" {
-                                            if let Some(sink) = e.static_pad("sink") {
-                                                // Check if this is the video bin by looking at its children
-                                                if let Ok(sub_bin) = e.dynamic_cast::<gstreamer::Bin>() {
-                                                    let mut has_kmssink = false;
-                                                    let mut sub_iter = sub_bin.iterate_elements();
-                                                    loop {
-                                                        match sub_iter.next() {
-                                                            Ok(Some(se)) => {
-                                                                let sub_fn = se.factory()
-                                                                    .map(|f: gstreamer::ElementFactory| f.name().to_string())
-                                                                    .unwrap_or_default();
-                                                                if sub_fn == "kmssink" {
-                                                                    has_kmssink = true;
-                                                                }
-                                                            },
-                                                            Ok(None) | Err(_) => break,
-                                                        }
+                                            let sink_linked = e.static_pad("sink")
+                                                .map(|sink| sink.is_linked())
+                                                .unwrap_or(false);
+                                            if let Ok(sub_bin) = e.dynamic_cast::<gstreamer::Bin>() {
+                                                let mut has_kmssink = false;
+                                                let mut sub_iter = sub_bin.iterate_elements();
+                                                loop {
+                                                    match sub_iter.next() {
+                                                        Ok(Some(se)) => {
+                                                            let sub_fn = se.factory()
+                                                                .map(|f: gstreamer::ElementFactory| f.name().to_string())
+                                                                .unwrap_or_default();
+                                                            if sub_fn == "kmssink" {
+                                                                has_kmssink = true;
+                                                            }
+                                                        },
+                                                        Ok(None) | Err(_) => break,
                                                     }
-                                                    if has_kmssink {
-                                                        if sink.is_linked() {
-                                                            video_linked = true;
-                                                            tracing::info!("video bin sink pad is linked ✓");
-                                                        } else {
-                                                            tracing::error!(
+                                                }
+                                                if has_kmssink {
+                                                    if sink_linked {
+                                                        video_linked = true;
+                                                        tracing::info!("video bin sink pad is linked ✓");
+                                                    } else {
+                                                        tracing::error!(
                                 "VIDEO BIN SINK PAD IS NOT LINKED — parsebin never connected the video pad! \
                                  This is why no video appears on screen. The video bin (h264parse→capssetter→v4l2h264dec→kmssink) \
                                  is sitting in the pipeline with no data flowing into it."
-                                                            );
-                                                        }
+                                                        );
                                                     }
                                                 }
                                             }
-                                        }
-
-                                        // Check audio queue sink pad
-                                        if factory_name == "GstQueue" {
+                                        } else if factory_name == "GstQueue" {
+                                            // Check audio queue sink pad
                                             if let Some(sink) = e.static_pad("sink") {
                                                 if sink.is_linked() {
                                                     audio_linked = true;
