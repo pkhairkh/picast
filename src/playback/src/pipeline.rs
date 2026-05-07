@@ -667,35 +667,20 @@ impl GstPipeline {
         v4l2dec.set_property_from_str("output-io-mode", "dmabuf");
         v4l2dec.set_property_from_str("capture-io-mode", "dmabuf");
 
-        // Verify the properties were actually set by reading them back.
-        // GEnum properties return integer values, not strings.
-        // v4l2h264dec io-mode enum: 0=auto, 1=rw, 2=mmap, 3=dmabuf, 4=dmabuf-import
-        let output_mode: i32 = v4l2dec.property("output-io-mode");
-        let capture_mode: i32 = v4l2dec.property("capture-io-mode");
-        let mode_name = |v: i32| -> &'static str {
-            match v {
-                0 => "auto",
-                1 => "rw",
-                2 => "mmap",
-                3 => "dmabuf",
-                4 => "dmabuf-import",
-                _ => "unknown",
-            }
-        };
+        // NOTE: We intentionally do NOT read back the io-mode properties to
+        // verify them.  The GstV4l2IOMode type is a GEnum registered as its
+        // own GType — GLib's type system refuses to cast it to gint (i32) or
+        // gchararray (String), causing a panic:
+        //   "Value type mismatch. Actual GstV4l2IOMode, requested gint"
+        // set_property_from_str() succeeds (it uses g_object_set_property()
+        // which handles string→GEnum conversion), so the values ARE set.
+        // Verification that zero-copy is working comes from:
+        //   1. Pipeline FPS (should be ~25fps, not 10-15fps)
+        //   2. GStreamer debug log: GST_V4L2="3" shows "DMABUF capture"
+        //   3. No "A lot of buffers are being dropped" warnings
         tracing::info!(
-            output_io_mode = %mode_name(output_mode),
-            output_io_mode_raw = output_mode,
-            capture_io_mode = %mode_name(capture_mode),
-            capture_io_mode_raw = capture_mode,
-            "v4l2h264dec: io-mode properties set (expect 'dmabuf' for zero-copy)"
+            "v4l2h264dec: output-io-mode=dmabuf, capture-io-mode=dmabuf (zero-copy path enabled)"
         );
-        if output_mode != 3 || capture_mode != 3 {
-            tracing::error!(
-                output_io_mode = %mode_name(output_mode),
-                capture_io_mode = %mode_name(capture_mode),
-                "v4l2h264dec: FAILED to set dmabuf io-mode! Zero-copy will NOT work."
-            );
-        }
 
         // Build kmssink.  The fd and driver-name properties are mutually
         // exclusive in kmssink: setting both causes a warning "Can't set
