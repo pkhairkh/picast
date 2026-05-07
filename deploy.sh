@@ -92,10 +92,12 @@ TORRC="/etc/tor/torrc"
 if [[ -f "$TORRC" ]]; then
     if ! grep -q "^HTTPTunnelPort" "$TORRC" 2>/dev/null; then
         echo "[4/5] Adding HTTPTunnelPort 9080 to $TORRC..."
-        echo "" >> "$TORRC"
-        echo "# PiCast: HTTP CONNECT proxy for routing media through Tor" >> "$TORRC"
-        echo "# souphttpsrc (libsoup2.4) cannot use SOCKS5 proxy URIs." >> "$TORRC"
-        echo "HTTPTunnelPort 9080" >> "$TORRC"
+        {
+            echo ""
+            echo "# PiCast: HTTP CONNECT proxy for routing media through Tor"
+            echo "# souphttpsrc (libsoup2.4) cannot use SOCKS5 proxy URIs."
+            echo "HTTPTunnelPort 9080"
+        } | sudo tee -a "$TORRC" > /dev/null
         echo "      Reloading Tor to pick up HTTPTunnelPort..."
         sudo systemctl reload tor@default 2>/dev/null || sudo systemctl restart tor@default 2>/dev/null || true
         sleep 2

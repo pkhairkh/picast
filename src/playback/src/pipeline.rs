@@ -108,8 +108,8 @@ impl GstPipeline {
     /// The `isolation_username` is retained for API compatibility.
     pub fn new(
         url: &str,
-        socks_addr: &str,
-        isolation_username: &str,
+        _socks_addr: &str,
+        _isolation_username: &str,
         config: &PipelineConfig,
     ) -> Result<Self, PlaybackError> {
         ensure_gst_init()?;
@@ -1034,8 +1034,8 @@ impl GstPipeline {
     pub fn rebuild_sw(
         &mut self,
         url: &str,
-        socks_addr: &str,
-        isolation_username: &str,
+        _socks_addr: &str,
+        _isolation_username: &str,
         config: &PipelineConfig,
     ) -> Result<(), PlaybackError> {
         tracing::warn!("rebuilding pipeline with software decode fallback");
