@@ -661,33 +661,23 @@ impl GstPipeline {
 
         // Set dmabuf io-modes on the built element for reliable type conversion.
         // GST_V4L2_IO_DMABUF = 3 (nick: "dmabuf").
-        // Strategy: try setting via string first (works if GStreamer registers
-        // the string-to-enum transform).  If that fails, set via integer (which
-        // always works for GEnum properties since GStreamer accepts integers).
-        match v4l2dec.set_property("output-io-mode", "dmabuf") {
-            Ok(()) => tracing::debug!("v4l2h264dec: output-io-mode=dmabuf set via string"),
-            Err(_) => {
-                if let Err(e) = v4l2dec.set_property("output-io-mode", 3i32) {
-                    tracing::warn!(error = %e, "v4l2h264dec: failed to set output-io-mode=3 (dmabuf)");
-                } else {
-                    tracing::info!("v4l2h264dec: output-io-mode set to 3 (dmabuf) via integer fallback");
-                }
-            },
-        }
-        match v4l2dec.set_property("capture-io-mode", "dmabuf") {
-            Ok(()) => tracing::debug!("v4l2h264dec: capture-io-mode=dmabuf set via string"),
-            Err(_) => {
-                if let Err(e) = v4l2dec.set_property("capture-io-mode", 3i32) {
-                    tracing::warn!(error = %e, "v4l2h264dec: failed to set capture-io-mode=3 (dmabuf)");
-                } else {
-                    tracing::info!("v4l2h264dec: capture-io-mode set to 3 (dmabuf) via integer fallback");
-                }
-            },
-        }
+        //
+        // We set these properties AFTER building the element because
+        // .property_from_str() on ElementFactoryBuilder stores values as
+        // string SendValues that may not convert correctly to GEnum when
+        // build() applies them.  Setting on the built element invokes
+        // GStreamer's full g_object_set_property() path which handles
+        // string→GEnum conversion correctly.
+        //
+        // v4l2h264dec io-mode enum values:
+        //   0 = auto, 1 = rw, 2 = mmap, 3 = dmabuf, 4 = dmabuf-import
+        v4l2dec.set_property_from_str("output-io-mode", "dmabuf");
+        v4l2dec.set_property_from_str("capture-io-mode", "dmabuf");
 
-        // Verify the properties were actually set
-        let output_mode = v4l2dec.property::<String>("output-io-mode").unwrap_or_default();
-        let capture_mode = v4l2dec.property::<String>("capture-io-mode").unwrap_or_default();
+        // Verify the properties were actually set by reading them back.
+        // GEnum properties return the nick name as a string.
+        let output_mode = v4l2dec.property::<String>("output-io-mode");
+        let capture_mode = v4l2dec.property::<String>("capture-io-mode");
         tracing::info!(
             output_io_mode = %output_mode,
             capture_io_mode = %capture_mode,
