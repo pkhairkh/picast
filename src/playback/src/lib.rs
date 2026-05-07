@@ -476,6 +476,16 @@ impl PlaybackEngine {
         let is_playing = self.is_playing.clone();
         let bus = pipeline.pipeline().bus().expect("pipeline should have a bus");
 
+        // Flag to indicate that the pipeline should auto-transition from
+        // Paused to Playing once preroll completes.  Set during initial
+        // startup, cleared once Playing is reached or on error.
+        let pending_auto_play = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(true));
+        let pending_auto_play_bus = pending_auto_play.clone();
+
+        // Weak reference to the pipeline element for the bus watch to
+        // trigger the Paused→Playing auto-transition.
+        let pipeline_weak_bus = pipeline.pipeline().downgrade();
+
         let bus_watch = bus.add_watch(move |_bus, msg| {
             use gstreamer::MessageView;
 
@@ -500,39 +510,44 @@ impl PlaybackEngine {
                     }
 
                     // Only emit application-level events for the pipeline
-                    // element itself, not for sub-elements.  Sub-element
-                    // state changes are logged above but should not trigger
-                    // PlaybackEvent broadcasts — they fire constantly during
-                    // preroll and would confuse the session layer.
-                    //
-                    // The pipeline element's GStreamer path is exactly
-                    // "/GstPipeline:pipeline0" — it has no "/" after the
-                    // first segment.  Child elements have paths like
-                    // "/GstPipeline:pipeline0/GstAlsaSink:alsasink0".
-                    // Using contains("pipeline0") was wrong because every
-                    // child's path also contains that substring, causing
-                    // false PlaybackEvent::Paused broadcasts during startup.
+                    // element itself, not for sub-elements.
                     let src_name = msg.src().map(|s| s.path_string()).unwrap_or_default();
                     let is_pipeline = src_name.starts_with("/GstPipeline:") && !src_name[1..].contains('/');
 
                     if new_state == State::Playing && is_pipeline {
+                        // Pipeline reached Playing — clear the auto-play flag.
+                        pending_auto_play_bus.store(false, Ordering::Relaxed);
                         let _ = event_tx.send(PlaybackEvent::Playing);
                         is_playing.store(true, Ordering::Relaxed);
                     } else if new_state == State::Paused && pending == State::VoidPending && is_pipeline {
                         // Pipeline reached Paused with no pending state change.
-                        // This means the pipeline is genuinely Paused (e.g. the
-                        // user called pause(), or an error interrupted playback).
                         //
-                        // Do NOT auto-push to Playing here — that would cancel
-                        // user-initiated pauses.  Instead, the diagnostic task
-                        // at 5s provides a safety nudge for the initial startup
-                        // case where GStreamer didn't automatically complete the
-                        // Ready→Paused→Playing transition.
-                        tracing::info!(
-                            "pipeline reached Paused with no pending transition — genuine pause"
-                        );
-                        let _ = event_tx.send(PlaybackEvent::Paused);
-                        is_playing.store(false, Ordering::Relaxed);
+                        // During initial startup, we set the pipeline to Paused
+                        // and wait for preroll.  When preroll completes (kmssink
+                        // has received its first video frame), the pipeline reaches
+                        // Paused with no pending state change.  At this point, we
+                        // auto-transition to Playing — this starts the clock at
+                        // the correct time so that buffer timestamps are not "late".
+                        //
+                        // For user-initiated pauses, pending_auto_play is false,
+                        // so we don't auto-play.
+                        if pending_auto_play_bus.load(Ordering::Relaxed) {
+                            tracing::info!(
+                                "pipeline prerolled (Paused with no pending) — \
+                                 auto-transitioning to Playing"
+                            );
+                            if let Some(pipe) = pipeline_weak_bus.upgrade() {
+                                let _ = pipe.set_state(State::Playing);
+                            }
+                            // Don't clear pending_auto_play here — it will be
+                            // cleared when the pipeline reaches Playing.
+                        } else {
+                            tracing::info!(
+                                "pipeline reached Paused — genuine pause (no auto-play)"
+                            );
+                            let _ = event_tx.send(PlaybackEvent::Paused);
+                            is_playing.store(false, Ordering::Relaxed);
+                        }
                     }
                 },
                 MessageView::Eos(_) => {
@@ -550,6 +565,8 @@ impl PlaybackEngine {
                         source = ?source_element,
                         "GStreamer error"
                     );
+                    // Clear auto-play flag on error to prevent spurious transitions.
+                    pending_auto_play_bus.store(false, Ordering::Relaxed);
                     let _ =
                         event_tx.send(PlaybackEvent::Error { message: msg, debug: debug_info });
                     is_playing.store(false, Ordering::Relaxed);
@@ -593,11 +610,15 @@ impl PlaybackEngine {
         .expect("failed to add bus watch");
         pipeline.set_bus_watch(bus_watch);
 
-        // pipeline.play() is non-blocking — it calls set_state(Playing) which
+        // pipeline.preroll() is non-blocking — it calls set_state(Paused) which
         // starts the async state transition and returns immediately. GStreamer
-        // handles CDN connection, preroll, and caps negotiation in the background.
-        // Errors surface on the bus and are handled by the bus watch above.
-        let play_result = pipeline.play();
+        // begins fetching from souphttpsrc and demuxing via parsebin.
+        //
+        // The bus watch detects when preroll completes (pipeline reaches Paused
+        // with pending_auto_play=true) and automatically transitions to Playing.
+        // This ensures the pipeline clock starts at the correct time — after
+        // buffers have reached the sinks — preventing the "late buffers" problem.
+        let play_result = pipeline.preroll();
 
         // Store pipeline and handle result.
         let mut guard = self.gst_pipeline.lock().await;
@@ -605,39 +626,36 @@ impl PlaybackEngine {
         // Start playback — try HW decode first, fall back to SW on failure.
         match play_result {
             Ok(()) => {
-                tracing::info!("pipeline started successfully (hw_accel={})", self.config.hw_accel);
+                tracing::info!("pipeline prerolled successfully (hw_accel={})", self.config.hw_accel);
                 *guard = Some(pipeline);
 
-                // Spawn a diagnostic task that checks the actual pipeline
-                // state after a few seconds.  When `set_state(Playing)`
-                // returns `Ok(Async)`, the pipeline is transitioning
-                // asynchronously and may never reach Playing if preroll
-                // fails (e.g. kmssink can't get DRM master).  This check
-                // surfaces such failures in the logs.
-                //
-                // We check twice (5s and 15s) and dump per-element state
-                // at 15s to identify which element is blocking preroll.
+                // Spawn a diagnostic task that checks the pipeline state
+                // after a few seconds.  The bus watch handles the automatic
+                // Paused→Playing transition after preroll, so this task only
+                // needs to check if things went wrong (e.g. stuck in a state,
+                // pads not linked, errors).
                 let pipeline_weak_diag = guard.as_ref().unwrap().pipeline().downgrade();
+                let pending_auto_play_diag = pending_auto_play.clone();
                 tokio::spawn(async move {
-                    // First check at 8s — nudge pipeline to Playing if stuck at Paused,
-                    // and check whether the video pad was ever linked.
-                    // We wait 8s instead of 5s because parsebin may need ~5-6s to
-                    // demux the MP4 container and emit source pads (especially over
-                    // network).  Checking too early reports "ZERO source pads" falsely.
-                    tokio::time::sleep(std::time::Duration::from_secs(8)).await;
+                    // Check at 10s — verify the pipeline reached Playing and
+                    // that video/audio pads are linked.
+                    tokio::time::sleep(std::time::Duration::from_secs(10)).await;
                     if let Some(pipe) = pipeline_weak_diag.upgrade() {
                         let (result, current, pending) = pipe.state(gstreamer::ClockTime::from_mseconds(0));
                         tracing::info!(
                             result = ?result,
                             current = ?current,
                             pending = ?pending,
-                            "pipeline state check after 8s"
+                            "pipeline state check after 10s"
                         );
-                        if current != State::Playing {
+
+                        // If still not Playing and auto-play hasn't triggered yet,
+                        // force a transition.  This handles edge cases where the
+                        // bus watch didn't fire (e.g. GStreamer bug, timing issue).
+                        if current != State::Playing && pending_auto_play_diag.load(Ordering::Relaxed) {
                             tracing::warn!(
                                 current = ?current,
-                                pending = ?pending,
-                                "pipeline NOT playing after 8s — nudging to Playing"
+                                "pipeline NOT playing after 10s — forcing transition to Playing"
                             );
                             let _ = pipe.set_state(State::Playing);
                         }
@@ -862,6 +880,11 @@ impl PlaybackEngine {
         let is_playing = self.is_playing.clone();
         let bus = pipeline.pipeline().bus().expect("pipeline should have a bus");
 
+        // Auto-play flag for the SW fallback pipeline (same as primary).
+        let pending_auto_play_sw = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(true));
+        let pending_auto_play_sw_bus = pending_auto_play_sw.clone();
+        let pipeline_weak_sw = pipeline.pipeline().downgrade();
+
         let bus_watch = bus.add_watch(move |_bus, msg| {
             use gstreamer::MessageView;
 
@@ -881,22 +904,28 @@ impl PlaybackEngine {
                         );
                     }
 
-                    // Only emit application-level events for the pipeline element itself,
-                    // not sub-elements.  See primary bus watch handler for rationale.
                     let src_name = msg.src().map(|s| s.path_string()).unwrap_or_default();
                     let is_pipeline = src_name.starts_with("/GstPipeline:") && !src_name[1..].contains('/');
 
                     if new_state == State::Playing && is_pipeline {
+                        pending_auto_play_sw_bus.store(false, Ordering::Relaxed);
                         let _ = event_tx.send(PlaybackEvent::Playing);
                         is_playing.store(true, Ordering::Relaxed);
                     } else if new_state == State::Paused && pending == State::VoidPending && is_pipeline {
-                        // Genuine pause — do NOT auto-push to Playing.
-                        // See primary bus watch handler for rationale.
-                        tracing::info!(
-                            "pipeline reached Paused with no pending transition (SW) — genuine pause"
-                        );
-                        let _ = event_tx.send(PlaybackEvent::Paused);
-                        is_playing.store(false, Ordering::Relaxed);
+                        if pending_auto_play_sw_bus.load(Ordering::Relaxed) {
+                            tracing::info!(
+                                "SW fallback pipeline prerolled — auto-transitioning to Playing"
+                            );
+                            if let Some(pipe) = pipeline_weak_sw.upgrade() {
+                                let _ = pipe.set_state(State::Playing);
+                            }
+                        } else {
+                            tracing::info!(
+                                "pipeline reached Paused (SW) — genuine pause"
+                            );
+                            let _ = event_tx.send(PlaybackEvent::Paused);
+                            is_playing.store(false, Ordering::Relaxed);
+                        }
                     }
                 },
                 MessageView::Eos(_) => {
@@ -913,6 +942,7 @@ impl PlaybackEngine {
                         source = %msg.src().map(|s: &gstreamer::Object| s.path_string()).unwrap_or_default(),
                         "GStreamer error (SW decode fallback)"
                     );
+                    pending_auto_play_sw_bus.store(false, Ordering::Relaxed);
                     let _ = event_tx.send(PlaybackEvent::Error { message: err_msg, debug: debug_info });
                     is_playing.store(false, Ordering::Relaxed);
                 },
@@ -940,8 +970,8 @@ impl PlaybackEngine {
         .expect("failed to add bus watch for SW fallback");
         pipeline.set_bus_watch(bus_watch);
 
-        // pipeline.play() is non-blocking.
-        pipeline.play()?;
+        // pipeline.preroll() starts the SW fallback pipeline (Paused → auto-Playing).
+        pipeline.preroll()?;
         self.sw_fallback_active.store(true, Ordering::Relaxed);
         tracing::info!("software decode fallback pipeline started successfully");
 

@@ -235,7 +235,7 @@ impl GstPipeline {
         // playback rate, the queue may run empty and cause brief stalls,
         // but this is preferable to never starting at all.
         let queue2 = ElementFactory::make("queue2")
-            .property("max-size-bytes", 10_485_760u32) // 10 MB
+            .property("max-size-bytes", 50_000_000u32) // 50 MB
             .property("use-buffering", false)
             .build()
             .map_err(|e| PlaybackError::PipelineCreation(format!("queue2: {}", e)))?;
@@ -267,7 +267,7 @@ impl GstPipeline {
         // fdkaacdec is tried as a fallback.  If neither is available,
         // audio playback is skipped (video still works).
         let audio_queue = ElementFactory::make("queue")
-            .property("max-size-buffers", 3u32)
+            .property("max-size-buffers", 200u32)
             .build()
             .map_err(|e| PlaybackError::PipelineCreation(format!("audio_queue: {}", e)))?;
 
@@ -293,20 +293,18 @@ impl GstPipeline {
             .build()
             .map_err(|e| PlaybackError::PipelineCreation(format!("volume: {}", e)))?;
 
-        // audio sink (alsasink) — set async=false so it does NOT block the
-        // pipeline's state change waiting for the first audio buffer to preroll.
+        // audio sink (alsasink) — async=false so it does NOT block
+        // the pipeline's Paused state change when no audio pad is linked.
         //
-        // Without this, the pre-linked audio chain (audio_queue → decoder →
-        // audioconvert → audioresample → volume → alsasink) blocks the entire
-        // pipeline at Paused when parsebin hasn't linked an audio pad yet (no
-        // audio stream, codec mismatch → fakesink fallback, or CDN 403).  GStreamer
-        // requires ALL sinks to preroll before transitioning to Playing; alsasink
-        // waiting for a buffer that never arrives keeps the whole pipeline stuck.
+        // With kmssink using async=true (preroll-aware), the pipeline
+        // only reaches Playing after kmssink has received the first video
+        // frame.  Since both video and audio pads are linked at roughly
+        // the same time by parsebin, audio data reaches alsasink before
+        // or during the pipeline's Paused→Playing transition.  This means
+        // audio buffers are NOT late when the clock starts.
         //
-        // With async=false, alsasink completes its Ready→Paused transition
-        // immediately without waiting for data.  When audio buffers eventually
-        // arrive, they play normally.  If no audio data ever arrives, alsasink
-        // sits idle without blocking the video path.
+        // If no audio stream exists, alsasink never receives data but
+        // doesn't block the pipeline either (async=false).
         let audiosink = ElementFactory::make(&config.audio_sink)
             .property("async", false)
             .build()
@@ -611,7 +609,7 @@ impl GstPipeline {
     /// properly negotiate on older GStreamer versions (< 1.22).
     fn build_hw_video_bin(config: &PipelineConfig) -> Result<(Element, Element), PlaybackError> {
         let video_queue = ElementFactory::make("queue")
-            .property("max-size-buffers", 3u32)
+            .property("max-size-buffers", 60u32)
             .build()
             .map_err(|e| {
                 PlaybackError::PipelineCreation(format!("video_queue: {}", e))
@@ -644,19 +642,25 @@ impl GstPipeline {
         // use it (and skip driver-name).  Otherwise, use driver-name to
         // let kmssink find and open the device itself.
         let mut kmssink_builder = ElementFactory::make(&config.video_sink)
-            .property("can-scale", true)
-            // Set async=false so kmssink does NOT block the pipeline's
-            // READY→PAUSED transition waiting for the first video frame
-            // to be decoded and rendered.  Without this, kmssink stays
-            // ASYNC during preroll and the entire pipeline gets stuck at
-            // READY with pending=PLAYING — video never appears.
-            //
-            // With async=false, kmssink completes its state change
-            // immediately, and when video frames eventually arrive from
-            // v4l2h264dec, they render normally.  This is the same
-            // approach used for alsasink (see audio sink construction
-            // for the detailed rationale).
-            .property("async", false);
+            .property("can-scale", true);
+        // NOTE: kmssink uses the default async=true (preroll-aware).
+        //
+        // Previous versions set async=false to avoid preroll stalls, but
+        // this caused a clock-start race: the pipeline clock began running
+        // before parsebin had emitted pads and buffers reached kmssink.
+        // By the time video frames arrived (5-6 seconds later), their
+        // timestamps (near 0) were already "late" against the running
+        // clock, and kmssink dropped almost every frame ("A lot of
+        // buffers are being dropped").
+        //
+        // With async=true (the GStreamer default), kmssink waits for the
+        // first video frame before completing its Paused state change.
+        // The pipeline only transitions to Playing after ALL async sinks
+        // have prerolled, so the clock starts at the right time and
+        // buffers are never late.
+        //
+        // The startup sequence is: set pipeline to Paused → wait for
+        // kmssink to preroll on real data → auto-transition to Playing.
 
         if let Some(drm_fd) = config.drm_fd {
             if drm_fd >= 0 {
@@ -722,7 +726,7 @@ impl GstPipeline {
     /// `avdec_h264 → videoconvert → kmssink`
     fn build_sw_video_bin(config: &PipelineConfig) -> Result<(Element, Element), PlaybackError> {
         let video_queue = ElementFactory::make("queue")
-            .property("max-size-buffers", 3u32)
+            .property("max-size-buffers", 60u32)
             .build()
             .map_err(|e| {
                 PlaybackError::PipelineCreation(format!("sw video_queue: {}", e))
@@ -737,8 +741,7 @@ impl GstPipeline {
             .map_err(|e| PlaybackError::PipelineCreation(format!("videoconvert: {}", e)))?;
 
         let mut kmssink_builder = ElementFactory::make(&config.video_sink)
-            .property("can-scale", true)
-            .property("async", false);
+            .property("can-scale", true);
         if let Some(drm_fd) = config.drm_fd {
             if drm_fd >= 0 {
                 kmssink_builder = kmssink_builder.property("fd", drm_fd);
@@ -778,39 +781,46 @@ impl GstPipeline {
         Ok((bin_element, kmssink))
     }
 
-    /// Transition the pipeline to Playing.
+    /// Start the pipeline by transitioning to Paused (preroll).
     ///
-    /// Sets the pipeline directly to Playing. GStreamer internally goes
-    /// through the Paused (preroll) state first, but we don't block
-    /// waiting for preroll — the state change happens asynchronously.
-    /// When the CDN is slow, preroll can take many seconds, and blocking
-    /// would starve the tokio runtime (watchdog heartbeat, API handlers).
+    /// This is the first phase of the two-phase startup sequence:
+    ///   1. `preroll()` — set to Paused, wait for sinks to receive first buffer
+    ///   2. `start_playing()` — set to Playing once preroll completes
     ///
-    /// Errors from caps negotiation or DRM failures surface on the GStreamer
-    /// bus and are handled by the bus watch in PlaybackEngine.
-    pub fn play(&mut self) -> Result<(), PlaybackError> {
-        // Go directly to Playing. GStreamer will internally transition
-        // through Paused (preroll) first. When set_state returns:
-        //   Ok(Success) — pipeline is already Playing (e.g. local file)
-        //   Ok(Async)   — pipeline is transitioning asynchronously
-        //   Ok(NoPreroll) — live source, no preroll needed
-        //   Err(...)    — immediate failure (rare; most errors are async)
-        let result = self.pipeline.set_state(State::Playing);
+    /// With kmssink using async=true (the default), GStreamer waits for
+    /// the first decoded video frame before completing the Paused transition.
+    /// This ensures the pipeline clock doesn't start until real data is
+    /// flowing, preventing the "late buffers" problem where frames are
+    /// dropped because their timestamps are behind the running clock.
+    ///
+    /// The PlaybackEngine's bus watch automatically transitions from
+    /// Paused to Playing when preroll completes.
+    pub fn preroll(&mut self) -> Result<(), PlaybackError> {
+        // Set to Paused (not Playing). GStreamer will:
+        //   1. Start fetching data from souphttpsrc
+        //   2. Parsebin will demux and emit source pads
+        //   3. Pad-added handler links pads to video/audio chains
+        //   4. Data flows through decoders to sinks
+        //   5. kmssink (async=true) prerolls on the first video frame
+        //   6. Pipeline completes the Paused transition
+        //
+        // Then the bus watch auto-transitions to Playing.
+        let result = self.pipeline.set_state(State::Paused);
         match result {
             Ok(gstreamer::StateChangeSuccess::Success) => {
-                tracing::info!("pipeline transitioned to Playing synchronously");
+                tracing::info!("pipeline transitioned to Paused synchronously (preroll complete)");
             },
             Ok(gstreamer::StateChangeSuccess::Async) => {
                 tracing::info!(
-                    "pipeline state change to Playing accepted (async — \
-                     GStreamer is connecting to CDN and prerolling in the background)"
+                    "pipeline state change to Paused accepted (async — \
+                     GStreamer is connecting to CDN and prerolling)"
                 );
             },
             Ok(gstreamer::StateChangeSuccess::NoPreroll) => {
-                tracing::info!("pipeline transitioned to Playing (no-preroll / live source)");
+                tracing::info!("pipeline transitioned to Paused (no-preroll / live source)");
             },
             Err(e) => {
-                let msg = format!("set_state Playing failed: {}", e);
+                let msg = format!("set_state Paused failed: {}", e);
                 tracing::error!(%msg);
 
                 // Try to get a more specific error from the bus.
@@ -823,7 +833,7 @@ impl GstPipeline {
                                 tracing::error!(
                                     error = %err.error(),
                                     debug = ?err.debug(),
-                                    "GStreamer error during set_state Playing"
+                                    "GStreamer error during set_state Paused"
                                 );
                                 return Err(PlaybackError::Gstreamer(format!(
                                     "{} — {}",
@@ -834,7 +844,7 @@ impl GstPipeline {
                             gstreamer::MessageView::Warning(w) => {
                                 tracing::warn!(
                                     warning = %w.error(),
-                                    "GStreamer warning during set_state Playing"
+                                    "GStreamer warning during set_state Paused"
                                 );
                             },
                             _ => {},
@@ -843,6 +853,35 @@ impl GstPipeline {
                 }
 
                 return Err(PlaybackError::Gstreamer(msg));
+            },
+        }
+
+        self.state = PipelineState::Paused;
+        Ok(())
+    }
+
+    /// Transition the pipeline from Paused to Playing.
+    ///
+    /// Should only be called after preroll completes (the pipeline has
+    /// reached the Paused state with all async sinks having received
+    /// their first buffer).  This starts the pipeline clock and begins
+    /// real-time playback.
+    ///
+    /// Also used by `resume()` to un-pause a user-paused pipeline.
+    pub fn start_playing(&mut self) -> Result<(), PlaybackError> {
+        let result = self.pipeline.set_state(State::Playing);
+        match result {
+            Ok(gstreamer::StateChangeSuccess::Success) => {
+                tracing::info!("pipeline transitioned to Playing");
+            },
+            Ok(gstreamer::StateChangeSuccess::Async) => {
+                tracing::info!("pipeline Paused→Playing accepted (async)");
+            },
+            Ok(gstreamer::StateChangeSuccess::NoPreroll) => {
+                tracing::info!("pipeline transitioned to Playing (no-preroll)");
+            },
+            Err(e) => {
+                return Err(PlaybackError::Gstreamer(format!("set_state Playing: {}", e)));
             },
         }
 
@@ -868,7 +907,7 @@ impl GstPipeline {
                 self.state
             )));
         }
-        self.play()
+        self.start_playing()
     }
 
     /// Stop the pipeline and release resources.
@@ -974,7 +1013,7 @@ impl GstPipeline {
 
         // Replace self with the new pipeline.
         *self = new;
-        self.play()?;
+        self.preroll()?;
 
         Ok(())
     }
