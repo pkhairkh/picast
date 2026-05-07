@@ -774,7 +774,7 @@ impl SessionManager {
                 })
                 .unwrap_or_default();
 
-            playback.play(&resolve_info.direct_url, &socks_addr, &isolation_username).await.map_err(|e| SessionError::PlaybackError(e.to_string())).inspect_err(|_| {
+            playback.play(&resolve_info.direct_url, url, &socks_addr, &isolation_username).await.map_err(|e| SessionError::PlaybackError(e.to_string())).inspect_err(|_| {
                 // Transition to Error state on playback failure.
                 let _ = self.try_transition(id, PlayerState::Error);
                 let _ = self.clear_active_session();
@@ -1245,6 +1245,7 @@ mod tests {
         async fn play(
             &self,
             _url: &str,
+            _source_url: &str,
             _socks_addr: &str,
             _isolation_username: &str,
         ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {

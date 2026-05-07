@@ -90,10 +90,11 @@ impl picast_session::interfaces::PlaybackTrait for PlaybackAdapter {
     async fn play(
         &self,
         url: &str,
+        source_url: &str,
         socks_addr: &str,
         isolation_username: &str,
     ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
-        self.0.play(url, socks_addr, isolation_username).await?;
+        self.0.play(url, source_url, socks_addr, isolation_username).await?;
         Ok(())
     }
 

@@ -49,6 +49,7 @@ impl PlaybackTrait for MockPlayback {
     async fn play(
         &self,
         _url: &str,
+        _source_url: &str,
         _socks_addr: &str,
         _isolation_username: &str,
     ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {

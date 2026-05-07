@@ -20,7 +20,7 @@
 //!     let mut engine = PlaybackEngine::new(config)?;
 //!
 //!     let mut events = engine.events();
-//!     engine.play("https://example.com/video.mp4", "127.0.0.1:9050", "picast-abc123").await?;
+//!     engine.play("https://example.com/video.mp4", "https://example.com/page", "127.0.0.1:9050", "picast-abc123").await?;
 //!
 //!     while let Ok(event) = events.recv().await {
 //!         println!("Event: {:?}", event);
@@ -522,12 +522,20 @@ impl PlaybackEngine {
     /// sinks and routes traffic through the Tor SOCKS5h proxy if
     /// `socks_addr` is non-empty.
     ///
+    /// The `url` is the direct media URL (CDN URL) to stream.
+    ///
+    /// The `source_url` is the original page URL that the user cast.
+    /// It's used to set the Referer header — many CDNs (Voe, DoodStream)
+    /// require the Referer to match the originating site's domain, not
+    /// the CDN's domain. Sending the CDN's origin as Referer causes 403.
+    ///
     /// The `isolation_username` is used as the SOCKS5 username for
     /// Tor's `IsolateSOCKSAuth` circuit isolation.
     #[cfg(feature = "hw")]
     pub async fn play(
         &self,
         url: &str,
+        source_url: &str,
         socks_addr: &str,
         isolation_username: &str,
     ) -> Result<(), PlaybackError> {
@@ -550,7 +558,7 @@ impl PlaybackEngine {
             "constructing playback pipeline"
         );
 
-        let mut pipeline = GstPipeline::new(url, socks_addr, isolation_username, &self.config).await?;
+        let mut pipeline = GstPipeline::new(url, source_url, socks_addr, isolation_username, &self.config).await?;
 
         // Set up bus watch to forward GStreamer messages as events.
         let event_tx = self.event_tx.clone();
@@ -1066,6 +1074,7 @@ impl PlaybackEngine {
     pub async fn play(
         &self,
         url: &str,
+        _source_url: &str,
         _socks_addr: &str,
         _isolation_username: &str,
     ) -> Result<(), PlaybackError> {
@@ -1474,7 +1483,7 @@ mod tests {
 
         // Play
         engine
-            .play("https://example.com/video.mp4", "", "")
+            .play("https://example.com/video.mp4", "https://example.com/video.mp4", "", "")
             .await
             .expect("mock play should succeed");
         assert_eq!(engine.mock_state(), PlaybackState::Playing);
@@ -1509,7 +1518,7 @@ mod tests {
         }
 
         // Load a URL
-        engine.play("https://example.com/video.mp4", "", "").await.unwrap();
+        engine.play("https://example.com/video.mp4", "https://example.com/video.mp4", "", "").await.unwrap();
 
         // Seek to 5000 ms
         engine.seek(5000).await.expect("mock seek should succeed");
@@ -1558,7 +1567,7 @@ mod tests {
         assert!(engine.duration_ms().await.is_err());
 
         // Load a URL
-        engine.play("https://example.com/video.mp4", "", "").await.unwrap();
+        engine.play("https://example.com/video.mp4", "https://example.com/video.mp4", "", "").await.unwrap();
 
         // Position should be 0 right after play
         let pos = engine.position_ms().await.expect("position_ms should succeed");
@@ -1583,7 +1592,7 @@ mod tests {
         assert!(!health.is_buffering);
 
         // After play, buffer health should be healthy
-        engine.play("https://example.com/video.mp4", "", "").await.unwrap();
+        engine.play("https://example.com/video.mp4", "https://example.com/video.mp4", "", "").await.unwrap();
 
         let health = engine.buffer_health().await;
         assert_eq!(health.fill_percent, 100);
@@ -1643,13 +1652,13 @@ mod tests {
         let engine = PlaybackEngine::new(PipelineConfig::default()).unwrap();
 
         // Load and seek to some position
-        engine.play("https://example.com/video.mp4", "", "").await.unwrap();
+        engine.play("https://example.com/video.mp4", "https://example.com/video.mp4", "", "").await.unwrap();
         engine.seek(120_000).await.unwrap();
         let pos = engine.position_ms().await.unwrap();
         assert_eq!(pos, 120_000);
 
         // Play again — position should reset to 0
-        engine.play("https://example.com/other.mp4", "", "").await.unwrap();
+        engine.play("https://example.com/other.mp4", "https://example.com/other.mp4", "", "").await.unwrap();
         let pos = engine.position_ms().await.unwrap();
         assert_eq!(pos, 0, "position should reset to 0 on play");
     }
@@ -1659,7 +1668,7 @@ mod tests {
         let engine = PlaybackEngine::new(PipelineConfig::default()).unwrap();
 
         // Load and play
-        engine.play("https://example.com/video.mp4", "", "").await.unwrap();
+        engine.play("https://example.com/video.mp4", "https://example.com/video.mp4", "", "").await.unwrap();
 
         // Resume while playing should fail
         let result = engine.resume().await;

@@ -54,9 +54,17 @@ pub trait ResolverTrait: Send + Sync {
 #[async_trait]
 pub trait PlaybackTrait: Send + Sync {
     /// Begin playback of `url` through the given SOCKS5 proxy.
+    ///
+    /// - `url`: Direct media URL (CDN URL) to stream.
+    /// - `source_url`: Original page URL the user cast. Used for the
+    ///   Referer header — CDNs like Voe require it to match the
+    ///   originating site's domain, not the CDN's domain.
+    /// - `socks_addr`: Tor SOCKS5 proxy address.
+    /// - `isolation_username`: SOCKS5 username for circuit isolation.
     async fn play(
         &self,
         url: &str,
+        source_url: &str,
         socks_addr: &str,
         isolation_username: &str,
     ) -> Result<(), Box<dyn std::error::Error + Send + Sync>>;

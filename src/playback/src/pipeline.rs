@@ -105,6 +105,14 @@ pub enum PipelineState {
 impl GstPipeline {
     /// Construct a new GStreamer pipeline for the given URL.
     ///
+    /// The `url` parameter is the direct media URL (CDN URL) to stream.
+    ///
+    /// The `source_url` parameter is the original page URL that the user
+    /// cast. It's used to set the Referer header — many CDNs (Voe,
+    /// DoodStream) require the Referer to match the originating site's
+    /// domain, not the CDN's domain. If empty, the Referer falls back
+    /// to the media URL's origin.
+    ///
     /// The `socks_addr` parameter provides the Tor SOCKS5 proxy address
     /// (e.g. "127.0.0.1:9050"). If non-empty and the URL is not loopback,
     /// a local HTTP CONNECT→SOCKS5 forwarder is started that routes
@@ -117,6 +125,7 @@ impl GstPipeline {
     /// used during URL resolution to ensure the same Tor circuit.
     pub async fn new(
         url: &str,
+        source_url: &str,
         socks_addr: &str,
         isolation_username: &str,
         config: &PipelineConfig,
@@ -144,8 +153,19 @@ impl GstPipeline {
 
         // Set extra HTTP headers.  Many video CDNs require a Referer header
         // for hotlink protection — they check that the request originates
-        // from the embedding page's domain.  We set the Referer to the
-        // URL's own origin so the CDN sees a "same-origin" request.
+        // from the embedding page's domain.
+        //
+        // IMPORTANT: The Referer MUST be derived from the *source* URL
+        // (the original page the user cast), NOT the CDN media URL.
+        // CDNs like Voe bind their tokens to the originating site's domain
+        // and reject requests whose Referer doesn't match. If we send the
+        // CDN URL's origin as Referer, the CDN sees it as a cross-origin
+        // hotlink and returns 403 Forbidden.
+        //
+        // The resolver (yt-dlp) sends the correct Referer during URL
+        // resolution, which is why resolution succeeds. We must send
+        // the same Referer during media fetch for the CDN to accept it.
+        //
         // Accept and Accept-Language headers make the request look more
         // browser-like, which helps with CDNs that reject GStreamer's
         // default headers.
@@ -153,12 +173,21 @@ impl GstPipeline {
             let mut headers = gstreamer::Structure::new_empty("extra-headers");
             headers.set("Accept", "video/webm,video/mp4,video/*;q=0.9,application/ogg,*/*;q=0.7");
             headers.set("Accept-Language", "en-US,en;q=0.5");
-            // Derive Referer from the URL's origin (scheme://host).
-            if let Ok(parsed) = url::Url::parse(url) {
+            // Derive Referer from the SOURCE URL's origin (the page the
+            // user cast), falling back to the media URL's origin if no
+            // source URL is available. This matches what the resolver
+            // (yt-dlp) sends, ensuring the CDN sees the same Referer
+            // during both resolution and media fetch.
+            let referer_url = if !source_url.is_empty() { source_url } else { url };
+            if let Ok(parsed) = url::Url::parse(referer_url) {
                 if let Some(host) = parsed.host_str() {
                     let referer = format!("{}://{}", parsed.scheme(), host);
                     headers.set("Referer", referer.as_str());
-                    tracing::debug!(referer = %referer, "souphttpsrc: Referer header set");
+                    tracing::info!(
+                        referer = %referer,
+                        source_url = %source_url,
+                        "souphttpsrc: Referer header set from source URL origin (matches resolver)"
+                    );
                 }
             }
             src.set_property("extra-headers", &headers);
