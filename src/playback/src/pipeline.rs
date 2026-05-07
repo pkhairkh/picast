@@ -1046,7 +1046,7 @@ impl GstPipeline {
         // Build a new pipeline with HW accel disabled.
         let mut sw_config = config.clone();
         sw_config.hw_accel = false;
-        let new = Self::new(url, socks_addr, isolation_username, &sw_config)?;
+        let new = Self::new(url, _socks_addr, _isolation_username, &sw_config)?;
 
         // Replace self with the new pipeline.
         *self = new;
