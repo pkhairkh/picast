@@ -642,80 +642,17 @@ impl PlaybackEngine {
                             let _ = pipe.set_state(State::Playing);
                         }
 
-                        // Check whether parsebin's video pad is linked to the video bin.
-                        // If the video pad was never linked, video data never reaches
-                        // kmssink and the screen stays black.
+                        // Check whether parsebin's video/audio pads are linked.
+                        // We use parsebin.iterate_src_pads() as the source of truth —
+                        // walking bins by factory name is fragile and previously produced
+                        // false "NO video pad linked" errors that contradicted the
+                        // pad-added handler's own logs.
                         if let Ok(bin) = pipe.dynamic_cast::<gstreamer::Bin>() {
                             let mut video_linked = false;
                             let mut audio_linked = false;
-                            let mut elem_iter = bin.iterate_elements();
-                            loop {
-                                match elem_iter.next() {
-                                    Ok(Some(e)) => {
-                                        let factory_name = e.factory()
-                                            .map(|f: gstreamer::ElementFactory| f.name().to_string())
-                                            .unwrap_or_default();
 
-                                        // Check video bin sink pad — dynamic_cast consumes e,
-                                        // so get the sink pad first.
-                                        if factory_name == "GstBin" {
-                                            let sink_linked = e.static_pad("sink")
-                                                .map(|sink| sink.is_linked())
-                                                .unwrap_or(false);
-                                            if let Ok(sub_bin) = e.dynamic_cast::<gstreamer::Bin>() {
-                                                let mut has_kmssink = false;
-                                                let mut sub_iter = sub_bin.iterate_elements();
-                                                loop {
-                                                    match sub_iter.next() {
-                                                        Ok(Some(se)) => {
-                                                            let sub_fn = se.factory()
-                                                                .map(|f: gstreamer::ElementFactory| f.name().to_string())
-                                                                .unwrap_or_default();
-                                                            if sub_fn == "kmssink" {
-                                                                has_kmssink = true;
-                                                            }
-                                                        },
-                                                        Ok(None) | Err(_) => break,
-                                                    }
-                                                }
-                                                if has_kmssink {
-                                                    if sink_linked {
-                                                        video_linked = true;
-                                                        tracing::info!("video bin sink pad is linked ✓");
-                                                    } else {
-                                                        tracing::error!(
-                                "VIDEO BIN SINK PAD IS NOT LINKED — parsebin never connected the video pad! \
-                                 This is why no video appears on screen. The video bin (h264parse→capssetter→v4l2h264dec→kmssink) \
-                                 is sitting in the pipeline with no data flowing into it."
-                                                        );
-                                                    }
-                                                }
-                                            }
-                                        } else if factory_name == "GstQueue" {
-                                            // Check audio queue sink pad
-                                            if let Some(sink) = e.static_pad("sink") {
-                                                if sink.is_linked() {
-                                                    audio_linked = true;
-                                                }
-                                            }
-                                        }
-                                    },
-                                    Ok(None) | Err(_) => break,
-                                }
-                            }
-                            if !video_linked {
-                                tracing::error!(
-                                    "NO video pad linked after 8s — parsebin did not connect video to the video bin. \
-                                     Possible causes: (1) the stream has no video track, (2) parsebin's pad-added signal \
-                                     fired before the callback was connected (race condition), (3) the video bin's sink \
-                                     pad ghost pad is misconfigured."
-                                );
-                            }
-                            if !audio_linked {
-                                tracing::warn!("no audio pad linked after 8s — audio track may be missing");
-                            }
-
-                            // Also check parsebin's source pads directly
+                            // Check parsebin's source pads directly — this is the
+                            // authoritative way to determine linkage.
                             if let Some(parsebin_elem) = bin.by_name("parsebin0") {
                                 let mut pad_iter = parsebin_elem.iterate_src_pads();
                                 let mut pad_count = 0;
@@ -726,12 +663,28 @@ impl PlaybackEngine {
                                                 .map(|c: gstreamer::Caps| c.to_string())
                                                 .unwrap_or_default();
                                             let is_linked = pad.is_linked();
+
+                                            // Determine media type from caps
+                                            let media_type = pad.current_caps()
+                                                .and_then(|c| c.structure(0).map(|s| s.name().to_string()))
+                                                .unwrap_or_default();
+                                            let is_video = media_type.starts_with("video/");
+                                            let is_audio = media_type.starts_with("audio/");
+
                                             tracing::info!(
                                                 pad = %pad.name(),
                                                 caps = %caps,
                                                 is_linked = is_linked,
+                                                media_type = %media_type,
                                                 "parsebin source pad"
                                             );
+
+                                            if is_video && is_linked {
+                                                video_linked = true;
+                                            }
+                                            if is_audio && is_linked {
+                                                audio_linked = true;
+                                            }
                                             pad_count += 1;
                                         },
                                         Ok(None) | Err(_) => break,
@@ -743,6 +696,22 @@ impl PlaybackEngine {
                                          This typically means souphttpsrc is not providing data (network error, CDN 403, etc.)."
                                     );
                                 }
+                            }
+
+                            if video_linked {
+                                tracing::info!("video pad linked ✓ — parsebin video pad is connected");
+                            } else {
+                                tracing::error!(
+                                    "NO video pad linked after 8s — parsebin did not connect video to the video bin. \
+                                     Possible causes: (1) the stream has no video track, (2) parsebin's pad-added signal \
+                                     fired before the callback was connected (race condition), (3) the video bin's sink \
+                                     pad ghost pad is misconfigured."
+                                );
+                            }
+                            if audio_linked {
+                                tracing::info!("audio pad linked ✓ — parsebin audio pad is connected");
+                            } else {
+                                tracing::warn!("no audio pad linked after 8s — audio track may be missing");
                             }
                         }
                     }
@@ -810,7 +779,8 @@ impl PlaybackEngine {
 
                             // Point to GStreamer debug log for details
                             tracing::warn!(
-                                "check /tmp/picast/gst-debug.log for detailed kmssink/v4l2h264dec debug output"
+                                "check /tmp/picast/gst-debug.log for detailed kmssink/v4l2h264dec debug output. \
+                                 For caps negotiation issues, set GST_DEBUG=kmssink:6,v4l2h264dec:6,h264parse:5,GST_CAPS:6,GST_PADS:5"
                             );
                         }
                     }
