@@ -306,8 +306,8 @@ impl GstPipeline {
         let queue2 = ElementFactory::make("queue2")
             .property("max-size-bytes", 100_000_000u32) // 100 MB — large buffer for Tor
             .property("use-buffering", true)
-            .property("high-percent", 80u32)  // start playing when 80% full
-            .property("low-percent", 10u32)   // pause when buffer drops to 10%
+            .property("high-percent", 80i32)  // start playing when 80% full
+            .property("low-percent", 10i32)   // pause when buffer drops to 10%
             .build()
             .map_err(|e| PlaybackError::PipelineCreation(format!("queue2: {}", e)))?;
 
