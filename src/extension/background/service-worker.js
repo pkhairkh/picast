@@ -814,6 +814,14 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
       return true;
     }
 
+    case "SET_AUDIO_DEVICE": {
+      const audioDevice = message.device || "";
+      picastApi("/api/audio-device", "POST", { device: audioDevice })
+        .then((result) => sendResponse(result))
+        .catch((err) => sendResponse({ error: err.message }));
+      return true;
+    }
+
     case "GRANT_PERMISSION": {
       // This must be called from a user-gesture context (popup/options)
       // We can't call chrome.permissions.request() from the background script,

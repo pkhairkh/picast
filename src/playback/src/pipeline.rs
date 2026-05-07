@@ -643,9 +643,14 @@ impl GstPipeline {
         // Without capture-io-mode=dmabuf, the decoder allocates system
         // memory buffers and the zero-copy path is broken, causing low
         // FPS and dropped buffers ("A lot of buffers are being dropped").
+        //
+        // IMPORTANT: We set the io-mode properties AFTER building the element
+        // because `property_from_str` on `ElementFactoryBuilder` stores the
+        // value as a string `SendValue` which may not be correctly converted
+        // to the GEnum type when `build()` applies the properties. Setting
+        // them on the built element with `set_property_from_str()` ensures
+        // GStreamer's type conversion is invoked properly.
         let v4l2dec = ElementFactory::make("v4l2h264dec")
-            .property_from_str("output-io-mode", "dmabuf")
-            .property_from_str("capture-io-mode", "dmabuf")
             .build()
             .map_err(|e| {
                 PlaybackError::PipelineCreation(format!(
@@ -653,6 +658,41 @@ impl GstPipeline {
                     e
                 ))
             })?;
+
+        // Set dmabuf io-modes on the built element for reliable type conversion.
+        // GST_V4L2_IO_DMABUF = 3 (nick: "dmabuf").
+        // Strategy: try setting via string first (works if GStreamer registers
+        // the string-to-enum transform).  If that fails, set via integer (which
+        // always works for GEnum properties since GStreamer accepts integers).
+        match v4l2dec.set_property("output-io-mode", "dmabuf") {
+            Ok(()) => tracing::debug!("v4l2h264dec: output-io-mode=dmabuf set via string"),
+            Err(_) => {
+                if let Err(e) = v4l2dec.set_property("output-io-mode", 3i32) {
+                    tracing::warn!(error = %e, "v4l2h264dec: failed to set output-io-mode=3 (dmabuf)");
+                } else {
+                    tracing::info!("v4l2h264dec: output-io-mode set to 3 (dmabuf) via integer fallback");
+                }
+            },
+        }
+        match v4l2dec.set_property("capture-io-mode", "dmabuf") {
+            Ok(()) => tracing::debug!("v4l2h264dec: capture-io-mode=dmabuf set via string"),
+            Err(_) => {
+                if let Err(e) = v4l2dec.set_property("capture-io-mode", 3i32) {
+                    tracing::warn!(error = %e, "v4l2h264dec: failed to set capture-io-mode=3 (dmabuf)");
+                } else {
+                    tracing::info!("v4l2h264dec: capture-io-mode set to 3 (dmabuf) via integer fallback");
+                }
+            },
+        }
+
+        // Verify the properties were actually set
+        let output_mode = v4l2dec.property::<String>("output-io-mode").unwrap_or_default();
+        let capture_mode = v4l2dec.property::<String>("capture-io-mode").unwrap_or_default();
+        tracing::info!(
+            output_io_mode = %output_mode,
+            capture_io_mode = %capture_mode,
+            "v4l2h264dec: io-mode properties set (expect 'dmabuf' for zero-copy)"
+        );
 
         // Build kmssink.  The fd and driver-name properties are mutually
         // exclusive in kmssink: setting both causes a warning "Can't set
@@ -662,7 +702,7 @@ impl GstPipeline {
         // let kmssink find and open the device itself.
         let mut kmssink_builder = ElementFactory::make(&config.video_sink)
             .property("can-scale", true)
-            .property("max-lateness", 40_000_000i64); // 40ms — default 5ms is too aggressive on Pi
+            .property("max-lateness", -1i64); // unlimited — never drop late buffers on Pi
         // NOTE: kmssink uses the default async=true (preroll-aware).
         //
         // Previous versions set async=false to avoid preroll stalls, but

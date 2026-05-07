@@ -82,6 +82,16 @@ pub trait PlaybackTrait: Send + Sync {
 
     /// Return the duration in milliseconds.
     async fn duration_ms(&self) -> Result<Option<u64>, Box<dyn std::error::Error + Send + Sync>>;
+
+    /// Set the ALSA audio device for the next pipeline (e.g. "plughw:1,0").
+    /// Takes effect on the next play() call; does not affect a running pipeline.
+    async fn set_audio_device(
+        &self,
+        device: String,
+    ) -> Result<(), Box<dyn std::error::Error + Send + Sync>>;
+
+    /// Get the current ALSA audio device string.
+    async fn audio_device(&self) -> Result<String, Box<dyn std::error::Error + Send + Sync>>;
 }
 
 // ── Display ──────────────────────────────────────────────────────────

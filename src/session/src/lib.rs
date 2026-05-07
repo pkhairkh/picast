@@ -581,6 +581,33 @@ impl SessionManager {
         self.load_session(id)
     }
 
+    /// Set the ALSA audio device for the next playback pipeline.
+    ///
+    /// The change takes effect on the next `play()` call and does not
+    /// affect a currently-running pipeline.
+    pub async fn set_audio_device(&self, device: String) -> Result<(), SessionError> {
+        let playback = self
+            .playback
+            .as_ref()
+            .ok_or(SessionError::Subsystem("playback not configured".into()))?;
+        playback
+            .set_audio_device(device)
+            .await
+            .map_err(|e| SessionError::Subsystem(format!("set_audio_device: {}", e)))
+    }
+
+    /// Get the current ALSA audio device string.
+    pub async fn audio_device(&self) -> Result<String, SessionError> {
+        let playback = self
+            .playback
+            .as_ref()
+            .ok_or(SessionError::Subsystem("playback not configured".into()))?;
+        playback
+            .audio_device()
+            .await
+            .map_err(|e| SessionError::Subsystem(format!("audio_device: {}", e)))
+    }
+
     /// Subscribe to session events (broadcast channel).
     ///
     /// Use this for real-time event streaming (e.g. WebSocket server).

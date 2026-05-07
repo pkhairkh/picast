@@ -113,6 +113,20 @@ function saveSettings() {
       saveBtn.textContent = "Save Settings";
     }, 2000);
 
+    // Send audio device to PiCast server so next playback uses it
+    if (settings.audioDevice !== undefined) {
+      chrome.runtime.sendMessage(
+        { type: "SET_AUDIO_DEVICE", device: settings.audioDevice },
+        function (result) {
+          if (result && !result.error) {
+            console.log("[PiCast] Audio device updated on server:", settings.audioDevice);
+          } else {
+            console.warn("[PiCast] Failed to update audio device on server:", result?.error);
+          }
+        }
+      );
+    }
+
     // Ask background service worker to reconnect with new settings
     try {
       chrome.runtime.sendMessage({ type: "WS_RECONNECT" }).catch(function () {});

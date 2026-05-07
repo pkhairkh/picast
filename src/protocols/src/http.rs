@@ -38,6 +38,12 @@ struct CastRequest {
 }
 
 #[derive(Debug, Deserialize)]
+struct AudioDeviceRequest {
+    /// ALSA device string (e.g. "plughw:1,0").  Empty = ALSA default.
+    device: String,
+}
+
+#[derive(Debug, Deserialize)]
 struct SeekRequest {
     position_ms: Option<u64>,
     position_seconds: Option<f64>,
@@ -341,6 +347,26 @@ async fn handle_request(
                     error_response(status, &e.to_string())
                 },
             }
+        },
+
+        // Set audio device.
+        (Method::POST, "/api/audio-device") => {
+            let payload = read_body_json::<AudioDeviceRequest>(body).await?;
+            match session.set_audio_device(payload.device.clone()).await {
+                Ok(()) => {
+                    tracing::info!(device = %payload.device, "audio device updated via API");
+                    json_response(StatusCode::OK, &serde_json::json!({"device": payload.device}))
+                },
+                Err(e) => error_response(StatusCode::INTERNAL_SERVER_ERROR, &e.to_string()),
+            }
+        },
+
+        // Get audio device.
+        (Method::GET, "/api/audio-device") => match session.audio_device().await {
+            Ok(device) => {
+                json_response(StatusCode::OK, &serde_json::json!({"device": device}))
+            },
+            Err(e) => error_response(StatusCode::INTERNAL_SERVER_ERROR, &e.to_string()),
         },
 
         // 404.

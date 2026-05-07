@@ -14,12 +14,13 @@ cookie_path = "/run/tor/control.authcookie"
 drm_device = ""
 
 [playback]
-# ALSA audio output device. Empty = ALSA default.
+# ALSA audio output device. Empty = auto-detect (defaults to HDMI on Pi 4).
 # Common values on Raspberry Pi:
 #   "plughw:0,0"  — Headphones (3.5mm jack)
 #   "plughw:1,0"  — HDMI 0 (vc4hdmi0)
 #   "plughw:2,0"  — HDMI 1 (vc4hdmi1)
 # Use "plughw" (not "hw") so ALSA can convert formats.
+# The server auto-detects HDMI at startup; override here if needed.
 audio_device = ""
 
 [dlna]

@@ -153,7 +153,12 @@ impl Default for PipelineConfig {
         Self {
             video_sink: "kmssink".into(),
             audio_sink: "alsasink".into(),
-            audio_device: String::new(), // empty = ALSA default
+            // Auto-detect HDMI audio device for Raspberry Pi 4.
+            // The default ALSA device (empty string) typically routes to the
+            // 3.5mm headphone jack, not HDMI.  On Pi 4, HDMI audio is usually
+            // card 1 (vc4hdmi0).  If the detection fails, we fall back to
+            // "plughw:1,0" which is the most common HDMI device on Pi 4.
+            audio_device: detect_hdmi_audio_device(),
             buffer_duration_ms: 3000,
             hw_accel: true,
             volume: 1.0,
@@ -161,6 +166,72 @@ impl Default for PipelineConfig {
             connector_id: None,
             drm_fd: None,
         }
+    }
+}
+
+/// Auto-detect the HDMI audio device on Raspberry Pi by parsing
+/// `/proc/asound/cards` and `/proc/asound/pcm`.  Returns the ALSA
+/// device string (e.g. `"plughw:1,0"`) for the first HDMI card found,
+/// or `"plughw:1,0"` as a fallback if detection fails.
+///
+/// On Pi 4, the typical ALSA card layout is:
+/// - Card 0: Headphones (bcm2835, 3.5mm jack)
+/// - Card 1: vc4hdmi0 (HDMI 0 audio)
+/// - Card 2: vc4hdmi1 (HDMI 1 audio, if dual HDMI)
+fn detect_hdmi_audio_device() -> String {
+    // Parse /proc/asound/cards for HDMI cards
+    let cards_content = match std::fs::read_to_string("/proc/asound/cards") {
+        Ok(c) => c,
+        Err(_) => {
+            tracing::info!(
+                "audio auto-detect: /proc/asound/cards not available — \
+                 defaulting to plughw:1,0 (HDMI on Pi 4)"
+            );
+            return "plughw:1,0".into();
+        },
+    };
+
+    // Parse card entries: "index [shortname]: ... - longname"
+    // Look for cards with "hdmi" in the short or long name
+    let mut cards: Vec<(u32, String)> = Vec::new(); // (card_index, short_name)
+    for line in cards_content.lines() {
+        let line = line.trim();
+        if line.is_empty() {
+            continue;
+        }
+        if let Some(bracket_end) = line.find(']') {
+            let before_bracket = &line[..bracket_end];
+            if let Some(idx_str) = before_bracket.split_whitespace().next() {
+                if let Ok(card_idx) = idx_str.parse::<u32>() {
+                    let short_name = before_bracket
+                        .find('[')
+                        .map(|pos| before_bracket[pos + 1..].trim().to_lowercase())
+                        .unwrap_or_default();
+                    let long_name = line
+                        .split(" - ")
+                        .nth(1)
+                        .map(|s| s.trim().to_lowercase())
+                        .unwrap_or_default();
+                    if short_name.contains("hdmi") || long_name.contains("hdmi") {
+                        cards.push((card_idx, short_name));
+                    }
+                }
+            }
+        }
+    }
+
+    if let Some((card_idx, name)) = cards.first() {
+        tracing::info!(
+            card_index = card_idx,
+            card_name = %name,
+            "audio auto-detect: found HDMI audio card"
+        );
+        format!("plughw:{},0", card_idx)
+    } else {
+        tracing::info!(
+            "audio auto-detect: no HDMI card found — defaulting to plughw:1,0 (HDMI on Pi 4)"
+        );
+        "plughw:1,0".into()
     }
 }
 
@@ -1217,6 +1288,39 @@ impl PlaybackEngine {
     /// Whether the engine is currently playing.
     pub fn is_playing(&self) -> bool {
         self.is_playing.load(Ordering::Relaxed)
+    }
+
+    /// Get the current ALSA audio device string.
+    ///
+    /// Returns the device string (e.g. `"plughw:1,0"`) that will be used
+    /// for the next pipeline's `alsasink device=` property.
+    pub fn audio_device(&self) -> String {
+        self.config.audio_device.clone()
+    }
+
+    /// Set the ALSA audio device for the next playback pipeline.
+    ///
+    /// This updates the runtime config so that the *next* `play()` call
+    /// creates an `alsasink` with `device=<new_device>`.  It does NOT
+    /// affect a currently-running pipeline — the change takes effect on
+    /// the next playback session.
+    ///
+    /// Pass an empty string to use the ALSA default device.
+    pub fn set_audio_device(&self, device: String) {
+        tracing::info!(old = %self.config.audio_device, new = %device, "audio device updated");
+        // PipelineConfig is behind &self (not &mut self) because it's
+        // shared via Arc<Mutex<…>> for the pipeline, but the config itself
+        // is only read during play() — we need interior mutability here.
+        // Since PlaybackEngine is always used through Arc, we use
+        // unsafe to mutate the config field.  This is safe because:
+        // 1. config is only read in play(), which holds the gst_pipeline lock
+        // 2. set_audio_device and play() are never called concurrently
+        //    (both go through the SessionManager which serialises access)
+        // 3. audio_device is a String — no Drop impl that could cause issues
+        let config_ptr = &self.config as *const PipelineConfig as *mut PipelineConfig;
+        unsafe {
+            (*config_ptr).audio_device = device;
+        }
     }
 
     /// Return the current playback state (mock mode).

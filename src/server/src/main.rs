@@ -132,6 +132,18 @@ impl picast_session::interfaces::PlaybackTrait for PlaybackAdapter {
     async fn duration_ms(&self) -> Result<Option<u64>, Box<dyn std::error::Error + Send + Sync>> {
         Ok(self.0.duration_ms().await?)
     }
+
+    async fn set_audio_device(
+        &self,
+        device: String,
+    ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+        self.0.set_audio_device(device);
+        Ok(())
+    }
+
+    async fn audio_device(&self) -> Result<String, Box<dyn std::error::Error + Send + Sync>> {
+        Ok(self.0.audio_device())
+    }
 }
 
 /// Adapter: `picast_resolver::Resolver` → `ResolverTrait`
@@ -302,8 +314,9 @@ async fn main() -> Result<()> {
     }
     if !config.playback.audio_device.is_empty() {
         pipeline_config.audio_device = config.playback.audio_device.clone();
-        info!(audio_device = %config.playback.audio_device, "playback engine configured with explicit ALSA device");
+        info!(audio_device = %config.playback.audio_device, "playback engine configured with explicit ALSA device from config");
     }
+    info!(audio_device = %pipeline_config.audio_device, "playback engine will use ALSA device");
     #[cfg(feature = "hw")]
     let playback_engine: Arc<picast_playback::PlaybackEngine> = {
         Arc::new(picast_playback::PlaybackEngine::new(pipeline_config)?)
