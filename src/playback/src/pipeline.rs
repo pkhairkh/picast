@@ -100,11 +100,12 @@ pub enum PipelineState {
 impl GstPipeline {
     /// Construct a new GStreamer pipeline for the given URL.
     ///
-    /// The `socks_addr` parameter configures SOCKS5h proxy routing
-    /// through Tor. If empty, no proxy is used (for local media).
+    /// The `socks_addr` parameter is retained for API compatibility but
+    /// proxy routing is now handled via `config.tor_http_proxy` (Tor's
+    /// HTTP CONNECT proxy) instead of SOCKS5, because souphttpsrc does
+    /// not support SOCKS5 proxy URIs with libsoup2.4.
     ///
-    /// The `isolation_username` is used as the SOCKS5 username for
-    /// Tor circuit isolation (IsolateSOCKSAuth).
+    /// The `isolation_username` is retained for API compatibility.
     pub fn new(
         url: &str,
         socks_addr: &str,
@@ -155,57 +156,45 @@ impl GstPipeline {
             tracing::debug!("souphttpsrc: extra-headers configured");
         }
 
-        // Configure SOCKS5h proxy if provided. The proxy is used when:
-        //   1. A proxy address is configured (Tor is available)
-        //   2. The URL is NOT a loopback address
+        // Configure Tor proxy for media routing. ALL non-loopback
+        // traffic goes through Tor — this is a core security property
+        // of PiCast. Privacy is non-negotiable: the user's ISP must
+        // never see which content is being accessed.
         //
-        // ALL non-loopback traffic goes through Tor — this is a core
-        // security property of PiCast. Routing media through Tor is slower
-        // than direct, but privacy is non-negotiable: the user's ISP must
-        // never see which content is being accessed. The Tor SOCKS proxy
-        // handles DNS resolution (SOCKS5h) to prevent DNS leaks as well.
+        // souphttpsrc's `proxy` property only supports HTTP proxy URIs.
+        // libsoup2.4 (Debian Bookworm) does NOT support `socks5h://`
+        // proxy URIs, and `socks5-proxy-ip`/`socks5-proxy-port` properties
+        // do not exist on souphttpsrc (they are on `tcpclientsrc`, a
+        // different element).  The only reliable way to route souphttpsrc
+        // through Tor is via an HTTP CONNECT proxy provided by Tor's
+        // HTTPTunnelPort (requires `HTTPTunnelPort 9080` in torrc).
+        //
+        // The HTTP CONNECT proxy handles DNS resolution through Tor (the
+        // hostname is sent in the CONNECT request, not resolved locally),
+        // preventing DNS leaks.
         let is_loopback_url = url.starts_with("http://127.0.0.1:")
             || url.starts_with("http://localhost:")
             || url.starts_with("http://[::1]:");
 
-        let use_proxy = !socks_addr.is_empty() && !is_loopback_url;
-
-        if use_proxy {
-            let parts: Vec<&str> = socks_addr.split(':').collect();
-            let (host, port) = if parts.len() == 2 {
-                (parts[0], parts[1].parse::<u32>().unwrap_or(9050))
-            } else {
-                ("127.0.0.1", 9050u32)
-            };
-            if src.find_property("socks5-proxy-ip").is_some()
-                && src.find_property("socks5-proxy-port").is_some()
-            {
-                src.set_property("socks5-proxy-ip", host);
-                src.set_property("socks5-proxy-port", port);
+        if !is_loopback_url && !config.tor_http_proxy.is_empty() {
+            if src.find_property("proxy").is_some() {
+                src.set_property("proxy", &config.tor_http_proxy);
                 tracing::info!(
-                    host = host,
-                    port = port,
-                    user = isolation_username,
-                    "SOCKS5h proxy configured on souphttpsrc (all traffic through Tor)"
-                );
-            } else if src.find_property("proxy").is_some() {
-                let proxy = format!("socks5h://{}@{}:{}", isolation_username, host, port);
-                src.set_property("proxy", proxy);
-                tracing::info!(
-                    host = host,
-                    port = port,
-                    user = isolation_username,
-                    "SOCKS proxy URI configured on souphttpsrc (all traffic through Tor)"
+                    proxy = %config.tor_http_proxy,
+                    "HTTP CONNECT proxy configured on souphttpsrc (all traffic through Tor via HTTPTunnelPort)"
                 );
             } else {
                 tracing::warn!(
-                    "souphttpsrc has no supported SOCKS proxy property; playback proxy not set"
+                    "souphttpsrc has no 'proxy' property; cannot route media through Tor"
                 );
             }
         } else if is_loopback_url {
             tracing::debug!("loopback media URL detected; skipping playback proxy");
-        } else if socks_addr.is_empty() {
-            tracing::info!("no Tor proxy configured; fetching media directly");
+        } else if config.tor_http_proxy.is_empty() {
+            tracing::warn!(
+                "no Tor HTTP proxy configured — media will be fetched directly (NOT through Tor). \
+                 Add 'HTTPTunnelPort 9080' to /etc/tor/torrc and restart Tor."
+            );
         }
 
         // ── Buffer element ──────────────────────────────────────────

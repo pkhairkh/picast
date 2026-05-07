@@ -84,14 +84,27 @@ sudo cp "$SERVICE_SRC" "$SERVICE_DST"
 sudo systemctl daemon-reload
 echo "      Service unit installed and daemon reloaded."
 
-# ── Ensure config directory exists ────────────────────────────────────
-if [[ ! -d "$CONFIG_DIR" ]]; then
-    echo "[4/5] Creating config directory $CONFIG_DIR..."
-    sudo mkdir -p "$CONFIG_DIR"
-fi
-if [[ ! -f "$CONFIG_DIR/picast.toml" ]]; then
-    echo "      WARNING: No config file at $CONFIG_DIR/picast.toml"
-    echo "               Copy deploy/picast.toml there before starting."
+# ── Ensure Tor HTTPTunnelPort is configured ─────────────────────────
+# souphttpsrc (libsoup2.4) cannot use SOCKS5 proxy URIs.  Tor's
+# HTTPTunnelPort provides an HTTP CONNECT proxy that souphttpsrc
+# supports natively.  Without this, media cannot be routed through Tor.
+TORRC="/etc/tor/torrc"
+if [[ -f "$TORRC" ]]; then
+    if ! grep -q "^HTTPTunnelPort" "$TORRC" 2>/dev/null; then
+        echo "[4/5] Adding HTTPTunnelPort 9080 to $TORRC..."
+        echo "" >> "$TORRC"
+        echo "# PiCast: HTTP CONNECT proxy for routing media through Tor" >> "$TORRC"
+        echo "# souphttpsrc (libsoup2.4) cannot use SOCKS5 proxy URIs." >> "$TORRC"
+        echo "HTTPTunnelPort 9080" >> "$TORRC"
+        echo "      Reloading Tor to pick up HTTPTunnelPort..."
+        sudo systemctl reload tor@default 2>/dev/null || sudo systemctl restart tor@default 2>/dev/null || true
+        sleep 2
+    else
+        echo "[4/5] Tor HTTPTunnelPort already configured."
+    fi
+else
+    echo "[4/5] WARNING: $TORRC not found — Tor HTTP tunnel not configured."
+    echo "       Add 'HTTPTunnelPort 9080' to Tor config for media routing."
 fi
 
 # ── Restart service ───────────────────────────────────────────────────
