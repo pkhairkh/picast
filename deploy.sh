@@ -30,7 +30,7 @@ echo ""
 
 # ── Build ──────────────────────────────────────────────────────────────
 if [[ "$SKIP_BUILD" == false ]]; then
-    echo "[1/5] Building release binary with hw feature..."
+    echo "[1/4] Building release binary with hw feature..."
 
     # Ensure rustc meets the MSRV (1.88).  Several transitive dependencies
     # (time 0.3.46+, cookie_store 0.22+, idna 1.x / ICU4X 2.x) require
@@ -62,7 +62,7 @@ if [[ "$SKIP_BUILD" == false ]]; then
     (cd "$REPO_DIR" && cargo build --release --features hw)
     echo "      Build complete."
 else
-    echo "[1/5] Skipping build (--no-build)."
+    echo "[1/4] Skipping build (--no-build)."
 fi
 
 BINARY_SRC="$REPO_DIR/target/release/$BINARY_NAME"
@@ -73,44 +73,19 @@ if [[ ! -f "$BINARY_SRC" ]]; then
 fi
 
 # ── Install binary ────────────────────────────────────────────────────
-echo "[2/5] Installing binary to $INSTALL_DIR/..."
+echo "[2/4] Installing binary to $INSTALL_DIR/..."
 sudo cp "$BINARY_SRC" "$INSTALL_DIR/$INSTALL_AS"
 sudo chmod 755 "$INSTALL_DIR/$INSTALL_AS"
 echo "      Installed $INSTALL_AS $(stat -c %s "$INSTALL_DIR/$INSTALL_AS" 2>/dev/null || stat -f %z "$INSTALL_DIR/$INSTALL_AS") bytes"
 
 # ── Install service ───────────────────────────────────────────────────
-echo "[3/5] Installing systemd service..."
+echo "[3/4] Installing systemd service..."
 sudo cp "$SERVICE_SRC" "$SERVICE_DST"
 sudo systemctl daemon-reload
 echo "      Service unit installed and daemon reloaded."
 
-# ── Ensure Tor HTTPTunnelPort is configured ─────────────────────────
-# souphttpsrc (libsoup2.4) cannot use SOCKS5 proxy URIs.  Tor's
-# HTTPTunnelPort provides an HTTP CONNECT proxy that souphttpsrc
-# supports natively.  Without this, media cannot be routed through Tor.
-TORRC="/etc/tor/torrc"
-if [[ -f "$TORRC" ]]; then
-    if ! grep -q "^HTTPTunnelPort" "$TORRC" 2>/dev/null; then
-        echo "[4/5] Adding HTTPTunnelPort 9080 to $TORRC..."
-        {
-            echo ""
-            echo "# PiCast: HTTP CONNECT proxy for routing media through Tor"
-            echo "# souphttpsrc (libsoup2.4) cannot use SOCKS5 proxy URIs."
-            echo "HTTPTunnelPort 9080"
-        } | sudo tee -a "$TORRC" > /dev/null
-        echo "      Reloading Tor to pick up HTTPTunnelPort..."
-        sudo systemctl reload tor@default 2>/dev/null || sudo systemctl restart tor@default 2>/dev/null || true
-        sleep 2
-    else
-        echo "[4/5] Tor HTTPTunnelPort already configured."
-    fi
-else
-    echo "[4/5] WARNING: $TORRC not found — Tor HTTP tunnel not configured."
-    echo "       Add 'HTTPTunnelPort 9080' to Tor config for media routing."
-fi
-
 # ── Restart service ───────────────────────────────────────────────────
-echo "[5/5] Restarting picast service..."
+echo "[4/4] Restarting picast service..."
 sudo systemctl restart picast
 sleep 1
 sudo systemctl --no-pager status picast || true

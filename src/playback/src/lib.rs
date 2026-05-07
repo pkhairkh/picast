@@ -33,6 +33,8 @@
 pub mod events;
 #[cfg(feature = "hw")]
 pub mod pipeline;
+#[cfg(feature = "hw")]
+mod socks_forwarder;
 
 #[cfg(feature = "hw")]
 use events::PlaybackEvent;
@@ -137,16 +139,6 @@ pub struct PipelineConfig {
     /// Setting this explicitly avoids misdetection on multi-output setups.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub connector_id: Option<u32>,
-    /// HTTP CONNECT proxy URL for routing media through Tor.
-    /// Set to the Tor HTTPTunnelPort (e.g. `"http://127.0.0.1:9080"`).
-    /// souphttpsrc's `proxy` property only supports HTTP proxy URIs —
-    /// libsoup2.4 (Debian Bookworm) does not support `socks5h://` URIs,
-    /// and `socks5-proxy-*` properties don't exist on souphttpsrc.
-    /// Tor's HTTPTunnelPort provides a standard HTTP CONNECT proxy that
-    /// works with any HTTP client.  Requires `HTTPTunnelPort 9080` in
-    /// `/etc/tor/torrc`.  When empty, no proxy is used for media fetch.
-    #[serde(default)]
-    pub tor_http_proxy: String,
     /// Pre-opened DRM device file descriptor for kmssink.
     /// When `Some`, kmssink uses this fd instead of opening the device
     /// itself, which guarantees it shares our DRM master and can modeset.
@@ -174,7 +166,6 @@ impl Default for PipelineConfig {
             volume: 1.0,
             plane_id: 0,
             connector_id: None,
-            tor_http_proxy: detect_tor_http_proxy(),
             drm_fd: None,
         }
     }
@@ -243,48 +234,6 @@ fn detect_hdmi_audio_device() -> String {
             "audio auto-detect: no HDMI card found — defaulting to plughw:1,0 (HDMI on Pi 4)"
         );
         "plughw:1,0".into()
-    }
-}
-
-/// Auto-detect the Tor HTTP Tunnel proxy by checking if Tor's
-/// HTTPTunnelPort is listening.  Returns `"http://127.0.0.1:9080"` if
-/// the port is reachable, or an empty string (no proxy) if not.
-///
-/// Tor's HTTPTunnelPort provides a standard HTTP CONNECT proxy that
-/// souphttpsrc can use through its `proxy` property.  This is the
-/// only reliable way to route souphttpsrc through Tor because:
-///   - souphttpsrc does NOT have `socks5-proxy-ip`/`socks5-proxy-port`
-///     properties (those are on `tcpclientsrc`, a different element)
-///   - libsoup2.4 (Debian Bookworm) does not support `socks5h://`
-///     proxy URIs in the `proxy` property
-///
-/// The HTTP CONNECT proxy handles DNS resolution through Tor (the
-/// hostname is sent in the CONNECT request, not resolved locally),
-/// preventing DNS leaks.
-fn detect_tor_http_proxy() -> String {
-    use std::net::TcpStream;
-    use std::time::Duration;
-
-    let proxy_addr = "127.0.0.1:9080";
-    match TcpStream::connect_timeout(
-        &proxy_addr.parse().expect("hardcoded addr should parse"),
-        Duration::from_millis(500),
-    ) {
-        Ok(_) => {
-            tracing::info!(
-                addr = proxy_addr,
-                "Tor HTTP tunnel proxy detected — media will be routed through Tor"
-            );
-            format!("http://{}", proxy_addr)
-        }
-        Err(_) => {
-            tracing::warn!(
-                addr = proxy_addr,
-                "Tor HTTP tunnel proxy NOT detected — media will NOT be routed through Tor. \
-                 Add 'HTTPTunnelPort 9080' to /etc/tor/torrc and restart Tor."
-            );
-            String::new()
-        }
     }
 }
 
@@ -601,7 +550,7 @@ impl PlaybackEngine {
             "constructing playback pipeline"
         );
 
-        let mut pipeline = GstPipeline::new(url, socks_addr, isolation_username, &self.config)?;
+        let mut pipeline = GstPipeline::new(url, socks_addr, isolation_username, &self.config).await?;
 
         // Set up bus watch to forward GStreamer messages as events.
         let event_tx = self.event_tx.clone();
@@ -1005,7 +954,7 @@ impl PlaybackEngine {
             "constructing SOFTWARE DECODE fallback pipeline (avdec_h264 → videoconvert → kmssink)"
         );
 
-        let mut pipeline = GstPipeline::new(url, socks_addr, isolation_username, &sw_config)?;
+        let mut pipeline = GstPipeline::new(url, socks_addr, isolation_username, &sw_config).await?;
 
         // Set up bus watch for the fallback pipeline.
         let event_tx = self.event_tx.clone();

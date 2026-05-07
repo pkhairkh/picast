@@ -38,6 +38,7 @@
 //! v4l2h264dec passes this through to kmssink correctly without intervention.
 
 use crate::{BufferHealth, PipelineConfig, PlaybackError};
+use crate::socks_forwarder::SocksForwarder;
 use gstreamer::prelude::*;
 use gstreamer::{Element, ElementFactory, Pipeline, State};
 
@@ -80,6 +81,10 @@ pub struct GstPipeline {
     state: PipelineState,
     /// Keeps the GStreamer bus watch alive for this pipeline.
     bus_watch: Option<gstreamer::bus::BusWatchGuard>,
+    /// Local HTTP CONNECT→SOCKS5 proxy forwarder. Routes souphttpsrc
+    /// traffic through Tor's SOCKS5 with the same isolation username
+    /// as the resolver, ensuring the same exit IP (CDN token match).
+    _socks_forwarder: Option<SocksForwarder>,
 }
 
 /// Internal tracking of pipeline state.
@@ -100,16 +105,20 @@ pub enum PipelineState {
 impl GstPipeline {
     /// Construct a new GStreamer pipeline for the given URL.
     ///
-    /// The `socks_addr` parameter is retained for API compatibility but
-    /// proxy routing is now handled via `config.tor_http_proxy` (Tor's
-    /// HTTP CONNECT proxy) instead of SOCKS5, because souphttpsrc does
-    /// not support SOCKS5 proxy URIs with libsoup2.4.
+    /// The `socks_addr` parameter provides the Tor SOCKS5 proxy address
+    /// (e.g. "127.0.0.1:9050"). If non-empty and the URL is not loopback,
+    /// a local HTTP CONNECT→SOCKS5 forwarder is started that routes
+    /// souphttpsrc through Tor's SOCKS5 with the same isolation username
+    /// as the resolver. Same SOCKS5 username = same Tor circuit = same
+    /// exit IP, so CDN IP-bound tokens match.
     ///
-    /// The `isolation_username` is retained for API compatibility.
-    pub fn new(
+    /// The `isolation_username` is the SOCKS5 username for Tor's
+    /// IsolateSOCKSAuth circuit isolation. It must match the username
+    /// used during URL resolution to ensure the same Tor circuit.
+    pub async fn new(
         url: &str,
-        _socks_addr: &str,
-        _isolation_username: &str,
+        socks_addr: &str,
+        isolation_username: &str,
         config: &PipelineConfig,
     ) -> Result<Self, PlaybackError> {
         ensure_gst_init()?;
@@ -163,37 +172,54 @@ impl GstPipeline {
         //
         // souphttpsrc's `proxy` property only supports HTTP proxy URIs.
         // libsoup2.4 (Debian Bookworm) does NOT support `socks5h://`
-        // proxy URIs, and `socks5-proxy-ip`/`socks5-proxy-port` properties
-        // do not exist on souphttpsrc (they are on `tcpclientsrc`, a
-        // different element).  The only reliable way to route souphttpsrc
-        // through Tor is via an HTTP CONNECT proxy provided by Tor's
-        // HTTPTunnelPort (requires `HTTPTunnelPort 9080` in torrc).
+        // proxy URIs. Tor's HTTPTunnelPort uses a DIFFERENT circuit than
+        // the SOCKS5 port, so CDN IP-bound tokens see a mismatch → 403.
         //
-        // The HTTP CONNECT proxy handles DNS resolution through Tor (the
-        // hostname is sent in the CONNECT request, not resolved locally),
-        // preventing DNS leaks.
+        // Solution: start a local HTTP CONNECT→SOCKS5 forwarder that
+        // accepts CONNECT requests from souphttpsrc and forwards them
+        // through Tor's SOCKS5 proxy with the SAME isolation username
+        // as the resolver. Same SOCKS5 username = same Tor circuit =
+        // same exit IP → CDN token matches → no 403.
         let is_loopback_url = url.starts_with("http://127.0.0.1:")
             || url.starts_with("http://localhost:")
             || url.starts_with("http://[::1]:");
 
-        if !is_loopback_url && !config.tor_http_proxy.is_empty() {
-            if src.find_property("proxy").is_some() {
-                src.set_property("proxy", &config.tor_http_proxy);
-                tracing::info!(
-                    proxy = %config.tor_http_proxy,
-                    "HTTP CONNECT proxy configured on souphttpsrc (all traffic through Tor via HTTPTunnelPort)"
-                );
-            } else {
-                tracing::warn!(
-                    "souphttpsrc has no 'proxy' property; cannot route media through Tor"
-                );
+        let mut socks_forwarder = None;
+
+        if !is_loopback_url && !socks_addr.is_empty() && !isolation_username.is_empty() {
+            match SocksForwarder::start(socks_addr.to_string(), isolation_username.to_string()).await
+            {
+                Ok(forwarder) => {
+                    let proxy_url = forwarder.proxy_url();
+                    if src.find_property("proxy").is_some() {
+                        src.set_property("proxy", &proxy_url);
+                        tracing::info!(
+                            proxy_url = %proxy_url,
+                            socks_addr = %socks_addr,
+                            username = %isolation_username,
+                            "HTTP CONNECT→SOCKS5 forwarder configured (same Tor circuit as resolver)"
+                        );
+                    } else {
+                        tracing::warn!(
+                            "souphttpsrc has no 'proxy' property; cannot route media through Tor"
+                        );
+                    }
+                    socks_forwarder = Some(forwarder);
+                }
+                Err(e) => {
+                    tracing::error!(
+                        error = %e,
+                        "failed to start SOCKS5 forwarder — media will NOT be routed through Tor"
+                    );
+                }
             }
         } else if is_loopback_url {
             tracing::debug!("loopback media URL detected; skipping playback proxy");
-        } else if config.tor_http_proxy.is_empty() {
+        } else if socks_addr.is_empty() {
+            tracing::info!("no Tor SOCKS proxy configured; fetching media directly");
+        } else if isolation_username.is_empty() {
             tracing::warn!(
-                "no Tor HTTP proxy configured — media will be fetched directly (NOT through Tor). \
-                 Add 'HTTPTunnelPort 9080' to /etc/tor/torrc and restart Tor."
+                "no isolation username provided — media will be fetched directly (not through Tor)"
             );
         }
 
@@ -574,7 +600,7 @@ impl GstPipeline {
             }
         });
 
-        Ok(Self { pipeline, _video_sink: video_sink, volume, state: PipelineState::Ready, bus_watch: None })
+        Ok(Self { pipeline, _video_sink: video_sink, volume, state: PipelineState::Ready, bus_watch: None, _socks_forwarder: socks_forwarder })
     }
 
     /// Build the hardware-accelerated video branch:
@@ -1031,7 +1057,7 @@ impl GstPipeline {
     /// Attempt to rebuild the pipeline with software decode.
     ///
     /// Called when V4L2 hardware decode fails to negotiate.
-    pub fn rebuild_sw(
+    pub async fn rebuild_sw(
         &mut self,
         url: &str,
         _socks_addr: &str,
@@ -1046,7 +1072,7 @@ impl GstPipeline {
         // Build a new pipeline with HW accel disabled.
         let mut sw_config = config.clone();
         sw_config.hw_accel = false;
-        let new = Self::new(url, _socks_addr, _isolation_username, &sw_config)?;
+        let new = Self::new(url, _socks_addr, _isolation_username, &sw_config).await?;
 
         // Replace self with the new pipeline.
         *self = new;
