@@ -274,15 +274,25 @@ impl Resolver {
                 result
             },
             UrlCategory::WebPage => {
-                // Check custom resolvers first (Voe, DoodStream, etc.)
+                // Resolution strategy for WebPage URLs:
+                //
+                // 1. Known DoodStream domains → DoodStream custom resolver (fast path)
+                // 2. ALL other WebPage URLs → Voe custom resolver first, then yt-dlp
+                //
+                // The Voe custom resolver is tried BEFORE yt-dlp for every unknown
+                // WebPage URL. This is critical because Voe rotates its front-end
+                // domains constantly (every few weeks), and maintaining a static
+                // domain list is a losing game. By always trying the Voe resolver
+                // first, we handle both known and unknown Voe domains without
+                // needing to update a list. The Voe resolver is safe to call on
+                // non-Voe pages — it simply fails to find its expected data
+                // patterns and returns an error, at which point we fall back
+                // to yt-dlp.
+                //
+                // The VOE_DOMAINS list still exists as a fast-path hint for
+                // logging clarity, but it is NO LONGER a gatekeeper — URLs not
+                // in the list still get the Voe resolver tried first.
                 if let Some(host) = parsed.host_str() {
-                    // Build the SOCKS5h proxy URL with isolation username for
-                    // the custom resolvers. This is CRITICAL: CDNs like Voe
-                    // bind their download tokens to the requesting IP. If the
-                    // custom resolver fetches the page through clearnet (real
-                    // IP) but the playback pipeline fetches through Tor
-                    // (different IP), the CDN returns 403 Forbidden. Both
-                    // MUST go through the same Tor circuit so the IP matches.
                     let socks_addr = self.tor.socks_addr();
                     let isolation = picast_tor::TorManager::isolation_username(host);
                     let socks5_proxy = if !socks_addr.is_empty() {
@@ -291,98 +301,77 @@ impl Resolver {
                         None
                     };
 
-                    if custom::is_voe_domain(host) {
-                        tracing::info!(url = url, resolver = "voe", "using Voe custom resolver");
-                        let mut result = custom::resolve_voe(url, socks5_proxy.as_deref()).await?;
-                        result.category = UrlCategory::WebPage;
-                        // Cache before returning so subsequent requests hit the cache.
-                        {
-                            let cache = self.cache.lock().await;
-                            cache.insert(url, result.clone());
-                        }
-                        return Ok(result);
-                    }
+                    // Check DoodStream first (distinct resolver, no overlap with Voe)
                     if custom::is_doodstream_domain(host) {
-                        tracing::info!(url = url, resolver = "doodstream", "using DoodStream custom resolver");
+                        tracing::info!(url = url, resolver = "doodstream", "using DoodStream custom resolver (known domain)");
                         let mut result = custom::resolve_doodstream(url, socks5_proxy.as_deref()).await?;
                         result.category = UrlCategory::WebPage;
-                        // Cache before returning so subsequent requests hit the cache.
                         {
                             let cache = self.cache.lock().await;
                             cache.insert(url, result.clone());
                         }
                         return Ok(result);
                     }
-                }
-                // Fall back to yt-dlp for all other web page URLs.
-                let ytdlp_result = self.resolve_webpage(url).await;
 
-                match ytdlp_result {
-                    Ok(mut result) => {
-                        result.category = UrlCategory::WebPage;
-                        result
-                    },
-                    Err(ytdlp_err) => {
-                        // yt-dlp failed. Before giving up, try the Voe custom
-                        // resolver as a heuristic fallback. Voe rotates its
-                        // front-end domains constantly (every few weeks), and
-                        // new domains often appear before they're added to
-                        // VOE_DOMAINS. If yt-dlp returns "Unsupported URL" or
-                        // any other error for an unknown domain, the Voe
-                        // resolver might still succeed because it doesn't rely
-                        // on domain recognition — it fetches the page and tries
-                        // to decode Voe's obfuscated JSON directly.
-                        //
-                        // This heuristic is safe: if the page isn't actually a
-                        // Voe front-end, the Voe resolver will simply fail to
-                        // find any of its expected data patterns and return an
-                        // error, which we then replace with the original
-                        // yt-dlp error.
-                        if let Some(host) = parsed.host_str() {
-                            let socks_addr = self.tor.socks_addr();
-                            let isolation = picast_tor::TorManager::isolation_username(host);
-                            let socks5_proxy = if !socks_addr.is_empty() {
-                                Some(format!("socks5h://{}@{}", isolation, socks_addr))
-                            } else {
-                                None
-                            };
+                    // Try Voe custom resolver FIRST for all other WebPage URLs.
+                    // This handles both known Voe domains (fast path) and unknown
+                    // ones that Voe has rotated to. The Voe resolver fetches the
+                    // page and tries to decode Voe's obfuscated JSON — it doesn't
+                    // rely on the domain being in any list.
+                    let is_known_voe = custom::is_voe_domain(host);
+                    tracing::info!(
+                        url = url,
+                        resolver = "voe",
+                        known_domain = is_known_voe,
+                        "trying Voe custom resolver{} for WebPage URL",
+                        if is_known_voe { " (known domain)" } else { " (unknown domain — may be a new Voe front-end)" }
+                    );
 
-                            tracing::info!(
-                                url = url,
-                                ytdlp_error = %ytdlp_err,
-                                "yt-dlp failed for WebPage URL — trying Voe custom resolver as heuristic fallback"
-                            );
-
-                            match custom::resolve_voe(url, socks5_proxy.as_deref()).await {
-                                Ok(mut voe_result) => {
-                                    tracing::info!(
-                                        url = url,
-                                        "Voe heuristic fallback succeeded — this domain is likely a new Voe front-end"
-                                    );
-                                    voe_result.category = UrlCategory::WebPage;
-                                    // Cache before returning so subsequent requests hit the cache.
-                                    {
-                                        let cache = self.cache.lock().await;
-                                        cache.insert(url, voe_result.clone());
-                                    }
-                                    return Ok(voe_result);
-                                },
-                                Err(voe_err) => {
-                                    tracing::debug!(
-                                        url = url,
-                                        voe_error = %voe_err,
-                                        "Voe heuristic fallback also failed — returning original yt-dlp error"
-                                    );
-                                    // Voe fallback failed too; return the
-                                    // original yt-dlp error (more informative
-                                    // since it's the primary resolver).
-                                },
+                    match custom::resolve_voe(url, socks5_proxy.as_deref()).await {
+                        Ok(mut result) => {
+                            if !is_known_voe {
+                                tracing::info!(
+                                    url = url,
+                                    host = host,
+                                    "Voe resolver succeeded on unknown domain — this is likely a new Voe front-end"
+                                );
                             }
-                        }
-
-                        return Err(ytdlp_err);
-                    },
+                            result.category = UrlCategory::WebPage;
+                            {
+                                let cache = self.cache.lock().await;
+                                cache.insert(url, result.clone());
+                            }
+                            return Ok(result);
+                        },
+                        Err(voe_err) => {
+                            if is_known_voe {
+                                // Known Voe domain failed — this is unusual, log
+                                // at warn level and fall through to yt-dlp as a
+                                // last resort (the page structure may have changed).
+                                tracing::warn!(
+                                    url = url,
+                                    error = %voe_err,
+                                    "Voe custom resolver failed on known Voe domain — falling back to yt-dlp"
+                                );
+                            } else {
+                                // Unknown domain, Voe resolver failed — this is
+                                // expected for non-Voe pages. Fall through to
+                                // yt-dlp at debug level.
+                                tracing::debug!(
+                                    url = url,
+                                    error = %voe_err,
+                                    "Voe custom resolver did not match (not a Voe page) — falling back to yt-dlp"
+                                );
+                            }
+                        },
+                    }
                 }
+
+                // Fall back to yt-dlp for all web page URLs that the custom
+                // resolvers couldn't handle (non-Voe, non-DoodStream pages).
+                let mut result = self.resolve_webpage(url).await?;
+                result.category = UrlCategory::WebPage;
+                result
             },
             UrlCategory::Magnet => {
                 return Err(ResolveError::NoMediaFound(url.to_owned()));

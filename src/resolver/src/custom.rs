@@ -58,15 +58,23 @@ fn build_client(socks5_proxy: Option<&str>) -> Result<reqwest::Client, ResolveEr
 /// HTTP request timeout for custom resolvers (15 seconds).
 const CUSTOM_RESOLVER_TIMEOUT_SECS: u64 = 15;
 
-/// Known Voe CDN front-end domains. Voe rotates these frequently; the
-/// list below covers the most common ones. The `voe.sx` domain itself
-/// simply redirects to one of these CDN domains.
+/// Known Voe CDN front-end domains.
 ///
-/// IMPORTANT: When a Voe video fails to resolve (especially if it falls
-/// through to yt-dlp and fails), check the domain in the URL. If it's
-/// not in this list, add it — otherwise the custom Voe resolver won't
-/// be triggered and yt-dlp will be used instead (which often fails for
-/// Voe front-ends due to their obfuscation).
+/// **IMPORTANT**: This list is used ONLY for logging clarity — it is NO
+/// LONGER a gatekeeper. The Voe custom resolver is now tried FIRST for
+/// ALL WebPage URLs (before yt-dlp), regardless of whether the domain
+/// is in this list. If the domain is in the list, we log "known domain";
+/// if not, we log "unknown domain — may be a new Voe front-end". Either
+/// way, the resolver runs.
+///
+/// Domains are still listed here for:
+/// - Logging clarity (distinguishing known vs unknown Voe domains)
+/// - The classifier's WEB_PAGE_DOMAINS list (for URL categorisation)
+/// - Future use (e.g. priority ordering, domain-specific quirks)
+///
+/// Voe rotates these domains frequently to evade adblockers and download
+/// managers. The resolver's content-based detection (obfuscated JSON
+/// patterns) is the primary mechanism — domain matching is secondary.
 const VOE_DOMAINS: &[&str] = &[
     "voe.sx",
     // Active front-end domains (rotated frequently by Voe).
