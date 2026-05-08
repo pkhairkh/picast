@@ -1,0 +1,475 @@
+//! Progressive download source for GStreamer appsrc.
+//!
+//! ## Problem
+//!
+//! The previous architecture piped CDN data through a real-time proxy chain:
+//!
+//! ```text
+//! CDN → Tor → SOCKS Forwarder → reqwest → MediaProxy HTTP server → souphttpsrc → queue2
+//! ```
+//!
+//! This requires `download_speed ≥ video_bitrate` at all times — an assumption
+//! that fails through Tor where throughput is variable (1-5 Mbps) and CDNs may
+//! rate-limit (the `sp=380` URL parameter matches the observed 379 kbps).
+//!
+//! ## Solution
+//!
+//! Replace the MediaProxy + souphttpsrc chain with a progressive download
+//! architecture that feeds data into GStreamer via `appsrc`:
+//!
+//! ```text
+//! CDN → Tor → SOCKS Forwarder → reqwest → shared buffer → appsrc → queue2
+//! ```
+//!
+//! Benefits:
+//! - Eliminates the MediaProxy HTTP server hop (one fewer user-space relay)
+//! - Eliminates souphttpsrc (no more HTTP/1.1 client overhead)
+//! - Measures throughput BEFORE starting playback
+//! - Pre-buffers data aggressively when throughput < video bitrate
+//! - Provides download progress to the user
+//!
+//! ## Flow Control
+//!
+//! Data flows from the CDN download task into a bounded channel, then into
+//! appsrc. When appsrc's internal queue is full (enough-data signal), the
+//! download task pauses reading. When appsrc needs more data (need-data
+//! signal), the download task resumes. This provides natural backpressure
+//! without dropping data.
+
+use crate::socks_forwarder::SocksForwarder;
+use futures_util::StreamExt;
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use std::sync::Arc;
+use std::time::Instant;
+use tokio::sync::mpsc;
+
+/// Browser-like User-Agent string. Must match the resolver's UA.
+const BROWSER_UA: &str = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36";
+
+/// Maximum number of buffered chunks in the channel between the download
+/// task and the appsrc push task. Each chunk is typically 32-256 KB
+/// (reqwest's internal buffer size). 128 chunks × 256 KB = 32 MB of
+/// buffer, enough to smooth out Tor's bursty delivery.
+const CHANNEL_CAPACITY: usize = 128;
+
+/// A chunk of downloaded data from the CDN.
+#[derive(Debug)]
+pub struct DataChunk {
+    pub data: bytes::Bytes,
+    pub offset: u64,
+}
+
+/// Progress report from the download task.
+#[derive(Debug, Clone)]
+pub struct DownloadProgress {
+    /// Total bytes downloaded so far.
+    pub downloaded_bytes: u64,
+    /// Total bytes in the file (from Content-Length header).
+    pub total_bytes: Option<u64>,
+    /// Measured throughput in kbps over the last measurement window.
+    pub throughput_kbps: u64,
+    /// Elapsed time since download started.
+    pub elapsed_secs: f64,
+    /// CDN HTTP status code.
+    pub http_status: u16,
+    /// Content-Type header from CDN.
+    pub content_type: Option<String>,
+}
+
+/// A progressive download source that streams CDN data into a bounded channel.
+///
+/// The source handles:
+/// - Starting the SOCKS Forwarder for Tor circuit isolation
+/// - Building a reqwest client with browser-like headers
+/// - Downloading from the CDN with throughput measurement
+/// - Providing data chunks via a channel
+/// - Preflight CDN checks (403 detection)
+pub struct StreamSource {
+    /// Receiver end of the data channel. The consumer (appsrc push task)
+    /// reads from this to get downloaded data.
+    data_rx: mpsc::Receiver<DataChunk>,
+    /// Sender end, kept here so we can clone it for reconnection scenarios.
+    data_tx: mpsc::Sender<DataChunk>,
+    /// Keeps the SOCKS forwarder alive for the download's lifetime.
+    _socks_forwarder: SocksForwarder,
+    /// The reqwest client used for CDN requests.
+    client: reqwest::Client,
+    /// CDN URL being downloaded.
+    cdn_url: String,
+    /// Source URL for Referer header.
+    source_url: String,
+    /// Cookies from the resolver session.
+    cookies: Vec<String>,
+    /// Download progress (shared with the download task).
+    progress: Arc<ProgressState>,
+    /// Cancel token for the download task.
+    cancel: Arc<AtomicBool>,
+}
+
+/// Shared progress state, updated by the download task and read by
+/// the playback engine for throughput-aware decisions.
+struct ProgressState {
+    downloaded_bytes: AtomicU64,
+    total_bytes: std::sync::Mutex<Option<u64>>,
+    throughput_kbps: AtomicU64,
+    start_time: std::sync::Mutex<Option<Instant>>,
+    http_status: std::sync::Mutex<Option<u16>>,
+    content_type: std::sync::Mutex<Option<String>>,
+}
+
+impl StreamSource {
+    /// Start a new progressive download source.
+    ///
+    /// This creates the SOCKS Forwarder, builds the reqwest client, and
+    /// prepares the data channel. Call `start_download()` to begin
+    /// downloading from the CDN.
+    pub async fn start(
+        cdn_url: String,
+        source_url: String,
+        socks_addr: String,
+        isolation_username: String,
+        cookies: Vec<String>,
+    ) -> Result<Self, String> {
+        // Start SOCKS forwarder for reqwest's Tor routing.
+        let socks_forwarder = SocksForwarder::start(
+            socks_addr.clone(),
+            isolation_username.clone(),
+        )
+        .await?;
+
+        let proxy_url = socks_forwarder.proxy_url();
+
+        // Build reqwest client that routes through the SOCKS forwarder.
+        let reqwest_proxy = reqwest::Proxy::all(&proxy_url)
+            .map_err(|e| format!("stream source: failed to configure HTTP proxy: {}", e))?;
+
+        let client = reqwest::Client::builder()
+            .user_agent(BROWSER_UA)
+            .proxy(reqwest_proxy)
+            .connect_timeout(std::time::Duration::from_secs(15))
+            // No .timeout() — streaming a 400+ MB file takes minutes
+            .no_gzip()
+            .no_brotli()
+            .use_rustls_tls()
+            .build()
+            .map_err(|e| format!("stream source: failed to build reqwest client: {}", e))?;
+
+        let (data_tx, data_rx) = mpsc::channel(CHANNEL_CAPACITY);
+
+        let progress = Arc::new(ProgressState {
+            downloaded_bytes: AtomicU64::new(0),
+            total_bytes: std::sync::Mutex::new(None),
+            throughput_kbps: AtomicU64::new(0),
+            start_time: std::sync::Mutex::new(None),
+            http_status: std::sync::Mutex::new(None),
+            content_type: std::sync::Mutex::new(None),
+        });
+
+        let cancel = Arc::new(AtomicBool::new(false));
+
+        Ok(Self {
+            data_rx,
+            data_tx,
+            _socks_forwarder: socks_forwarder,
+            client,
+            cdn_url,
+            source_url,
+            cookies,
+            progress,
+            cancel,
+        })
+    }
+
+    /// Preflight check: verify the CDN accepts requests from this
+    /// Tor circuit before starting the download.
+    ///
+    /// Returns the CDN's Content-Length header if available, which
+    /// is used to estimate the video bitrate.
+    pub async fn preflight_check(&self) -> Result<Option<u64>, String> {
+        let mut req = self.client
+            .head(&self.cdn_url)
+            .header("Accept", "*/*")
+            .header("Accept-Encoding", "identity;q=1, *;q=0")
+            .header("sec-ch-ua", r#""Chromium";v="131", "Not_A Brand";v="24""#)
+            .header("sec-ch-ua-mobile", "?0")
+            .header("sec-ch-ua-platform", "\"Windows\"")
+            .header("Sec-Fetch-Dest", "video")
+            .header("Sec-Fetch-Mode", "no-cors")
+            .header("Sec-Fetch-Site", "cross-site");
+
+        if !self.source_url.is_empty() {
+            req = req.header("Referer", &self.source_url);
+        }
+
+        if !self.cookies.is_empty() {
+            let cookie_header = self.cookies.join("; ");
+            req = req.header("Cookie", &cookie_header);
+        }
+
+        let response = self.client
+            .execute(req.build().map_err(|e| format!("preflight: build request: {}", e))?)
+            .await
+            .map_err(|e| format!("preflight: CDN request failed: {}", e))?;
+
+        let status = response.status();
+        tracing::info!(
+            status = %status,
+            http_version = ?response.version(),
+            content_length = ?response.headers().get("content-length").and_then(|v| v.to_str().ok()),
+            content_type = ?response.headers().get("content-type").and_then(|v| v.to_str().ok()),
+            "stream source: preflight CDN check"
+        );
+
+        if status.as_u16() == 403 {
+            return Err("CDN 403 Forbidden — re-resolve needed (exit IP may be blocked by CDN anti-bot)".into());
+        }
+
+        if !status.is_success() && status.as_u16() != 206 {
+            return Err(format!(
+                "CDN returned {} {} — cannot stream",
+                status.as_u16(),
+                status.canonical_reason().unwrap_or("Unknown")
+            ));
+        }
+
+        // Extract Content-Length for bitrate estimation.
+        let content_length = response.headers()
+            .get("content-length")
+            .and_then(|v| v.to_str().ok())
+            .and_then(|v| v.parse::<u64>().ok());
+
+        Ok(content_length)
+    }
+
+    /// Start downloading from the CDN. Data chunks are sent to the
+    /// channel and can be read via `recv_chunk()`.
+    ///
+    /// This spawns a background tokio task that:
+    /// 1. Sends a GET request to the CDN with browser-like headers
+    /// 2. Streams the response body into the data channel
+    /// 3. Measures throughput and updates shared progress state
+    /// 4. Handles CDN errors (403, etc.)
+    pub fn start_download(&mut self, range: Option<String>) {
+        let client = self.client.clone();
+        let cdn_url = self.cdn_url.clone();
+        let source_url = self.source_url.clone();
+        let cookies = self.cookies.clone();
+        let progress = self.progress.clone();
+        let cancel = self.cancel.clone();
+        let data_tx = self.data_tx.clone();
+
+        // Reset cancel token and progress
+        cancel.store(false, Ordering::Relaxed);
+        progress.downloaded_bytes.store(0, Ordering::Relaxed);
+        progress.throughput_kbps.store(0, Ordering::Relaxed);
+        *progress.start_time.lock().unwrap() = Some(Instant::now());
+
+        tokio::spawn(async move {
+            // Build CDN request
+            let mut req = client
+                .get(&cdn_url)
+                .header("Accept", "*/*")
+                .header("Accept-Language", "en-US,en;q=0.9")
+                .header("Accept-Encoding", "identity;q=1, *;q=0")
+                .header("sec-ch-ua", r#""Chromium";v="131", "Not_A Brand";v="24""#)
+                .header("sec-ch-ua-mobile", "?0")
+                .header("sec-ch-ua-platform", "\"Windows\"")
+                .header("Sec-Fetch-Dest", "video")
+                .header("Sec-Fetch-Mode", "no-cors")
+                .header("Sec-Fetch-Site", "cross-site");
+
+            if !source_url.is_empty() {
+                req = req.header("Referer", &source_url);
+            }
+
+            if let Some(range) = &range {
+                req = req.header("Range", range);
+                tracing::info!(range = %range, "stream source: forwarding Range header to CDN");
+            }
+
+            if !cookies.is_empty() {
+                let cookie_header = cookies.join("; ");
+                req = req.header("Cookie", &cookie_header);
+                tracing::info!(
+                    cookie_count = cookies.len(),
+                    "stream source: forwarding cookies from resolver session"
+                );
+            }
+
+            // Send request
+            let response = match client
+                .execute(req.build().map_err(|e| format!("build request: {}", e))?)
+                .await
+            {
+                Ok(r) => r,
+                Err(e) => {
+                    tracing::error!(error = %e, "stream source: CDN request failed");
+                    return;
+                }
+            };
+
+            let status = response.status();
+            let headers = response.headers().clone();
+
+            // Store HTTP status and content metadata
+            *progress.http_status.lock().unwrap() = Some(status.as_u16());
+            *progress.content_type.lock().unwrap() = headers
+                .get("content-type")
+                .and_then(|v| v.to_str().ok())
+                .map(|s| s.to_string());
+            *progress.total_bytes.lock().unwrap() = headers
+                .get("content-length")
+                .and_then(|v| v.to_str().ok())
+                .and_then(|v| v.parse::<u64>().ok());
+
+            tracing::info!(
+                status = %status,
+                http_version = ?response.version(),
+                content_type = ?headers.get("content-type").and_then(|v| v.to_str().ok()),
+                content_length = ?headers.get("content-length").and_then(|v| v.to_str().ok()),
+                "stream source: CDN response received"
+            );
+
+            if status.as_u16() == 403 {
+                tracing::warn!("stream source: CDN returned 403 Forbidden");
+                return;
+            }
+
+            // Stream the response body
+            let mut body_stream = response.bytes_stream();
+            let mut offset: u64 = 0;
+            let mut last_progress_update = Instant::now();
+            let mut bytes_since_last_update: u64 = 0;
+            let progress_update_interval = std::time::Duration::from_secs(2);
+
+            while let Some(chunk_result) = body_stream.next().await {
+                if cancel.load(Ordering::Relaxed) {
+                    tracing::info!(
+                        total_bytes = offset,
+                        "stream source: download cancelled"
+                    );
+                    return;
+                }
+
+                match chunk_result {
+                    Ok(chunk) => {
+                        if chunk.is_empty() {
+                            continue;
+                        }
+
+                        let chunk_len = chunk.len() as u64;
+                        let chunk_offset = offset;
+
+                        // Send chunk to the channel. If the channel is full
+                        // (appsrc's queue is full), this will wait until
+                        // space is available, providing natural backpressure.
+                        if data_tx.send(DataChunk {
+                            data: chunk,
+                            offset: chunk_offset,
+                        }).await.is_err() {
+                            // Receiver dropped — pipeline was destroyed
+                            tracing::debug!(
+                                total_bytes = offset,
+                                "stream source: receiver dropped, stopping download"
+                            );
+                            return;
+                        }
+
+                        offset += chunk_len;
+                        bytes_since_last_update += chunk_len;
+                        progress.downloaded_bytes.store(offset, Ordering::Relaxed);
+
+                        // Update throughput measurement periodically
+                        if last_progress_update.elapsed() >= progress_update_interval {
+                            let elapsed = last_progress_update.elapsed().as_secs_f64();
+                            if elapsed > 0.0 {
+                                let kbps = (bytes_since_last_update * 8) / (elapsed * 1000.0) as u64;
+                                progress.throughput_kbps.store(kbps, Ordering::Relaxed);
+                            }
+                            bytes_since_last_update = 0;
+                            last_progress_update = Instant::now();
+
+                            // Log progress periodically (every ~10 MB)
+                            if offset % (10 * 1024 * 1024) < chunk_len {
+                                let total_elapsed = progress.start_time.lock().unwrap()
+                                    .map(|t| t.elapsed().as_secs())
+                                    .unwrap_or(0);
+                                let throughput = progress.throughput_kbps.load(Ordering::Relaxed);
+                                let total = progress.total_bytes.lock().unwrap();
+                                tracing::info!(
+                                    total_bytes = offset,
+                                    file_size = ?total,
+                                    throughput_kbps = throughput,
+                                    elapsed_s = total_elapsed,
+                                    "stream source: download progress"
+                                );
+                            }
+                        }
+                    }
+                    Err(e) => {
+                        tracing::warn!(
+                            error = %e,
+                            total_bytes = offset,
+                            "stream source: error reading from CDN stream"
+                        );
+                        break;
+                    }
+                }
+            }
+
+            let total_elapsed = progress.start_time.lock().unwrap()
+                .map(|t| t.elapsed().as_secs())
+                .unwrap_or(0);
+            tracing::info!(
+                total_bytes = offset,
+                elapsed_s = total_elapsed,
+                "stream source: download completed"
+            );
+        });
+    }
+
+    /// Receive the next data chunk from the download task.
+    ///
+    /// Returns `None` if the download has completed and all chunks
+    /// have been consumed.
+    pub async fn recv_chunk(&mut self) -> Option<DataChunk> {
+        self.data_rx.recv().await
+    }
+
+    /// Get the current download progress.
+    pub fn progress(&self) -> DownloadProgress {
+        let downloaded_bytes = self.progress.downloaded_bytes.load(Ordering::Relaxed);
+        let throughput_kbps = self.progress.throughput_kbps.load(Ordering::Relaxed);
+        let total_bytes = *self.progress.total_bytes.lock().unwrap();
+        let http_status = *self.progress.http_status.lock().unwrap();
+        let content_type = self.progress.content_type.lock().unwrap().clone();
+        let elapsed_secs = self.progress.start_time.lock().unwrap()
+            .map(|t| t.elapsed().as_secs_f64())
+            .unwrap_or(0.0);
+
+        DownloadProgress {
+            downloaded_bytes,
+            total_bytes,
+            throughput_kbps,
+            elapsed_secs,
+            http_status: http_status.unwrap_or(0),
+            content_type,
+        }
+    }
+
+    /// Cancel the download task.
+    pub fn cancel(&self) {
+        self.cancel.store(true, Ordering::Relaxed);
+    }
+
+    /// Check if the download has been cancelled.
+    pub fn is_cancelled(&self) -> bool {
+        self.cancel.load(Ordering::Relaxed)
+    }
+}
+
+impl Drop for StreamSource {
+    fn drop(&mut self) {
+        self.cancel();
+    }
+}

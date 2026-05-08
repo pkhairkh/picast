@@ -55,8 +55,11 @@
 
 use crate::{BufferHealth, PipelineConfig, PlaybackError};
 use crate::media_proxy::MediaProxy;
+use crate::stream_source::StreamSource;
 use gstreamer::prelude::*;
 use gstreamer::{Element, ElementFactory, Pipeline, State};
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::Arc;
 #[cfg(feature = "hevc")]
 use picast_v3d::V3dComputeEngine;
 
@@ -99,12 +102,14 @@ pub struct GstPipeline {
     state: PipelineState,
     /// Keeps the GStreamer bus watch alive for this pipeline.
     bus_watch: Option<gstreamer::bus::BusWatchGuard>,
-    /// Streaming HTTP media proxy. Accepts HTTP/1.1 connections from
-    /// souphttpsrc on localhost, fetches from the CDN via reqwest
-    /// (HTTP/2 + rustls TLS — matching Chrome's fingerprint), and
-    /// streams the response back. This bypasses CDN anti-bot systems
-    /// that reject GStreamer's souphttpsrc (HTTP/1.1 + GnuTLS).
+    /// Streaming HTTP media proxy. Used for the legacy souphttpsrc path
+    /// (loopback URLs only). For CDN URLs, StreamSource + appsrc is used.
     _media_proxy: Option<MediaProxy>,
+    /// Cancel token for the appsrc push task. Set to true when the
+    /// pipeline is destroyed to stop the background data push.
+    /// The StreamSource is owned by the push task (not stored here)
+    /// because it needs to be moved into the async task for recv_chunk().
+    _push_cancel: Option<Arc<AtomicBool>>,
     /// V3D compute shader engine for SAND→NV12 conversion.
     /// Only present when HEVC decode is enabled and V3D is available.
     #[cfg(feature = "hevc")]
@@ -201,19 +206,38 @@ impl GstPipeline {
         // The media proxy internally starts a SOCKS forwarder for Tor
         // circuit isolation (same exit IP as the resolver → CDN IP-
         // binding token matches).
-        const BROWSER_UA: &str = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36";
-
         let is_loopback_url = url.starts_with("http://127.0.0.1:")
             || url.starts_with("http://localhost:")
             || url.starts_with("http://[::1]:");
 
-        // Determine the URL that souphttpsrc will connect to.
-        // For CDN URLs: use the media proxy (localhost → reqwest → CDN).
-        // For loopback URLs: connect directly (no proxy needed).
+        let use_stream_source = !is_loopback_url && !socks_addr.is_empty() && !isolation_username.is_empty();
+
+        // ── Source element ──────────────────────────────────────────
+        //
+        // CDN URLs go through StreamSource + appsrc (progressive download):
+        //   CDN → Tor → SOCKS Forwarder → reqwest → channel → appsrc → queue2
+        //
+        // This replaces the old MediaProxy + souphttpsrc path:
+        //   CDN → Tor → SOCKS Forwarder → reqwest → MediaProxy HTTP → souphttpsrc → queue2
+        //
+        // The appsrc path eliminates the MediaProxy HTTP server hop (one fewer
+        // user-space relay) and decouples download from playback, allowing
+        // throughput-aware buffering.
+        //
+        // Loopback URLs use souphttpsrc directly (no Tor/proxy needed).
+
         let mut media_proxy = None;
-        let src_url = if !is_loopback_url && !socks_addr.is_empty() && !isolation_username.is_empty() {
-            // Start the streaming media proxy.
-            match MediaProxy::start(
+        let mut stream_source = None;
+        let mut push_cancel = None;
+
+        let src = if use_stream_source {
+            // ── CDN URL: appsrc + StreamSource (progressive download) ──
+            //
+            // Start the StreamSource, do a preflight CDN check, then
+            // create an appsrc element that receives downloaded data
+            // via a background push task.
+
+            let mut source = StreamSource::start(
                 url.to_string(),
                 source_url.to_string(),
                 socks_addr.to_string(),
@@ -221,78 +245,70 @@ impl GstPipeline {
                 cookies.to_vec(),
             )
             .await
-            {
-                Ok(proxy) => {
-                    // Preflight check: verify the CDN accepts requests from
-                    // this Tor circuit BEFORE building the GStreamer pipeline.
-                    // If the CDN returns 403, we fail immediately so the
-                    // session layer's retry loop can re-resolve through a
-                    // different Tor circuit. Without this check, the 403
-                    // arrives asynchronously after play() returns Ok(()),
-                    // and the retry loop never triggers.
-                    if let Err(e) = proxy.preflight_check().await {
-                        tracing::warn!(
-                            error = %e,
-                            "media proxy: preflight CDN check failed — CDN rejects this Tor circuit, re-resolve needed"
-                        );
-                        return Err(PlaybackError::PipelineCreation(format!(
-                            "CDN 403 Forbidden — re-resolve needed"
-                        )));
-                    }
+            .map_err(|e| PlaybackError::PipelineCreation(e))?;
 
-                    let local_url = proxy.local_url();
-                    tracing::info!(
-                        local_url = %local_url,
-                        cdn_url = url,
-                        "media proxy started — souphttpsrc will connect to localhost, proxy fetches CDN via reqwest (HTTP/2 + rustls)"
-                    );
-                    media_proxy = Some(proxy);
-                    local_url
-                }
-                Err(e) => {
-                    tracing::error!(
-                        error = %e,
-                        "failed to start media proxy — falling back to direct CDN connection (likely 403)"
-                    );
-                    // Fall back to direct CDN URL (may get 403 from CDN
-                    // anti-bot, but at least we try).
-                    url.to_string()
-                }
+            // Preflight CDN check — same as MediaProxy's preflight.
+            if let Err(e) = source.preflight_check().await {
+                tracing::warn!(
+                    error = %e,
+                    "stream source: preflight CDN check failed — re-resolve needed"
+                );
+                return Err(PlaybackError::PipelineCreation(
+                    "CDN 403 Forbidden — re-resolve needed".into()
+                ));
             }
-        } else if is_loopback_url {
-            tracing::debug!("loopback media URL detected; connecting directly");
-            url.to_string()
-        } else if socks_addr.is_empty() {
-            tracing::info!("no Tor SOCKS proxy configured; connecting directly to CDN");
-            url.to_string()
-        } else {
-            tracing::warn!("no isolation username provided; connecting directly to CDN (not through Tor)");
-            url.to_string()
-        };
 
-        let src = ElementFactory::make("souphttpsrc")
-            .property("location", &src_url)
-            // Socket I/O timeout: if no data arrives for this many seconds,
-            // the connection is considered dead. Through Tor, throughput can
-            // be bursty with pauses of several seconds, so 120s gives enough
-            // headroom. The media proxy (which souphttpsrc connects to on
-            // localhost) handles CDN reconnection transparently.
-            .property("timeout", 120u32)
-            .property("user-agent", BROWSER_UA)
-            // Increase the read blocksize from the default 4 KB to 256 KB.
-            // souphttpsrc reads data from the HTTP connection in chunks of
-            // `blocksize` bytes. With the default 4 KB, streaming a 5 Mbps
-            // video requires ~150 read() calls per second. Larger blocks
-            // reduce syscall frequency and allow souphttpsrc to accumulate
-            // more data per read, improving throughput.
-            .property("blocksize", 262_144u32)
-            .build()
-            .map_err(|e| PlaybackError::PipelineCreation(format!("souphttpsrc: {}", e)))?;
+            // Start downloading from the CDN immediately. Data flows
+            // into the StreamSource's internal channel.
+            source.start_download(None);
+
+            tracing::info!(
+                cdn_url = url,
+                "stream source started — appsrc will receive downloaded data via channel (no MediaProxy HTTP hop)"
+            );
+
+            // Create appsrc element for pushing downloaded data.
+            let appsrc = ElementFactory::make("appsrc")
+                .property("stream-type", 0i32)  // GST_APP_STREAM_TYPE_STREAM — sequential, no seeking
+                .property("format", 2i32)       // GST_FORMAT_BYTES
+                .property("is-live", false)
+                .property("block", false)        // Don't block push-buffer when queue is full
+                .build()
+                .map_err(|e| PlaybackError::PipelineCreation(format!("appsrc: {}", e)))?;
+
+            stream_source = Some(source);
+            appsrc
+
+        } else if is_loopback_url {
+            // ── Loopback URL: souphttpsrc directly ──
+            tracing::debug!("loopback media URL detected; connecting directly");
+            ElementFactory::make("souphttpsrc")
+                .property("location", url)
+                .property("timeout", 120u32)
+                .build()
+                .map_err(|e| PlaybackError::PipelineCreation(format!("souphttpsrc: {}", e)))?
+        } else if socks_addr.is_empty() {
+            // ── No Tor proxy: souphttpsrc directly ──
+            tracing::info!("no Tor SOCKS proxy configured; connecting directly to CDN");
+            ElementFactory::make("souphttpsrc")
+                .property("location", url)
+                .property("timeout", 120u32)
+                .build()
+                .map_err(|e| PlaybackError::PipelineCreation(format!("souphttpsrc: {}", e)))?
+        } else {
+            // ── No isolation username: souphttpsrc directly ──
+            tracing::warn!("no isolation username provided; connecting directly to CDN (not through Tor)");
+            ElementFactory::make("souphttpsrc")
+                .property("location", url)
+                .property("timeout", 120u32)
+                .build()
+                .map_err(|e| PlaybackError::PipelineCreation(format!("souphttpsrc: {}", e)))?
+        };
 
         // ── Buffer element ──────────────────────────────────────────
         //
-        // queue2 sits between souphttpsrc and parsebin and provides a
-        // download buffer for network resilience.
+        // queue2 sits between the source (appsrc or souphttpsrc) and
+        // parsebin, providing a download buffer for network resilience.
         //
         // With `use-buffering=true`, queue2 emits BUFFERING messages
         // and the pipeline waits for the buffer to fill before playing.
@@ -301,26 +317,21 @@ impl GstPipeline {
         // empties faster than Tor can refill it, causing stalls and
         // low effective FPS.
         //
-        // The bus watch handles BUFFERING messages:
-        // - Buffer < 15%: pause the pipeline (pause early, before complete
-        //   depletion, to avoid the rapid 0%↔50% cycling that made playback
-        //   unwatchable with the old <2% threshold)
-        // - Buffer >= 80%: resume/allow playing (only resume when buffer is
-        //   well-filled, not at 50% which caused short play bursts)
+        // For the appsrc path (CDN URLs): queue2 provides the primary
+        // buffering mechanism. appsrc pushes data from the StreamSource
+        // channel at the CDN's download rate. queue2 accumulates this
+        // data and controls when playback starts (high-percent=80%).
         //
-        // During initial preroll, we suppress auto-play until buffering
-        // reaches 80%, ensuring enough data is buffered before playback
-        // starts. This prevents the "buffer underrun → low FPS" cycle.
-        //
-        // max-size-bytes=100 MB and max-size-time=60s give queue2 a large
-        // buffer for Tor's variable throughput. Without sufficient buffer,
-        // the queue empties faster than Tor can refill it, causing constant
-        // rebuffering. The 60s time limit ensures the buffer holds at least
-        // 60 seconds of playback even for high-bitrate streams, giving Tor
-        // enough time to recover from throughput dips.
+        // max-size-bytes=200 MB (increased from 100 MB): With the appsrc
+        // path, there's no souphttpsrc doing its own buffering, so queue2
+        // is the sole buffer. 200 MB at 1.4 Mbps gives ~190 seconds of
+        // playback cushion. On a 379 kbps Tor link with a 1.4 Mbps video,
+        // starting with a full 200 MB buffer gives:
+        //   200 MB / (1.4 Mbps - 0.379 Mbps) ≈ 156 seconds of play
+        // before rebuffering is needed.
         let queue2 = ElementFactory::make("queue2")
-            .property("max-size-bytes", 100_000_000u32) // 100 MB — larger buffer for Tor's variable throughput
-            .property("max-size-time", 60_000_000_000u64) // 60 seconds of media data — more headroom for slow Tor links
+            .property("max-size-bytes", 200_000_000u32) // 200 MB — larger buffer for appsrc path (no souphttpsrc buffering)
+            .property("max-size-time", 120_000_000_000u64) // 120 seconds of media data — more headroom for slow Tor links
             .property("use-buffering", true)
             .property("high-percent", 80i32)  // start playing when 80% full
             .property("low-percent", 15i32)   // pause when buffer drops to 15% — pause early to avoid complete depletion
@@ -950,6 +961,71 @@ impl GstPipeline {
             }
         });
 
+        // ── AppSrc push task ────────────────────────────────────────
+        //
+        // If using StreamSource + appsrc, start a background task that
+        // reads downloaded data chunks from the StreamSource channel and
+        // pushes them into the appsrc element as GStreamer buffers.
+        //
+        // This replaces the old MediaProxy HTTP server + souphttpsrc path.
+        // Data flows: CDN → Tor → SOCKS Forwarder → reqwest → channel → appsrc.
+        //
+        // The push task runs on the tokio runtime and uses GStreamer's
+        // thread-safe action signals (emit_by_name) to push buffers.
+        // When the download completes, an EOS event is pushed into appsrc.
+        if let Some(mut source) = stream_source.take() {
+            let appsrc_weak = src.downgrade();
+            let cancel = Arc::new(AtomicBool::new(false));
+            let cancel_clone = cancel.clone();
+
+            tokio::spawn(async move {
+                while let Some(chunk) = source.recv_chunk().await {
+                    if cancel_clone.load(Ordering::Relaxed) {
+                        tracing::info!("appsrc push task: cancelled");
+                        return;
+                    }
+
+                    // Push the chunk into appsrc as a GStreamer buffer.
+                    if let Some(appsrc) = appsrc_weak.upgrade() {
+                        let buffer = gstreamer::Buffer::from_slice(chunk.data.to_vec());
+                        let result = appsrc.emit_by_name::<gstreamer::FlowReturn>(
+                            "push-buffer",
+                            &[&buffer],
+                        );
+                        match result {
+                            gstreamer::FlowReturn::Ok => {},
+                            gstreamer::FlowReturn::Flushing => {
+                                tracing::debug!("appsrc is flushing — stopping push task");
+                                return;
+                            },
+                            gstreamer::FlowReturn::Eos => {
+                                tracing::debug!("appsrc at EOS — stopping push task");
+                                return;
+                            },
+                            other => {
+                                tracing::warn!(
+                                    result = ?other,
+                                    "appsrc push-buffer returned unexpected result — stopping push task"
+                                );
+                                return;
+                            },
+                        }
+                    } else {
+                        tracing::debug!("appsrc element dropped — stopping push task");
+                        return;
+                    }
+                }
+
+                // Download completed — push EOS into appsrc.
+                tracing::info!("appsrc push task: download complete, pushing EOS");
+                if let Some(appsrc) = appsrc_weak.upgrade() {
+                    let _ = appsrc.emit_by_name::<gstreamer::FlowReturn>("end-of-stream", &[]);
+                }
+            });
+
+            push_cancel = Some(cancel);
+        }
+
         Ok(Self {
             pipeline,
             _video_sink: video_sink,
@@ -957,6 +1033,7 @@ impl GstPipeline {
             state: PipelineState::Ready,
             bus_watch: None,
             _media_proxy: media_proxy,
+            _push_cancel: push_cancel,
             #[cfg(feature = "hevc")]
             _v3d_engine: None, // V3D compute disabled — EGL context creation not yet implemented
         })
@@ -1735,6 +1812,12 @@ impl Drop for GstPipeline {
         // Without this, GStreamer prints "Trying to dispose element X,
         // but it is in READY/PAUSED instead of the NULL state" warnings
         // when a failed pipeline is dropped.
+        
+        // Signal the appsrc push task to stop (if running).
+        if let Some(cancel) = &self._push_cancel {
+            cancel.store(true, Ordering::Relaxed);
+        }
+        
         if self.state != PipelineState::Null {
             // Drop the bus watch first to prevent callbacks during shutdown.
             self.bus_watch = None;

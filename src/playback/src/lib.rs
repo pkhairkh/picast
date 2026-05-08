@@ -37,6 +37,8 @@ pub mod pipeline;
 mod socks_forwarder;
 #[cfg(feature = "hw")]
 mod media_proxy;
+#[cfg(feature = "hw")]
+mod stream_source;
 
 #[cfg(feature = "hw")]
 use events::PlaybackEvent;
