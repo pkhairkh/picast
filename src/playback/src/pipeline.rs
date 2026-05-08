@@ -362,40 +362,19 @@ impl GstPipeline {
             .build()
             .map_err(|e| PlaybackError::PipelineCreation(format!("parsebin: {}", e)))?;
 
-        // ── Video elements ──────────────────────────────────────────
+        // ── Video sink ──────────────────────────────────────────────
         //
-        // When the `hevc` feature is enabled, try building the HEVC pipeline
-        // first. If the HEVC decoder (v4l2slh265dec) is not available on this
-        // system, fall back to the H.264 hardware decode pipeline. This allows
-        // the same binary to work on Pi systems with or without the rpivid HEVC
-        // decoder overlay enabled.
-        #[cfg(feature = "hevc")]
-        let (video_bin, video_sink, v3d_engine) = if config.hw_accel {
-            match Self::build_hevc_video_bin(config) {
-                Ok(result) => {
-                    tracing::info!("using HEVC/H.265 hardware decode pipeline (v4l2slh265dec + V3D/ISP conversion)");
-                    result
-                },
-                Err(e) => {
-                    tracing::warn!(
-                        error = %e,
-                        "HEVC pipeline not available — falling back to H.264 hardware decode"
-                    );
-                    let (vbin, vsink) = Self::build_hw_video_bin(config)?;
-                    (vbin, vsink, None)
-                },
-            }
-        } else {
-            let (vbin, vsink) = Self::build_sw_video_bin(config)?;
-            (vbin, vsink, None)
-        };
-
-        #[cfg(not(feature = "hevc"))]
-        let (video_bin, video_sink) = if config.hw_accel {
-            Self::build_hw_video_bin(config)?
-        } else {
-            Self::build_sw_video_bin(config)?
-        };
+        // kmssink is created now and added to the pipeline. The video decode
+        // chain (queue + decoder + optional converter) is NOT created here —
+        // it is built dynamically in the parsebin pad-added callback based on
+        // the actual codec detected at runtime (H.264 vs HEVC). This avoids
+        // the caps mismatch that occurred when a pre-built HEVC video bin
+        // (h265parse → v4l2slh265dec) received H.264 data from parsebin.
+        //
+        // parsebin already includes the appropriate parser (h264parse or
+        // h265parse) internally, so we don't need a parser in the video
+        // chain — just the decoder and optional format converter.
+        let video_sink = Self::build_kmssink(config)?;
 
         // ── Audio elements ──────────────────────────────────────────
         //
@@ -490,7 +469,7 @@ impl GstPipeline {
 
         // ── Assemble pipeline ───────────────────────────────────────
         let mut all_elements: Vec<&Element> = vec![
-            &src, &queue2, &parsebin, &video_bin,
+            &src, &queue2, &parsebin, &video_sink,
             &audio_queue, &audioconvert, &audioresample, &volume, &audiosink,
         ];
         if let Some(ref dec) = audio_decoder {
@@ -541,11 +520,11 @@ impl GstPipeline {
         //      pad *will* produce (e.g. "video/x-h264") even before
         //      negotiation completes.
         //   3. If we still can't determine the type, try linking to the
-        //      video bin first (most common case for unknown pads) and
-        //      fall back to audio if that fails.
-        let video_bin_weak = video_bin.downgrade();
+        //      audio chain, then add a fakesink as a last resort.
+        let video_sink_weak = video_sink.downgrade();
         let audio_queue_weak = audio_queue.downgrade();
         let pipeline_weak = pipeline.downgrade();
+        let hw_accel = config.hw_accel;
 
         parsebin.connect_pad_added(move |_parsebin, pad| {
             // Step 1: Try already-negotiated caps
@@ -584,30 +563,200 @@ impl GstPipeline {
             );
 
             if is_video {
-                match video_bin_weak.upgrade() {
-                    Some(vbin) => {
-                        let sink_pad =
-                            vbin.static_pad("sink").expect("video bin should have a sink pad");
-                        if sink_pad.is_linked() {
-                            tracing::info!("video pad already linked, skipping");
+                // ── Dynamic video chain creation ──────────────────────
+                //
+                // We don't know the video codec until parsebin discovers it.
+                // Build the appropriate decoder chain on-the-fly based on
+                // the detected media type:
+                //
+                //   H.264 + hw_accel: queue → v4l2h264dec(dmabuf) → kmssink
+                //   H.265 + hw_accel: queue → v4l2slh265dec → v4l2convert(ISP) → kmssink
+                //   Software decode:   queue → avdec_h264 → videoconvert → kmssink
+                //
+                // parsebin already includes the parser (h264parse/h265parse),
+                // so we don't add one here — we go straight to the decoder.
+
+                let is_h265 = media_type.as_ref()
+                    .map(|t| t.contains("h265") || t.contains("hevc"))
+                    .unwrap_or(false);
+
+                let pipe = match pipeline_weak.upgrade() {
+                    Some(p) => p,
+                    None => {
+                        tracing::error!("pipeline weak ref failed — cannot create video chain");
+                        return;
+                    }
+                };
+
+                let ksink = match video_sink_weak.upgrade() {
+                    Some(k) => k,
+                    None => {
+                        tracing::error!("kmssink weak ref failed — cannot create video chain");
+                        return;
+                    }
+                };
+
+                // Check if kmssink's sink pad is already linked (from a previous
+                // video chain that was set up dynamically)
+                let kmssink_sink = ksink.static_pad("sink")
+                    .expect("kmssink should have a sink pad");
+                if kmssink_sink.is_linked() {
+                    tracing::info!("video chain already linked to kmssink, skipping");
+                    return;
+                }
+
+                // Create video queue (shared by all decode paths)
+                let video_queue = match ElementFactory::make("queue")
+                    .property("max-size-buffers", 60u32)
+                    .build()
+                {
+                    Ok(q) => q,
+                    Err(e) => {
+                        tracing::error!(error = %e, "failed to create video queue");
+                        return;
+                    }
+                };
+
+                // Build the appropriate decoder chain based on codec + hw_accel
+                if is_h265 && hw_accel && cfg!(feature = "hevc") {
+                    // ── HEVC hardware decode ────────────────────────
+                    //
+                    // v4l2slh265dec outputs SAND128 (NV12_64Z32) which
+                    // kmssink can't scan out directly. v4l2convert uses
+                    // the bcm2835-ISP hardware to convert SAND128→NV12.
+
+                    let decoder = match ElementFactory::make("v4l2slh265dec").build() {
+                        Ok(d) => d,
+                        Err(e) => {
+                            tracing::error!(error = %e, "v4l2slh265dec not available");
                             return;
                         }
-                        if let Err(e) = pad.link(&sink_pad) {
-                            tracing::error!(
-                                error = ?e,
-                                caps = %caps_str,
-                                "failed to link parsebin video pad"
-                            );
-                        } else {
-                            tracing::info!(
-                                caps = %caps_str,
-                                "linked parsebin → video bin"
-                            );
+                    };
+                    let converter = match ElementFactory::make("v4l2convert").build() {
+                        Ok(c) => c,
+                        Err(e) => {
+                            tracing::error!(error = %e, "v4l2convert not available");
+                            return;
                         }
-                    },
-                    None => {
+                    };
+
+                    // Add elements to pipeline
+                    if let Err(e) = pipe.add_many([&video_queue, &decoder, &converter]) {
+                        tracing::error!(error = %e, "failed to add HEVC elements to pipeline");
+                        return;
+                    }
+
+                    // Link: video_queue → v4l2slh265dec → v4l2convert → kmssink
+                    if let Err(e) = Element::link_many([&video_queue, &decoder, &converter]) {
+                        tracing::error!(error = %e, "failed to link HEVC decode chain");
+                        return;
+                    }
+                    if let Err(e) = converter.link(&ksink) {
+                        tracing::error!(error = ?e, "failed to link v4l2convert → kmssink");
+                        return;
+                    }
+
+                    // Set elements to Paused so they participate in preroll
+                    let _ = video_queue.set_state(State::Paused);
+                    let _ = decoder.set_state(State::Paused);
+                    let _ = converter.set_state(State::Paused);
+
+                    tracing::info!("HEVC video chain: video_queue → v4l2slh265dec → v4l2convert(ISP) → kmssink");
+
+                } else if !is_h265 && hw_accel {
+                    // ── H.264 hardware decode ───────────────────────
+
+                    let decoder = match ElementFactory::make("v4l2h264dec").build() {
+                        Ok(d) => d,
+                        Err(e) => {
+                            tracing::error!(error = %e, "v4l2h264dec not available");
+                            return;
+                        }
+                    };
+                    // Set DMA-BUF io modes for zero-copy decode
+                    decoder.set_property_from_str("output-io-mode", "dmabuf");
+                    decoder.set_property_from_str("capture-io-mode", "dmabuf");
+
+                    // Add elements to pipeline
+                    if let Err(e) = pipe.add_many([&video_queue, &decoder]) {
+                        tracing::error!(error = %e, "failed to add H.264 elements to pipeline");
+                        return;
+                    }
+
+                    // Link: video_queue → v4l2h264dec → kmssink
+                    if let Err(e) = Element::link_many([&video_queue, &decoder]) {
+                        tracing::error!(error = %e, "failed to link H.264 decode chain");
+                        return;
+                    }
+                    if let Err(e) = decoder.link(&ksink) {
+                        tracing::error!(error = ?e, "failed to link v4l2h264dec → kmssink");
+                        return;
+                    }
+
+                    let _ = video_queue.set_state(State::Paused);
+                    let _ = decoder.set_state(State::Paused);
+
+                    tracing::info!("H.264 video chain: video_queue → v4l2h264dec(dmabuf) → kmssink");
+
+                } else {
+                    // ── Software decode fallback ────────────────────
+
+                    let decoder = match ElementFactory::make("avdec_h264")
+                        .build()
+                        .or_else(|_| ElementFactory::make("avdec_h265").build())
+                    {
+                        Ok(d) => d,
+                        Err(e) => {
+                            tracing::error!(error = %e, "no software video decoder available");
+                            return;
+                        }
+                    };
+                    let converter = match ElementFactory::make("videoconvert").build() {
+                        Ok(c) => c,
+                        Err(e) => {
+                            tracing::error!(error = %e, "videoconvert not available");
+                            return;
+                        }
+                    };
+
+                    if let Err(e) = pipe.add_many([&video_queue, &decoder, &converter]) {
+                        tracing::error!(error = %e, "failed to add SW decode elements to pipeline");
+                        return;
+                    }
+
+                    if let Err(e) = Element::link_many([&video_queue, &decoder, &converter]) {
+                        tracing::error!(error = %e, "failed to link SW decode chain");
+                        return;
+                    }
+                    if let Err(e) = converter.link(&ksink) {
+                        tracing::error!(error = ?e, "failed to link videoconvert → kmssink");
+                        return;
+                    }
+
+                    let _ = video_queue.set_state(State::Paused);
+                    let _ = decoder.set_state(State::Paused);
+                    let _ = converter.set_state(State::Paused);
+
+                    tracing::info!("SW video chain: video_queue → avdec → videoconvert → kmssink");
+                }
+
+                // Link parsebin pad → video_queue
+                let queue_sink = video_queue.static_pad("sink")
+                    .expect("video_queue should have a sink pad");
+                if queue_sink.is_linked() {
+                    tracing::info!("video queue sink already linked, skipping");
+                    return;
+                }
+                match pad.link(&queue_sink) {
+                    Ok(_) => tracing::info!(
+                        caps = %caps_str,
+                        "linked parsebin → video decode chain"
+                    ),
+                    Err(e) => {
                         tracing::error!(
-                            "video_bin_weak.upgrade() failed — video bin was dropped, video pad will be unlinked!"
+                            error = ?e,
+                            caps = %caps_str,
+                            "failed to link parsebin video pad to decode chain"
                         );
                     },
                 }
@@ -673,36 +822,19 @@ impl GstPipeline {
             } else {
                 // Neither video nor audio — could be a subtitle, metadata,
                 // or (most critically) a video/audio pad whose caps aren't
-                // available yet.  Try to link it to the video bin first
-                // (the most common case for uncategorised pads), and if
-                // that fails, try the audio chain.
+                // available yet.  Try to link it to the audio chain first
+                // (video chain requires codec detection for dynamic creation),
+                // and if that fails, add a fakesink.
                 tracing::warn!(
                     pad = %pad_name,
                     media_type = ?media_type,
                     caps = %caps_str,
-                    "parsebin pad with unrecognised media type — attempting to link as video first, then audio"
+                    "parsebin pad with unrecognised media type — attempting to link as audio, then fakesink"
                 );
 
-                // Try video bin
+                // Try audio chain first (video chain requires dynamic creation
+                // based on codec type, so we can't link unknown pads to it)
                 let mut linked = false;
-                if let Some(vbin) = video_bin_weak.upgrade() {
-                    let sink_pad =
-                        vbin.static_pad("sink").expect("video bin should have a sink pad");
-                    if !sink_pad.is_linked() {
-                        match pad.link(&sink_pad) {
-                            Ok(_) => {
-                                tracing::info!("linked unknown pad → video bin (heuristic)");
-                                linked = true;
-                            },
-                            Err(e) => {
-                                tracing::warn!(
-                                    error = ?e,
-                                    "unknown pad failed to link as video — trying audio"
-                                );
-                            },
-                        }
-                    }
-                }
 
                 // Try audio chain
                 if !linked {
@@ -765,7 +897,7 @@ impl GstPipeline {
             bus_watch: None,
             _socks_forwarder: socks_forwarder,
             #[cfg(feature = "hevc")]
-            _v3d_engine: v3d_engine,
+            _v3d_engine: None, // V3D compute disabled — EGL context creation not yet implemented
         })
     }
 
@@ -841,6 +973,7 @@ impl GstPipeline {
     /// most important property for PiCast's performance on Pi 4 —
     /// without it, `mmap` mode forces frames through system memory,
     /// which causes high CPU usage and frequent dropped buffers.
+    #[allow(dead_code)]
     fn build_hw_video_bin(config: &PipelineConfig) -> Result<(Element, Element), PlaybackError> {
         let video_queue = ElementFactory::make("queue")
             .property("max-size-buffers", 60u32)
@@ -983,6 +1116,7 @@ impl GstPipeline {
     /// optimization would use a custom GStreamer element or pad probe to
     /// intercept and transform buffers in-place within the pipeline.
     #[cfg(feature = "hevc")]
+    #[allow(dead_code)]
     fn build_hevc_video_bin(config: &PipelineConfig) -> Result<(Element, Element, Option<V3dComputeEngine>), PlaybackError> {
         let video_queue = ElementFactory::make("queue")
             .property("max-size-buffers", 60u32)
@@ -1165,6 +1299,7 @@ impl GstPipeline {
 
     /// Build the software-decode video branch:
     /// `avdec_h264 → videoconvert → kmssink`
+    #[allow(dead_code)]
     fn build_sw_video_bin(config: &PipelineConfig) -> Result<(Element, Element), PlaybackError> {
         let video_queue = ElementFactory::make("queue")
             .property("max-size-buffers", 60u32)
