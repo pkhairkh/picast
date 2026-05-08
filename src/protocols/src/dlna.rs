@@ -251,7 +251,12 @@ impl Drop for DlnaRenderer {
     fn drop(&mut self) {
         if let Ok(mut guard) = self.child.try_lock() {
             if let Some(ref mut child) = *guard {
-                let _ = child.kill();
+                // Best-effort kill in synchronous drop context.
+                // tokio::process::Child::kill() returns a future, but we
+                // can't await inside Drop. The OS will clean up the child
+                // process if the kill doesn't take effect immediately.
+                // tokio also sends SIGKILL when the Child handle is dropped.
+                drop(child.kill());
                 tracing::debug!("DlnaRenderer dropped — killed orphaned subprocess");
             }
         }
@@ -313,32 +318,29 @@ pub async fn run_dlna_sync(
                     },
                     // Also handle Playing as a safety net in case the Resolving
                     // event was missed (e.g., due to broadcast lag).
-                    SessionEvent::Playing { .. } => {
-                        if dlna.is_running().await {
-                            tracing::info!(
-                                "session playing — stopping gmediarender to release DRM"
+                    SessionEvent::Playing { .. } if dlna.is_running().await => {
+                        tracing::info!(
+                            "session playing — stopping gmediarender to release DRM"
+                        );
+                        if let Err(e) = dlna.stop().await {
+                            tracing::warn!(
+                                error = %e,
+                                "failed to stop gmediarender — DRM conflict may occur"
                             );
-                            if let Err(e) = dlna.stop().await {
-                                tracing::warn!(
-                                    error = %e,
-                                    "failed to stop gmediarender — DRM conflict may occur"
-                                );
-                            }
                         }
                     },
-                    SessionEvent::Stopped { .. } => {
+                    SessionEvent::Stopped { .. }
                         // Start gmediarender when the session stops so DLNA
                         // controllers can discover PiCast while idle.
-                        if !dlna.is_running().await {
-                            tracing::info!(
-                                "session stopped — starting gmediarender for DLNA discovery"
+                        if !dlna.is_running().await => {
+                        tracing::info!(
+                            "session stopped — starting gmediarender for DLNA discovery"
+                        );
+                        if let Err(e) = dlna.start().await {
+                            tracing::warn!(
+                                error = %e,
+                                "failed to start gmediarender after stop — DLNA unavailable"
                             );
-                            if let Err(e) = dlna.start().await {
-                                tracing::warn!(
-                                    error = %e,
-                                    "failed to start gmediarender after stop — DLNA unavailable"
-                                );
-                            }
                         }
                     },
                     SessionEvent::Paused { .. } => {

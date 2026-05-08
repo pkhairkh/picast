@@ -227,7 +227,7 @@ async fn accept_wss_stream(
 ) -> Result<WsStream> {
     let tls_stream = tls_acceptor.accept(stream).await.map_err(|e| anyhow!("TLS handshake failed: {}", e))?;
     let ws_stream = tokio_tungstenite::accept_async_with_config(tls_stream, config).await?;
-    Ok(WsStream::Tls(ws_stream))
+    Ok(WsStream::Tls(Box::new(ws_stream)))
 }
 
 /// Accept a plain WebSocket connection (no TLS).
@@ -236,13 +236,13 @@ async fn accept_ws_stream_plain(
     config: Option<tokio_tungstenite::tungstenite::protocol::WebSocketConfig>,
 ) -> Result<WsStream> {
     let ws_stream = tokio_tungstenite::accept_async_with_config(stream, config).await?;
-    Ok(WsStream::Plain(ws_stream))
+    Ok(WsStream::Plain(Box::new(ws_stream)))
 }
 
 /// Type-erased WebSocket stream that supports both plain WS and WSS.
 enum WsStream {
-    Tls(tokio_tungstenite::WebSocketStream<tokio_rustls::server::TlsStream<tokio::net::TcpStream>>),
-    Plain(tokio_tungstenite::WebSocketStream<tokio::net::TcpStream>),
+    Tls(Box<tokio_tungstenite::WebSocketStream<tokio_rustls::server::TlsStream<tokio::net::TcpStream>>>),
+    Plain(Box<tokio_tungstenite::WebSocketStream<tokio::net::TcpStream>>),
 }
 
 impl WsStream {

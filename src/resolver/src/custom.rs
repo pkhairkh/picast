@@ -576,10 +576,11 @@ fn try_fallback_urls(html: &str) -> Option<String> {
 fn rot13(text: &str) -> String {
     text.chars()
         .map(|ch| {
-            let o = ch as u32;
-            if ('A'..='Z').contains(&ch) {
+            if ch.is_ascii_uppercase() {
+                let o = ch as u32;
                 char::from_u32(((o - 65 + 13) % 26) + 65).unwrap_or(ch)
-            } else if ('a'..='z').contains(&ch) {
+            } else if ch.is_ascii_lowercase() {
+                let o = ch as u32;
                 char::from_u32(((o - 97 + 13) % 26) + 97).unwrap_or(ch)
             } else {
                 ch

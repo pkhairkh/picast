@@ -138,18 +138,12 @@ pub struct DisplayConfig {
 }
 
 /// Playback pipeline configuration.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct PlaybackConfig {
     /// ALSA device string for audio output (e.g. "plughw:1,0" for HDMI).
     /// When empty, alsasink uses the ALSA default device.
     #[serde(default)]
     pub audio_device: String,
-}
-
-impl Default for PlaybackConfig {
-    fn default() -> Self {
-        Self { audio_device: String::new() }
-    }
 }
 
 /// DLNA renderer configuration.

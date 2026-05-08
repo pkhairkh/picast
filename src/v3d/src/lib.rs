@@ -78,8 +78,8 @@
 //!
 //! For the output, we allocate a new CMA-contiguous DMA-BUF via `memfd_create`
 //! + DRM dumb buffer, import it as an SSBO, and the compute shader writes
-//! linear NV12 data into it. The DMA-BUF fd is then passed to kmssink for
-//! HVS scanout.
+//!   linear NV12 data into it. The DMA-BUF fd is then passed to kmssink for
+//!   HVS scanout.
 
 #![cfg(feature = "hw")]
 

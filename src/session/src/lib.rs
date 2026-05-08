@@ -57,7 +57,7 @@ use uuid::Uuid;
 /// - "Forbidden" — GStreamer's HTTP 403 error message (fallback for
 ///   cases where the proactive check was skipped or the CDN uses a
 ///   different IP-binding mechanism)
-fn is_cdn_retryable_error(error: &Box<dyn std::error::Error + Send + Sync>) -> bool {
+fn is_cdn_retryable_error(error: &(dyn std::error::Error + Send + Sync)) -> bool {
     let msg = error.to_string();
     msg.contains("CDN IP mismatch")
         || msg.contains("re-resolve needed")
@@ -810,7 +810,7 @@ impl SessionManager {
 
                 match play_result {
                     Ok(()) => break, // Success — exit the retry loop
-                    Err(ref e) if attempt <= max_retries && is_cdn_retryable_error(e) => {
+                    Err(ref e) if attempt <= max_retries && is_cdn_retryable_error(e.as_ref()) => {
                         tracing::warn!(
                             error = %e,
                             attempt = attempt,
