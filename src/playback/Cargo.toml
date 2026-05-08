@@ -23,6 +23,8 @@ thiserror = { workspace = true }
 tracing = { workspace = true }
 anyhow = { workspace = true }
 url = { workspace = true }
+reqwest = { version = "0.12", features = ["rustls-tls", "stream"], default-features = false }
+futures-util = "0.3"
 
 [dev-dependencies]
 tokio = { workspace = true, features = ["rt-multi-thread", "macros", "time", "sync"] }

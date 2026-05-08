@@ -153,6 +153,17 @@ pub fn classify_url(url: &Url) -> UrlCategory {
                 return UrlCategory::WebPage;
             }
         }
+
+        // Rule 3b: Voe-style rotating front-end domains.
+        // Voe rotates domains constantly (e.g. "maryspecialwatch.com",
+        // "cactusheadroomscaling.com"). The heuristic in
+        // `custom::is_voe_domain()` catches these dynamically without
+        // needing a static list. Classifying them as WebPage here
+        // avoids the fallback to Rule 7 (default), making the
+        // classification more explicit and saving a string comparison.
+        if crate::custom::is_voe_domain(host) {
+            return UrlCategory::WebPage;
+        }
     }
 
     // Rule 4-6: Path extension

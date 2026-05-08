@@ -54,6 +54,7 @@
 //! v4l2h264dec passes this through to kmssink correctly without intervention.
 
 use crate::{BufferHealth, PipelineConfig, PlaybackError};
+use crate::media_proxy::MediaProxy;
 use crate::socks_forwarder::SocksForwarder;
 use gstreamer::prelude::*;
 use gstreamer::{Element, ElementFactory, Pipeline, State};
@@ -99,10 +100,12 @@ pub struct GstPipeline {
     state: PipelineState,
     /// Keeps the GStreamer bus watch alive for this pipeline.
     bus_watch: Option<gstreamer::bus::BusWatchGuard>,
-    /// Local HTTP CONNECT→SOCKS5 proxy forwarder. Routes souphttpsrc
-    /// traffic through Tor's SOCKS5 with the same isolation username
-    /// as the resolver, ensuring the same exit IP (CDN token match).
-    _socks_forwarder: Option<SocksForwarder>,
+    /// Streaming HTTP media proxy. Accepts HTTP/1.1 connections from
+    /// souphttpsrc on localhost, fetches from the CDN via reqwest
+    /// (HTTP/2 + rustls TLS — matching Chrome's fingerprint), and
+    /// streams the response back. This bypasses CDN anti-bot systems
+    /// that reject GStreamer's souphttpsrc (HTTP/1.1 + GnuTLS).
+    _media_proxy: Option<MediaProxy>,
     /// V3D compute shader engine for SAND→NV12 conversion.
     /// Only present when HEVC decode is enabled and V3D is available.
     #[cfg(feature = "hevc")]
@@ -183,191 +186,87 @@ impl GstPipeline {
 
         // ── Source element ──────────────────────────────────────────
         //
-        // A browser-like User-Agent is critical: many video CDNs (Voe,
-        // DoodStream, Cloudflare-fronted hosts) reject requests with the
-        // default "GStreamer souphttpsrc" UA, returning 403 or closing the
-        // connection.  The same UA string is used by the custom resolvers
-        // in picast-resolver so the CDN sees a consistent identity across
-        // both the resolution and playback phases.
+        // CDN anti-bot bypass: souphttpsrc uses HTTP/1.1 + GnuTLS, which
+        // CDN anti-bot systems flag as non-browser (Chrome uses HTTP/2 +
+        // BoringSSL). To bypass this, we start a local streaming HTTP
+        // media proxy that:
+        //   1. Accepts HTTP/1.1 connections from souphttpsrc on localhost
+        //   2. Fetches from the CDN via reqwest (HTTP/2 + rustls TLS)
+        //   3. Streams the response body back to souphttpsrc
+        //
+        // The CDN sees reqwest's HTTP/2 + rustls connection (matching
+        // Chrome's fingerprint), while souphttpsrc sees a simple HTTP
+        // response from localhost. This eliminates the 403 Forbidden
+        // errors caused by CDN TLS/HTTP fingerprinting.
+        //
+        // The media proxy internally starts a SOCKS forwarder for Tor
+        // circuit isolation (same exit IP as the resolver → CDN IP-
+        // binding token matches).
         const BROWSER_UA: &str = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36";
 
+        let is_loopback_url = url.starts_with("http://127.0.0.1:")
+            || url.starts_with("http://localhost:")
+            || url.starts_with("http://[::1]:");
+
+        // Determine the URL that souphttpsrc will connect to.
+        // For CDN URLs: use the media proxy (localhost → reqwest → CDN).
+        // For loopback URLs: connect directly (no proxy needed).
+        let mut media_proxy = None;
+        let src_url = if !is_loopback_url && !socks_addr.is_empty() && !isolation_username.is_empty() {
+            // Start the streaming media proxy.
+            match MediaProxy::start(
+                url.to_string(),
+                source_url.to_string(),
+                socks_addr.to_string(),
+                isolation_username.to_string(),
+                cookies.to_vec(),
+            )
+            .await
+            {
+                Ok(proxy) => {
+                    let local_url = proxy.local_url();
+                    tracing::info!(
+                        local_url = %local_url,
+                        cdn_url = url,
+                        "media proxy started — souphttpsrc will connect to localhost, proxy fetches CDN via reqwest (HTTP/2 + rustls)"
+                    );
+                    media_proxy = Some(proxy);
+                    local_url
+                }
+                Err(e) => {
+                    tracing::error!(
+                        error = %e,
+                        "failed to start media proxy — falling back to direct CDN connection (likely 403)"
+                    );
+                    // Fall back to direct CDN URL (may get 403 from CDN
+                    // anti-bot, but at least we try).
+                    url.to_string()
+                }
+            }
+        } else if is_loopback_url {
+            tracing::debug!("loopback media URL detected; connecting directly");
+            url.to_string()
+        } else if socks_addr.is_empty() {
+            tracing::info!("no Tor SOCKS proxy configured; connecting directly to CDN");
+            url.to_string()
+        } else {
+            tracing::warn!("no isolation username provided; connecting directly to CDN (not through Tor)");
+            url.to_string()
+        };
+
         let src = ElementFactory::make("souphttpsrc")
-            .property("location", url)
+            .property("location", &src_url)
             .property("timeout", 30u32)
             .property("user-agent", BROWSER_UA)
             // Increase the read blocksize from the default 4 KB to 256 KB.
             // souphttpsrc reads data from the HTTP connection in chunks of
             // `blocksize` bytes. With the default 4 KB, streaming a 5 Mbps
-            // video requires ~150 read() calls per second, each one going
-            // through the SOCKS5 forwarder → Tor → CDN round-trip. Larger
-            // blocks reduce syscall frequency and allow souphttpsrc to
-            // accumulate more data per read, improving throughput on high-
-            // latency Tor tunnels. 256 KB matches the SOCKS forwarder's
-            // buffer size and reduces syscall overhead significantly
-            // compared to the previous 64 KB setting.
+            // video requires ~150 read() calls per second. Larger blocks
+            // reduce syscall frequency and allow souphttpsrc to accumulate
+            // more data per read, improving throughput.
             .property("blocksize", 262_144u32)
             .build()
             .map_err(|e| PlaybackError::PipelineCreation(format!("souphttpsrc: {}", e)))?;
-
-        // Set extra HTTP headers.  Many video CDNs require a Referer header
-        // for hotlink protection — they check that the request originates
-        // from the embedding page's domain.
-        //
-        // IMPORTANT: The Referer MUST be derived from the *source* URL
-        // (the original page the user cast), NOT the CDN media URL.
-        // CDNs like Voe bind their tokens to the originating site's domain
-        // and reject requests whose Referer doesn't match. If we send the
-        // CDN URL's origin as Referer, the CDN sees it as a cross-origin
-        // hotlink and returns 403 Forbidden.
-        //
-        // The resolver (yt-dlp) sends the correct Referer during URL
-        // resolution, which is why resolution succeeds. We must send
-        // the same Referer during media fetch for the CDN to accept it.
-        //
-        // Accept and Accept-Language headers make the request look more
-        // browser-like, which helps with CDNs that reject GStreamer's
-        // default headers.
-        if src.find_property("extra-headers").is_some() {
-            let mut headers = gstreamer::Structure::new_empty("extra-headers");
-
-            // Accept header: browser-like for video content. Using */*
-            // because some CDNs reject requests with restrictive Accept
-            // headers that don't match the content type they serve.
-            headers.set("Accept", "*/*");
-
-            headers.set("Accept-Language", "en-US,en;q=0.5");
-
-            // Accept-Encoding: Chrome sends "identity;q=1, *;q=0" for <video>
-            // elements (video is already compressed; no point in gzip/deflate).
-            // Some CDNs flag requests that ask for compressed video as bot-like.
-            headers.set("Accept-Encoding", "identity;q=1, *;q=0");
-
-            // Chrome Client Hints: Chrome 89+ sends these for ALL requests.
-            // CDN anti-bot systems (Cloudflare, Voe) check for these headers
-            // to verify the request comes from a real Chrome browser. Without
-            // them, the CDN sees a non-browser client and may return 403.
-            // Values match the User-Agent string (Chrome/131.0.0.0).
-            headers.set("sec-ch-ua", r#""Chromium";v="131", "Not_A Brand";v="24""#);
-            headers.set("sec-ch-ua-mobile", "?0");
-            headers.set("sec-ch-ua-platform", "\"Windows\"");
-
-            // Sec-Fetch-* headers: Many CDN anti-bot systems (Cloudflare,
-            // Voe, DoodStream) check these headers to verify the request
-            // comes from a real browser. A <video> element loading a media
-            // URL sends these specific values:
-            //   Sec-Fetch-Dest: video
-            //   Sec-Fetch-Mode: no-cors
-            //   Sec-Fetch-Site: cross-site (CDN domain != page domain)
-            headers.set("Sec-Fetch-Dest", "video");
-            headers.set("Sec-Fetch-Mode", "no-cors");
-            // Determine Sec-Fetch-Site based on whether CDN domain
-            // differs from the source page domain.
-            let fetch_site = if !source_url.is_empty() {
-                // Check if CDN and source page share the same origin
-                let same_origin = url::Url::parse(url).ok()
-                    .zip(url::Url::parse(source_url).ok())
-                    .map(|(cdn, src)| {
-                        cdn.scheme() == src.scheme() && cdn.host_str() == src.host_str()
-                    })
-                    .unwrap_or(false);
-                if same_origin { "same-origin" } else { "cross-site" }
-            } else {
-                "none"
-            };
-            headers.set("Sec-Fetch-Site", fetch_site);
-
-            // Derive Referer from the SOURCE URL's origin (the page the
-            // user cast), falling back to the media URL's origin if no
-            // source URL is available. This matches what the resolver
-            // (yt-dlp) sends, ensuring the CDN sees the same Referer
-            // during both resolution and media fetch.
-            let referer_url = if !source_url.is_empty() { source_url } else { url };
-            if let Ok(parsed) = url::Url::parse(referer_url) {
-                if let Some(host) = parsed.host_str() {
-                    let referer = format!("{}://{}", parsed.scheme(), host);
-                    headers.set("Referer", referer.as_str());
-                    tracing::info!(
-                        referer = %referer,
-                        source_url = %source_url,
-                        fetch_site = %fetch_site,
-                        "souphttpsrc: headers configured (Referer + Sec-Fetch-* for CDN anti-bot)"
-                    );
-                }
-            }
-
-            // Cookie header: Some CDNs require session cookies that were set
-            // during the page fetch (resolution phase). The resolver captures
-            // Set-Cookie headers and passes them through the session layer.
-            if !cookies.is_empty() {
-                let cookie_header = cookies.join("; ");
-                headers.set("Cookie", cookie_header.as_str());
-                tracing::info!(
-                    cookie_count = cookies.len(),
-                    "souphttpsrc: Cookie header added from resolver session"
-                );
-            }
-
-            src.set_property("extra-headers", &headers);
-        }
-
-        // Configure Tor proxy for media routing. ALL non-loopback
-        // traffic goes through Tor — this is a core security property
-        // of PiCast. Privacy is non-negotiable: the user's ISP must
-        // never see which content is being accessed.
-        //
-        // souphttpsrc's `proxy` property only supports HTTP proxy URIs.
-        // libsoup2.4 (Debian Bookworm) does NOT support `socks5h://`
-        // proxy URIs. Tor's HTTPTunnelPort uses a DIFFERENT circuit than
-        // the SOCKS5 port, so CDN IP-bound tokens see a mismatch → 403.
-        //
-        // Solution: start a local HTTP CONNECT→SOCKS5 forwarder that
-        // accepts CONNECT requests from souphttpsrc and forwards them
-        // through Tor's SOCKS5 proxy with the SAME isolation username
-        // as the resolver. Same SOCKS5 username = same Tor circuit =
-        // same exit IP → CDN token matches → no 403.
-        let is_loopback_url = url.starts_with("http://127.0.0.1:")
-            || url.starts_with("http://localhost:")
-            || url.starts_with("http://[::1]:");
-
-        let mut socks_forwarder = None;
-
-        if !is_loopback_url && !socks_addr.is_empty() && !isolation_username.is_empty() {
-            match SocksForwarder::start(socks_addr.to_string(), isolation_username.to_string()).await
-            {
-                Ok(forwarder) => {
-                    let proxy_url = forwarder.proxy_url();
-                    if src.find_property("proxy").is_some() {
-                        src.set_property("proxy", &proxy_url);
-                        tracing::info!(
-                            proxy_url = %proxy_url,
-                            socks_addr = %socks_addr,
-                            username = %isolation_username,
-                            "HTTP CONNECT→SOCKS5 forwarder configured (same Tor circuit as resolver)"
-                        );
-                    } else {
-                        tracing::warn!(
-                            "souphttpsrc has no 'proxy' property; cannot route media through Tor"
-                        );
-                    }
-
-                    socks_forwarder = Some(forwarder);
-                }
-                Err(e) => {
-                    tracing::error!(
-                        error = %e,
-                        "failed to start SOCKS5 forwarder — media will NOT be routed through Tor"
-                    );
-                }
-            }
-        } else if is_loopback_url {
-            tracing::debug!("loopback media URL detected; skipping playback proxy");
-        } else if socks_addr.is_empty() {
-            tracing::info!("no Tor SOCKS proxy configured; fetching media directly");
-        } else if isolation_username.is_empty() {
-            tracing::warn!(
-                "no isolation username provided — media will be fetched directly (not through Tor)"
-            );
-        }
 
         // ── Buffer element ──────────────────────────────────────────
         //
@@ -1036,7 +935,7 @@ impl GstPipeline {
             volume,
             state: PipelineState::Ready,
             bus_watch: None,
-            _socks_forwarder: socks_forwarder,
+            _media_proxy: media_proxy,
             #[cfg(feature = "hevc")]
             _v3d_engine: None, // V3D compute disabled — EGL context creation not yet implemented
         })
@@ -1774,6 +1673,7 @@ impl GstPipeline {
         _socks_addr: &str,
         _isolation_username: &str,
         config: &PipelineConfig,
+        cookies: &[String],
     ) -> Result<(), PlaybackError> {
         tracing::warn!("rebuilding pipeline with software decode fallback");
 
@@ -1787,7 +1687,7 @@ impl GstPipeline {
         // compensation is not needed (and would cause A/V desync in
         // the opposite direction — audio delayed behind video).
         sw_config.audio_ts_offset_ns = 0;
-        let new = Self::new(url, source_url, _socks_addr, _isolation_username, &sw_config).await?;
+        let new = Self::new(url, source_url, _socks_addr, _isolation_username, &sw_config, cookies).await?;
 
         // Replace self with the new pipeline.
         *self = new;
