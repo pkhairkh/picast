@@ -156,6 +156,30 @@ impl GstPipeline {
 
         let pipeline = Pipeline::new();
 
+        // CRITICAL: Enable async-handling on the pipeline so it doesn't
+        // block waiting for async sinks (kmssink, alsasink) to preroll
+        // before completing its own state change.
+        //
+        // Without async-handling, the pipeline gets stuck at Ready→Paused
+        // because kmssink's sink pad is initially unconnected (the video
+        // decode chain is created dynamically in parsebin's pad-added
+        // callback). kmssink can't preroll without data, and it can't
+        // receive data because it's not linked to the decoder yet. This
+        // creates a deadlock: the pipeline waits for kmssink to preroll,
+        // but kmssink can't preroll until the pipeline connects it.
+        //
+        // With async-handling=true, the pipeline reaches Paused
+        // immediately without waiting for async children. The bus watch
+        // then handles the transition to Playing based on buffer state.
+        // kmssink and alsasink complete their preroll asynchronously
+        // when they receive their first buffers, and the pipeline
+        // transitions to Playing smoothly.
+        //
+        // This is safe because our bus watch explicitly controls when
+        // to start playing (based on buffer fill level), so we don't
+        // need the pipeline to gate the Playing transition on preroll.
+        pipeline.set_property("async-handling", true);
+
         // ── Source element ──────────────────────────────────────────
         //
         // A browser-like User-Agent is critical: many video CDNs (Voe,
@@ -330,31 +354,28 @@ impl GstPipeline {
         // low effective FPS.
         //
         // The bus watch handles BUFFERING messages:
-        // - Buffer < low-percent (5%): pause the pipeline
-        // - Buffer >= high-percent (60%): resume/allow playing
+        // - Buffer < 15%: pause the pipeline (pause early, before complete
+        //   depletion, to avoid the rapid 0%↔50% cycling that made playback
+        //   unwatchable with the old <2% threshold)
+        // - Buffer >= 80%: resume/allow playing (only resume when buffer is
+        //   well-filled, not at 50% which caused short play bursts)
         //
         // During initial preroll, we suppress auto-play until buffering
-        // reaches high-percent, ensuring enough data is buffered before
-        // playback starts. This prevents the "buffer underrun → low FPS"
-        // cycle.
+        // reaches 80%, ensuring enough data is buffered before playback
+        // starts. This prevents the "buffer underrun → low FPS" cycle.
         //
-        // max-size-time is set to 60 seconds of media data — this gives
-        // queue2 a time-based buffer limit in addition to the byte limit.
-        // Without max-size-time, queue2 may not buffer enough seconds of
-        // media data even with 100 MB of bytes (the actual duration depends
-        // on the video bitrate, which varies from ~1 Mbps for 360p to
-        // ~10 Mbps for 1080p). Setting both limits ensures the buffer
-        // holds at least 60 seconds of playback, giving Tor enough time
-        // to recover from throughput dips. The 60s headroom (up from 30s)
-        // provides more buffering capacity on slow Tor links to reduce
-        // the "buffer underrun → long refill → play briefly → underrun again"
-        // cycle that causes choppy playback.
+        // max-size-bytes=100 MB and max-size-time=60s give queue2 a large
+        // buffer for Tor's variable throughput. Without sufficient buffer,
+        // the queue empties faster than Tor can refill it, causing constant
+        // rebuffering. The 60s time limit ensures the buffer holds at least
+        // 60 seconds of playback even for high-bitrate streams, giving Tor
+        // enough time to recover from throughput dips.
         let queue2 = ElementFactory::make("queue2")
-            .property("max-size-bytes", 50_000_000u32) // 50 MB — sufficient for Tor; 100 MB takes too long to fill initially
-            .property("max-size-time", 30_000_000_000u64) // 30 seconds of media data
+            .property("max-size-bytes", 100_000_000u32) // 100 MB — larger buffer for Tor's variable throughput
+            .property("max-size-time", 60_000_000_000u64) // 60 seconds of media data — more headroom for slow Tor links
             .property("use-buffering", true)
-            .property("high-percent", 80i32)  // start playing when 80% full — good balance between initial wait and buffer depth
-            .property("low-percent", 2i32)    // pause when buffer drops to 2% — avoid premature pause/resume cycles
+            .property("high-percent", 80i32)  // start playing when 80% full
+            .property("low-percent", 15i32)   // pause when buffer drops to 15% — pause early to avoid complete depletion
             .build()
             .map_err(|e| PlaybackError::PipelineCreation(format!("queue2: {}", e)))?;
 

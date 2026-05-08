@@ -1167,23 +1167,33 @@ impl PlaybackEngine {
                     // BUFFERING messages to pause/resume the pipeline.
                     //
                     // **Initial buffering (before first play):**
-                    //   - Buffer >= high-percent (80%): transition to Playing
-                    //     and clear initial_buffering flag. We wait for 80%
-                    //     to build a reasonable buffer before consuming.
+                    //   - Buffer >= 80%: transition to Playing and clear
+                    //     initial_buffering flag. We wait for 80% to build
+                    //     a reasonable buffer before consuming.
                     //
                     // **During playback (after first play):**
-                    //   - Buffer < low-percent (2%): pause to refill
-                    //   - Buffer >= 50%: resume playing
+                    //   - Buffer < 15%: pause to refill (pause early, before
+                    //     buffer is completely empty — this avoids the
+                    //     rapid 0%↔50% cycling that made playback unwatchable)
+                    //   - Buffer >= 80%: resume playing (only resume when
+                    //     buffer is well-filled, not at 50% which causes
+                    //     short play bursts followed by immediate re-pause)
                     //
-                    // IMPORTANT: We do NOT pause/resume on every small buffer
-                    // fluctuation. During playback on Tor, the buffer naturally
-                    // oscillates between 20-80%. Pausing at 5% and resuming at
-                    // 80% creates visible stutter. Instead, we only pause when
-                    // the buffer is critically low (2%), and resume at a modest
-                    // 50%. This allows the pipeline clock to continue advancing
-                    // even during mild buffer dips, trading a few dropped frames
-                    // (handled by kmssink's max-lateness) for much smoother
-                    // perceived playback.
+                    // The previous thresholds (pause at <2%, resume at 50%)
+                    // caused severe rebuffering loops: the buffer would drop
+                    // to 0-1%, pause, refill to 50%, resume, then immediately
+                    // drop back to 0-1% within seconds because Tor's throughput
+                    // couldn't sustain the video bitrate at only 50% buffer.
+                    // The result was rapid Playing↔Paused cycling every few
+                    // seconds, making playback unwatchable.
+                    //
+                    // New thresholds (pause at <15%, resume at >=80%):
+                    //   - Pause earlier (15% vs 2%) — buffer still has some
+                    //     data, giving the download more time to recover
+                    //   - Resume later (80% vs 50%) — buffer is well-filled
+                    //     before playback resumes, allowing longer play periods
+                    //   - This trades longer pauses for longer play periods,
+                    //     resulting in much smoother perceived playback
                     if let Some(pipe) = pipeline_weak_bus.upgrade() {
                         if percent >= 80 {
                             // Buffer is sufficiently full — start/resume playing.
@@ -1195,37 +1205,43 @@ impl PlaybackEngine {
                                 );
                                 initial_buffering_bus.store(false, Ordering::Relaxed);
                             }
-                            // Only resume if currently Paused (don't call set_state
-                            // unnecessarily, which can cause log spam).
-                            let (_, current, _) = pipe.state(gstreamer::ClockTime::from_mseconds(0));
+                            // Resume if currently Paused or if stuck at Ready
+                            // (async-handling=true means the pipeline may have
+                            // reached Ready/Paused before sinks prerolled).
+                            let (_, current, pending) = pipe.state(gstreamer::ClockTime::from_mseconds(0));
                             if current == State::Paused {
                                 tracing::info!(
                                     percent = percent,
                                     "buffer sufficiently full — resuming playback"
                                 );
                                 let _ = pipe.set_state(State::Playing);
-                            }
-                        } else if percent >= 50 && !initial_buffering_bus.load(Ordering::Relaxed) {
-                            // During playback (not initial buffering): resume
-                            // from a buffer underrun pause when buffer refills
-                            // to 50%.
-                            let (_, current, _) = pipe.state(gstreamer::ClockTime::from_mseconds(0));
-                            if current == State::Paused {
+                            } else if current == State::Ready && pending == State::Paused {
+                                // Pipeline is stuck at Ready→Paused because async
+                                // sinks haven't prerolled yet (even with async-
+                                // handling, this can happen during the initial
+                                // startup). Override the pending state to Playing
+                                // so the pipeline transitions to Playing once the
+                                // async elements catch up.
                                 tracing::info!(
                                     percent = percent,
-                                    "buffer recovered to 50% — resuming playback"
+                                    "buffer full but pipeline stuck at Ready→Paused — \
+                                     forcing transition to Playing"
                                 );
                                 let _ = pipe.set_state(State::Playing);
                             }
-                        } else if percent < 2 && !initial_buffering_bus.load(Ordering::Relaxed) {
-                            // Buffer critically low during playback — pause to
-                            // refill. Only pause if we're NOT in initial
-                            // buffering (we're already paused then).
+                        } else if percent < 15 && !initial_buffering_bus.load(Ordering::Relaxed) {
+                            // Buffer low during playback — pause to refill.
+                            // Only pause if we're NOT in initial buffering
+                            // (we're already paused then).
+                            // Pause at 15% instead of 2% — this gives the
+                            // buffer more time to refill before it's completely
+                            // empty, and avoids the rapid cycling that occurs
+                            // when the buffer hits 0%.
                             let (_, current, _) = pipe.state(gstreamer::ClockTime::from_mseconds(0));
                             if current == State::Playing {
                                 tracing::warn!(
                                     percent = percent,
-                                    "buffer critically low (<2%) — pausing to refill"
+                                    "buffer low (<15%) — pausing to refill"
                                 );
                                 let _ = pipe.set_state(State::Paused);
                             }
@@ -1364,10 +1380,29 @@ impl PlaybackEngine {
                                                 "parsebin source pad"
                                             );
 
-                                            if is_video && is_linked {
+                                            // A pad is considered "linked" if it's connected
+                                            // downstream, even if caps negotiation hasn't
+                                            // completed yet (media_type may be empty during
+                                            // early startup). We check BOTH is_linked and
+                                            // the pad's template caps to determine media type,
+                                            // since current_caps() may not be available yet.
+                                            let effective_is_video = is_video
+                                                || (!media_type.contains("audio/")
+                                                    && pad.query_caps(None)
+                                                        .structure(0)
+                                                        .map(|s| s.name().starts_with("video/"))
+                                                        .unwrap_or(false));
+                                            let effective_is_audio = is_audio
+                                                || (media_type.contains("audio/")
+                                                    || pad.query_caps(None)
+                                                        .structure(0)
+                                                        .map(|s| s.name().starts_with("audio/"))
+                                                        .unwrap_or(false));
+
+                                            if effective_is_video && is_linked {
                                                 video_linked = true;
                                             }
-                                            if is_audio && is_linked {
+                                            if effective_is_audio && is_linked {
                                                 audio_linked = true;
                                             }
                                             pad_count += 1;
