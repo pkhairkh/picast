@@ -134,7 +134,7 @@ impl MediaProxy {
                 tokio::select! {
                     accept_result = listener.accept() => {
                         match accept_result {
-                            Ok((stream, peer)) => {
+                            Ok((mut stream, peer)) => {
                                 let client = client.clone();
                                 let cdn_url = cdn_url.clone();
                                 let source_url = source_url.clone();

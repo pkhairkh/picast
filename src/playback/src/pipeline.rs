@@ -55,7 +55,6 @@
 
 use crate::{BufferHealth, PipelineConfig, PlaybackError};
 use crate::media_proxy::MediaProxy;
-use crate::socks_forwarder::SocksForwarder;
 use gstreamer::prelude::*;
 use gstreamer::{Element, ElementFactory, Pipeline, State};
 #[cfg(feature = "hevc")]
