@@ -267,8 +267,8 @@ impl GstPipeline {
 
             // Create appsrc element for pushing downloaded data.
             let appsrc = ElementFactory::make("appsrc")
-                .property("stream-type", 0i32) // GST_APP_STREAM_TYPE_STREAM — sequential, no seeking
-                .property("format", 2i32) // GST_FORMAT_BYTES
+                .property_from_str("stream-type", "stream") // GST_APP_STREAM_TYPE_STREAM — sequential, no seeking
+                .property_from_str("format", "bytes") // GST_FORMAT_BYTES
                 .property("is-live", false)
                 .property("block", false) // Don't block push-buffer when queue is full
                 .build()
@@ -1457,9 +1457,9 @@ impl GstPipeline {
                 .map_err(|e| PlaybackError::PipelineCreation(format!("hevc appsink: {}", e)))?;
 
             let appsrc = ElementFactory::make("appsrc")
-                .property("format", 1i32) // GST_FORMAT_TIME
+                .property_from_str("format", "time") // GST_FORMAT_TIME
                 .property_from_str("caps", "video/x-raw,format=NV12")
-                .property("stream-type", 0i32) // GST_APP_STREAM_TYPE_STREAM
+                .property_from_str("stream-type", "stream") // GST_APP_STREAM_TYPE_STREAM
                 .build()
                 .map_err(|e| PlaybackError::PipelineCreation(format!("hevc appsrc: {}", e)))?;
 
