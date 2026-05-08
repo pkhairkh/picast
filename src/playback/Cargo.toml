@@ -2,14 +2,16 @@
 name = "picast-playback"
 version.workspace = true
 edition.workspace = true
-description = "GStreamer playback engine with V4L2 H.264 hardware decode for PiCast"
+description = "GStreamer playback engine with V4L2 H.264/H.265 hardware decode for PiCast"
 
 [features]
 default = []
-hw = ["gstreamer", "picast-display/hw"]
+hw = ["gstreamer", "picast-display/hw", "picast-v3d/hw"]
+hevc = []  # Enable HEVC/H.265 decode support (requires V3D compute shader for SAND→NV12)
 
 [dependencies]
 picast-display = { path = "../display", default-features = false }
+picast-v3d = { path = "../v3d", default-features = false }
 gstreamer = { version = "0.23", optional = true }
 # gstreamer-app = { version = "0.23", optional = true }    # Future: for AppSink/AppSrc
 # gstreamer-video = { version = "0.23", optional = true }  # Future: for video caps helpers

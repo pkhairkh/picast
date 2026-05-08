@@ -1,0 +1,33 @@
+[package]
+name = "picast-v3d"
+version.workspace = true
+edition.workspace = true
+description = "V3D GPU compute shader engine for SAND→NV12 near-zero-copy conversion on Raspberry Pi"
+
+[features]
+default = []
+hw = ["glow", "nix", "libloading"]
+
+[dependencies]
+thiserror = { workspace = true }
+tracing = { workspace = true }
+anyhow = { workspace = true }
+
+# OpenGL ES 3.1 bindings — used for compute shader dispatch on V3D.
+# `glow` provides a safe, cross-platform GL wrapper that supports GLES 3.1
+# compute shaders via `glDispatchCompute()`, `glBindBufferBase()`, SSBOs, etc.
+glow = { version = "0.16", optional = true }
+
+# Low-level Linux APIs: `memfd_create` for zero-copy buffer allocation,
+# `ioctl` for DRM/V3D ioctls, `mmap` for buffer mapping.
+nix = { version = "0.29", features = ["mman", "ioctl", "fs"], optional = true }
+
+# Dynamic loading of libEGL.so and libGLESv2.so at runtime.
+# We use `libloading` instead of linking directly because:
+# 1. The Pi may not have EGL/GLES dev headers installed at build time
+# 2. We need to control the EGL platform (GBM vs device) at runtime
+# 3. Avoids hard dependency on Mesa at compile time
+libloading = { version = "0.8", optional = true }
+
+[dev-dependencies]
+tokio = { workspace = true }

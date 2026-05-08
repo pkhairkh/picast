@@ -6,6 +6,7 @@ members = [
     "src/resolver",
     "src/playback",
     "src/display",
+    "src/v3d",
     "src/tor",
 ]
 resolver = "2"

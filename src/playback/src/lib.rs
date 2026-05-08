@@ -380,8 +380,12 @@ impl Default for BufferHealth {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum DecodeMode {
-    /// Hardware-accelerated V4L2 M2M decode.
+    /// Hardware-accelerated V4L2 M2M H.264 decode.
     Hardware,
+    /// Hardware-accelerated V4L2 stateless HEVC decode with V3D SAND→NV12 conversion.
+    HevcV3d,
+    /// Hardware-accelerated V4L2 stateless HEVC decode with ISP SAND→NV12 conversion.
+    HevcIsp,
     /// Software decode fallback (avdec_h264).
     Software,
 }
@@ -390,6 +394,8 @@ impl std::fmt::Display for DecodeMode {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             DecodeMode::Hardware => write!(f, "hardware"),
+            DecodeMode::HevcV3d => write!(f, "hevc_v3d"),
+            DecodeMode::HevcIsp => write!(f, "hevc_isp"),
             DecodeMode::Software => write!(f, "software"),
         }
     }
