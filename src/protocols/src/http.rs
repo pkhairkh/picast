@@ -525,6 +525,58 @@ fn list_alsa_devices() -> Vec<AlsaDevice> {
         }
     }
 
+    // Check for BlueALSA — if running without PulseAudio, BlueALSA provides
+    // ALSA PCM devices for Bluetooth audio. The `bluealsa-aplay` utility
+    // can list connected devices. If BlueALSA's D-Bus service is available
+    // and a Bluetooth audio device is connected, we add it as an option.
+    // The BlueALSA ALSA plugin uses device strings like:
+    //   "bluealsa:DEV=XX:XX:XX:XX:XX:XX,PROFILE=a2dp"
+    // But these don't show up in /proc/asound — they're a special ALSA
+    // plugin, not a regular PCM device. We detect them by checking for
+    // the bluealsa daemon or by trying to list connected BT devices.
+    if !devices.iter().any(|d| d.card_name.contains("PulseAudio")) {
+        // Only check BlueALSA if PulseAudio isn't running (they conflict).
+        // Check for bluealsa daemon via its D-Bus name or PID file.
+        let bluealsa_running = std::path::Path::new("/var/run/bluealsa").exists()
+            || std::path::Path::new("/run/bluealsa").exists()
+            || std::process::Command::new("dbus-send")
+                .args([
+                    "--system", "--dest=org.bluealsa", "/org/bluealsa",
+                    "org.freedesktop.DBus.Introspectable.Introspect",
+                ])
+                .output()
+                .map(|o| o.status.success())
+                .unwrap_or(false);
+
+        if bluealsa_running {
+            // Try to list connected Bluetooth audio devices via bluetoothctl
+            if let Ok(output) = std::process::Command::new("bluetoothctl")
+                .args(["devices", "Connected"])
+                .output()
+            {
+                if let Ok(stdout) = String::from_utf8(output.stdout) {
+                    for line in stdout.lines() {
+                        // Format: "Device XX:XX:XX:XX:XX:XX Device Name"
+                        if let Some(rest) = line.strip_prefix("Device ") {
+                            let parts: Vec<&str> = rest.splitn(2, ' ').collect();
+                            if parts.len() >= 2 {
+                                let bt_addr = parts[0];
+                                let bt_name = parts[1];
+                                devices.push(AlsaDevice {
+                                    device: format!("bluealsa:DEV={},PROFILE=a2dp", bt_addr),
+                                    card_name: format!("Bluetooth ({})", bt_name),
+                                    card_index: 98,
+                                    device_index: 0,
+                                    sink_type: "alsasink".into(),
+                                });
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+
     // Parse /proc/asound/cards for card indices and names.
     // Format: " 0 [Headphones   ]: ... - bcm2835 Headphones ..."
     //         " 1 [vc4hdmi0     ]: ... - vc4-hdmi ..."
@@ -607,9 +659,22 @@ fn list_alsa_devices() -> Vec<AlsaDevice> {
                 .find(|(idx, _, _)| *idx == card_idx)
                 .map(|(_, _, long)| long.as_str())
                 .unwrap_or("Unknown");
+            // Detect Bluetooth audio devices for better labelling.
+            // BlueALSA devices appear in /proc/asound with names like
+            // "bluealsa" or the actual headset/speaker name.
+            let is_bluetooth = card_name.to_lowercase().contains("bluealsa")
+                || card_name.to_lowercase().contains("bluez")
+                || card_name.to_lowercase().contains("bluetooth")
+                || card_name.to_lowercase().contains("bt_headset")
+                || card_name.to_lowercase().contains("bt_speaker");
+            let display_name = if is_bluetooth {
+                format!("Bluetooth ({})", card_name)
+            } else {
+                card_name.to_string()
+            };
             devices.push(AlsaDevice {
                 device: format!("plughw:{},{}", card_idx, dev_idx),
-                card_name: card_name.to_string(),
+                card_name: display_name,
                 card_index: card_idx,
                 device_index: dev_idx,
                 sink_type: "alsasink".into(),

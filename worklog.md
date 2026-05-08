@@ -91,3 +91,34 @@ Stage Summary:
 - Proactive CDN IP check prevents 403 before it happens
 - is_cdn_retryable_error() now matches both proactive and reactive 403 cases
 - User needs to `git pull && ./deploy.sh` on the Pi to test
+
+---
+Task ID: 5
+Agent: main
+Task: Fix false "NO video pad linked" alarm, low FPS log spam, and Bluetooth audio auto-detection
+
+Work Log:
+- Diagnosed three issues from user's deployment logs:
+  1. False "NO video pad linked after 8s" alarm — diagnostic used bin.by_name("parsebin0") but actual name was "parsebin3" (GStreamer auto-increments element names across pipelines)
+  2. Buffering log spam — 0↔1 oscillation generated hundreds of log lines/second, overwhelming Pi's SD card I/O
+  3. No sound on Bluetooth — detect_hdmi_audio_device() only detected HDMI cards, not Bluetooth
+- Fixed parsebin lookup: replaced bin.by_name("parsebin0") with iterate_elements() + factory name check
+- Added rate-limiting to buffering logs: only log when percent changes by >=5% or crosses key thresholds (10%, 25%, 50%, 75%, 80%, 90%, 100%)
+- Added last_buffering_percent AtomicU8 for tracking previous percent value
+- Renamed detect_hdmi_audio_device() → detect_audio_device() with Bluetooth priority:
+  - Priority 1: Bluetooth card from /proc/asound (bluealsa/bluez/bt keywords)
+  - Priority 1b: BlueALSA plugin device (bluealsa:DEV=XX:XX:XX,PROFILE=a2dp)
+  - Priority 2: HDMI card
+  - Priority 3: Fallback plughw:1,0
+- Added BlueALSA device detection in HTTP API (/api/audio-devices)
+- Added Bluetooth labelling in ALSA device listing
+- Improved queue2 config: added max-size-time=30s, lowered low-percent from 10% to 5%
+- Updated bus watch buffering handler to use new low-percent threshold of 5%
+- Build compiles successfully with no warnings
+
+Stage Summary:
+- False alarm fixed: parsebin found by factory name instead of hardcoded element name
+- Log spam fixed: only ~5-10 buffering log lines per session instead of hundreds
+- Bluetooth audio: auto-detected and prioritized on startup
+- Low FPS: queue2 now buffers 30s of media data and pauses less aggressively (5% vs 10%)
+- All changes in: lib.rs, pipeline.rs, http.rs

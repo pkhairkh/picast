@@ -192,7 +192,25 @@ impl Default for PipelineConfig {
 /// - Card 1: vc4hdmi0 (HDMI 0 audio)
 /// - Card 2: vc4hdmi1 (HDMI 1 audio, if dual HDMI)
 fn detect_hdmi_audio_device() -> String {
-    // Parse /proc/asound/cards for HDMI cards
+    detect_audio_device()
+}
+
+/// Auto-detect the best audio output device on Raspberry Pi.
+///
+/// Detection priority (highest to lowest):
+/// 1. **Bluetooth (BlueALSA)** — if a Bluetooth audio device is connected,
+///    this is almost always what the user wants. BlueALSA exposes the
+///    device as an ALSA pcm device (e.g. `plughw:CARD=XXXX,DEV=0`).
+/// 2. **HDMI** — common when the Pi is connected to a TV/monitor.
+/// 3. **Fallback** — `plughw:1,0` which is the most common HDMI device
+///    on Pi 4.
+///
+/// On Pi 4, the typical ALSA card layout is:
+/// - Card 0: Headphones (bcm2835, 3.5mm jack)
+/// - Card 1: vc4hdmi0 (HDMI 0 audio)
+/// - Card 2: vc4hdmi1 (HDMI 1 audio, if dual HDMI)
+/// - Card N: Bluetooth device (name varies by headset/speaker)
+fn detect_audio_device() -> String {
     let cards_content = match std::fs::read_to_string("/proc/asound/cards") {
         Ok(c) => c,
         Err(_) => {
@@ -205,8 +223,10 @@ fn detect_hdmi_audio_device() -> String {
     };
 
     // Parse card entries: "index [shortname]: ... - longname"
-    // Look for cards with "hdmi" in the short or long name
-    let mut cards: Vec<(u32, String)> = Vec::new(); // (card_index, short_name)
+    let mut bt_cards: Vec<(u32, String)> = Vec::new(); // Bluetooth cards
+    let mut hdmi_cards: Vec<(u32, String)> = Vec::new(); // HDMI cards
+    let mut all_cards: Vec<(u32, String, String)> = Vec::new(); // (index, short_name, long_name)
+
     for line in cards_content.lines() {
         let line = line.trim();
         if line.is_empty() {
@@ -225,27 +245,102 @@ fn detect_hdmi_audio_device() -> String {
                         .nth(1)
                         .map(|s| s.trim().to_lowercase())
                         .unwrap_or_default();
+
+                    all_cards.push((card_idx, short_name.clone(), long_name.clone()));
+
+                    // Detect Bluetooth audio devices. BlueALSA registers
+                    // cards with names containing "bluealsa" or the BT
+                    // device name. Some BT adapters show up as "headphones",
+                    // "speaker", etc. We check for common Bluetooth-related
+                    // keywords in both short and long names.
+                    let is_bluetooth = short_name.contains("bluealsa")
+                        || short_name.contains("bluez")
+                        || short_name.contains("bt");
+                    // Also check long name for Bluetooth device names
+                    let is_bluetooth_long = long_name.contains("bluealsa")
+                        || long_name.contains("bluez")
+                        || long_name.contains("bluetooth")
+                        || long_name.contains("bt_headset")
+                        || long_name.contains("bt_speaker");
+
+                    if is_bluetooth || is_bluetooth_long {
+                        bt_cards.push((card_idx, short_name.clone()));
+                    }
+
                     if short_name.contains("hdmi") || long_name.contains("hdmi") {
-                        cards.push((card_idx, short_name));
+                        hdmi_cards.push((card_idx, short_name.clone()));
                     }
                 }
             }
         }
     }
 
-    if let Some((card_idx, name)) = cards.first() {
+    // Priority 1: Bluetooth device (from /proc/asound — BlueALSA plugin cards)
+    if let Some((card_idx, name)) = bt_cards.first() {
+        tracing::info!(
+            card_index = card_idx,
+            card_name = %name,
+            "audio auto-detect: found Bluetooth audio card — using as default"
+        );
+        return format!("plughw:{},0", card_idx);
+    }
+
+    // Priority 1b: BlueALSA plugin (not visible in /proc/asound)
+    // BlueALSA uses a special ALSA plugin device string like
+    // "bluealsa:DEV=XX:XX:XX:XX:XX:XX,PROFILE=a2dp". These don't
+    // appear in /proc/asound/cards, so we detect them by checking
+    // for the bluealsa daemon and listing connected BT devices.
+    let bluealsa_running = std::path::Path::new("/var/run/bluealsa").exists()
+        || std::path::Path::new("/run/bluealsa").exists();
+    if bluealsa_running {
+        // Try to find a connected Bluetooth audio device
+        if let Ok(output) = std::process::Command::new("bluetoothctl")
+            .args(["devices", "Connected"])
+            .output()
+        {
+            if let Ok(stdout) = String::from_utf8(output.stdout) {
+                for line in stdout.lines() {
+                    // Format: "Device XX:XX:XX:XX:XX:XX Device Name"
+                    if let Some(rest) = line.strip_prefix("Device ") {
+                        let parts: Vec<&str> = rest.splitn(2, ' ').collect();
+                        if parts.len() >= 2 {
+                            let bt_addr = parts[0];
+                            tracing::info!(
+                                bt_address = %bt_addr,
+                                "audio auto-detect: found connected Bluetooth device via BlueALSA"
+                            );
+                            return format!("bluealsa:DEV={},PROFILE=a2dp", bt_addr);
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    // Priority 2: HDMI device
+    if let Some((card_idx, name)) = hdmi_cards.first() {
         tracing::info!(
             card_index = card_idx,
             card_name = %name,
             "audio auto-detect: found HDMI audio card"
         );
-        format!("plughw:{},0", card_idx)
-    } else {
-        tracing::info!(
-            "audio auto-detect: no HDMI card found — defaulting to plughw:1,0 (HDMI on Pi 4)"
-        );
-        "plughw:1,0".into()
+        return format!("plughw:{},0", card_idx);
     }
+
+    // Log all detected cards for debugging
+    for (idx, short, long) in &all_cards {
+        tracing::info!(
+            card_index = idx,
+            short_name = %short,
+            long_name = %long,
+            "audio auto-detect: detected ALSA card"
+        );
+    }
+
+    tracing::info!(
+        "audio auto-detect: no HDMI/Bluetooth card found — defaulting to plughw:1,0 (HDMI on Pi 4)"
+    );
+    "plughw:1,0".into()
 }
 
 // ── Buffer Health ────────────────────────────────────────────────────
@@ -672,6 +767,12 @@ impl PlaybackEngine {
         let initial_buffering = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(true));
         let initial_buffering_bus = initial_buffering.clone();
 
+        // Track last buffering percent for rate-limited logging.
+        // u8::MAX (255) means "no previous value" — the first BUFFERING
+        // message is always logged.
+        let last_buffering_percent = std::sync::Arc::new(std::sync::atomic::AtomicU8::new(u8::MAX));
+        let last_buffering_percent_bus = last_buffering_percent.clone();
+
         // Weak reference to the pipeline element for the bus watch to
         // trigger the Paused→Playing auto-transition.
         let pipeline_weak_bus = pipeline.pipeline().downgrade();
@@ -800,7 +901,31 @@ impl PlaybackEngine {
                 },
                 MessageView::Buffering(b) => {
                     let percent = b.percent() as u8;
-                    tracing::info!(percent = percent, "buffering progress");
+                    // Rate-limit buffering logs to avoid I/O overhead on the Pi.
+                    // During Tor-routed streams, the buffer oscillates rapidly
+                    // between 0 and 1, generating hundreds of log lines per
+                    // second that overwhelm the SD card and CPU. Only log when:
+                    //   - The percent changes significantly (>=5% delta)
+                    //   - We cross a key threshold (10%, 25%, 50%, 75%, 80%, 90%, 100%)
+                    //   - First buffering message (previous = None)
+                    let should_log = match last_buffering_percent_bus.load(Ordering::Relaxed) {
+                        u8::MAX => true,  // first message — always log
+                        prev => {
+                            let delta = if percent > prev { percent - prev } else { prev - percent };
+                            delta >= 5
+                                || (prev < 10 && percent >= 10)
+                                || (prev < 25 && percent >= 25)
+                                || (prev < 50 && percent >= 50)
+                                || (prev < 75 && percent >= 75)
+                                || (prev < 80 && percent >= 80)
+                                || (prev < 90 && percent >= 90)
+                                || percent == 100
+                        }
+                    };
+                    last_buffering_percent_bus.store(percent, Ordering::Relaxed);
+                    if should_log {
+                        tracing::info!(percent = percent, "buffering progress");
+                    }
                     let _ = event_tx.send(PlaybackEvent::Buffering { percent });
 
                     // With use-buffering=true on queue2, we must handle
@@ -839,7 +964,7 @@ impl PlaybackEngine {
                                 );
                                 let _ = pipe.set_state(State::Playing);
                             }
-                        } else if percent < 10 && !initial_buffering_bus.load(Ordering::Relaxed) {
+                        } else if percent < 5 && !initial_buffering_bus.load(Ordering::Relaxed) {
                             // Buffer too low during playback — pause to refill.
                             // Only pause if we're NOT in initial buffering (we're
                             // already paused during initial buffering).
@@ -934,7 +1059,33 @@ impl PlaybackEngine {
 
                             // Check parsebin's source pads directly — this is the
                             // authoritative way to determine linkage.
-                            if let Some(parsebin_elem) = bin.by_name("parsebin0") {
+                            //
+                            // IMPORTANT: We must find parsebin by factory name, not by
+                            // element name. GStreamer auto-generates element names with
+                            // a counter suffix (parsebin0, parsebin1, parsebin2, …), and
+                            // the counter resets only when the process restarts. If the
+                            // user casts multiple videos, the second pipeline's parsebin
+                            // will be named "parsebin1", not "parsebin0", causing the
+                            // lookup to fail and a false "NO video pad linked" alarm.
+                            // Walk the pipeline's top-level elements to find parsebin
+                            // by factory name (not element name — see comment above).
+                            let mut parsebin_elem_opt: Option<gstreamer::Element> = None;
+                            let mut elem_iter = bin.iterate_elements();
+                            loop {
+                                match elem_iter.next() {
+                                    Ok(Some(e)) => {
+                                        if e.factory()
+                                            .map(|f: gstreamer::ElementFactory| f.name() == "parsebin")
+                                            .unwrap_or(false)
+                                        {
+                                            parsebin_elem_opt = Some(e);
+                                            break;
+                                        }
+                                    },
+                                    Ok(None) | Err(_) => break,
+                                }
+                            }
+                            if let Some(parsebin_elem) = parsebin_elem_opt {
                                 let mut pad_iter = parsebin_elem.iterate_src_pads();
                                 let mut pad_count = 0;
                                 loop {

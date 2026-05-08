@@ -325,11 +325,21 @@ impl GstPipeline {
         // reaches high-percent, ensuring enough data is buffered before
         // playback starts. This prevents the "buffer underrun → low FPS"
         // cycle.
+        //
+        // max-size-time is set to 30 seconds of media data — this gives
+        // queue2 a time-based buffer limit in addition to the byte limit.
+        // Without max-size-time, queue2 may not buffer enough seconds of
+        // media data even with 100 MB of bytes (the actual duration depends
+        // on the video bitrate, which varies from ~1 Mbps for 360p to
+        // ~10 Mbps for 1080p). Setting both limits ensures the buffer
+        // holds at least 30 seconds of playback, giving Tor enough time
+        // to recover from throughput dips.
         let queue2 = ElementFactory::make("queue2")
-            .property("max-size-bytes", 100_000_000u32) // 100 MB — large buffer for Tor
+            .property("max-size-bytes", 100_000_000u32) // 100 MB — large byte buffer for Tor
+            .property("max-size-time", 30_000_000_000u64) // 30 seconds of media data
             .property("use-buffering", true)
             .property("high-percent", 80i32)  // start playing when 80% full
-            .property("low-percent", 10i32)   // pause when buffer drops to 10%
+            .property("low-percent", 5i32)    // pause when buffer drops to 5% (was 10% — lower threshold avoids excessive pause/resume cycling on slow Tor links)
             .build()
             .map_err(|e| PlaybackError::PipelineCreation(format!("queue2: {}", e)))?;
 
