@@ -300,10 +300,14 @@ impl StreamSource {
             }
 
             // Send request
-            let response = match client
-                .execute(req.build().map_err(|e| format!("build request: {}", e))?)
-                .await
-            {
+            let built_req = match req.build() {
+                Ok(r) => r,
+                Err(e) => {
+                    tracing::error!(error = %e, "stream source: failed to build request");
+                    return;
+                },
+            };
+            let response = match client.execute(built_req).await {
                 Ok(r) => r,
                 Err(e) => {
                     tracing::error!(error = %e, "stream source: CDN request failed");

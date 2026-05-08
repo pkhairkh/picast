@@ -225,7 +225,7 @@ impl GstPipeline {
         //
         // Loopback URLs use souphttpsrc directly (no Tor/proxy needed).
 
-        let mut media_proxy = None;
+        let media_proxy = None;
         let mut stream_source = None;
         let mut push_cancel = None;
 
