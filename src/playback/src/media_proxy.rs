@@ -56,6 +56,16 @@ pub struct MediaProxy {
     /// the same Tor circuit as the resolver (same exit IP → CDN
     /// IP-binding token matches).
     _socks_forwarder: SocksForwarder,
+    /// The reqwest client used for CDN requests. Kept here so the
+    /// preflight check can use the same client that the streaming
+    /// server uses.
+    client: reqwest::Client,
+    /// CDN URL being proxied.
+    cdn_url: String,
+    /// Source URL for Referer header.
+    source_url: String,
+    /// Cookies from the resolver session.
+    cookies: Vec<String>,
 }
 
 impl MediaProxy {
@@ -154,7 +164,7 @@ impl MediaProxy {
                 tokio::select! {
                     accept_result = listener.accept() => {
                         match accept_result {
-                            Ok((mut stream, peer)) => {
+                            Ok((stream, peer)) => {
                                 let client = client.clone();
                                 let cdn_url = cdn_url.clone();
                                 let source_url = source_url.clone();
@@ -234,7 +244,77 @@ impl MediaProxy {
             local_addr,
             shutdown_tx: Some(shutdown_tx),
             _socks_forwarder: socks_forwarder,
+            client: client.clone(),
+            cdn_url,
+            source_url,
+            cookies,
         })
+    }
+
+    /// Preflight check: verify the CDN accepts requests from this
+    /// Tor circuit before building the GStreamer pipeline.
+    ///
+    /// Makes a quick HEAD request to the CDN with the same headers
+    /// and cookies that the streaming proxy would use. If the CDN
+    /// returns 403, we return an error immediately — before the
+    /// pipeline is constructed — so the session layer's retry loop
+    /// can re-resolve through a different Tor circuit.
+    ///
+    /// This is critical because the CDN 403 detection in the
+    /// GStreamer bus watch is asynchronous: by the time the 403
+    /// arrives, `play()` has already returned `Ok(())`, so the
+    /// session's retry loop never triggers. The preflight check
+    /// makes CDN 403s synchronous errors that the retry loop can
+    /// handle.
+    pub async fn preflight_check(&self) -> Result<(), String> {
+        let mut req = self.client
+            .head(&self.cdn_url)
+            .header("Accept", "*/*")
+            .header("Accept-Encoding", "identity;q=1, *;q=0")
+            .header("sec-ch-ua", r#""Chromium";v="131", "Not_A Brand";v="24""#)
+            .header("sec-ch-ua-mobile", "?0")
+            .header("sec-ch-ua-platform", "\"Windows\"")
+            .header("Sec-Fetch-Dest", "video")
+            .header("Sec-Fetch-Mode", "no-cors")
+            .header("Sec-Fetch-Site", "cross-site");
+
+        if !self.source_url.is_empty() {
+            req = req.header("Referer", &self.source_url);
+        }
+
+        if !self.cookies.is_empty() {
+            let cookie_header = self.cookies.join("; ");
+            req = req.header("Cookie", &cookie_header);
+        }
+
+        let response = self.client
+            .execute(req.build().map_err(|e| format!("preflight: build request: {}", e))?)
+            .await
+            .map_err(|e| format!("preflight: CDN request failed: {}", e))?;
+
+        let status = response.status();
+        tracing::info!(
+            status = %status,
+            "media proxy: preflight CDN check"
+        );
+
+        if status.as_u16() == 403 {
+            return Err(format!(
+                "CDN 403 Forbidden — re-resolve needed (exit IP may be blocked by CDN anti-bot)"
+            ));
+        }
+
+        // Accept 200 OK and 206 Partial Content (Range request).
+        // Other status codes (4xx, 5xx) are also errors.
+        if !status.is_success() && status.as_u16() != 206 {
+            return Err(format!(
+                "CDN returned {} {} — cannot stream",
+                status.as_u16(),
+                status.canonical_reason().unwrap_or("Unknown")
+            ));
+        }
+
+        Ok(())
     }
 
     /// The HTTP URL for souphttpsrc to connect to (e.g. "http://127.0.0.1:42321/").

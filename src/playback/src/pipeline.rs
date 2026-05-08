@@ -223,6 +223,23 @@ impl GstPipeline {
             .await
             {
                 Ok(proxy) => {
+                    // Preflight check: verify the CDN accepts requests from
+                    // this Tor circuit BEFORE building the GStreamer pipeline.
+                    // If the CDN returns 403, we fail immediately so the
+                    // session layer's retry loop can re-resolve through a
+                    // different Tor circuit. Without this check, the 403
+                    // arrives asynchronously after play() returns Ok(()),
+                    // and the retry loop never triggers.
+                    if let Err(e) = proxy.preflight_check().await {
+                        tracing::warn!(
+                            error = %e,
+                            "media proxy: preflight CDN check failed — CDN rejects this Tor circuit, re-resolve needed"
+                        );
+                        return Err(PlaybackError::PipelineCreation(format!(
+                            "CDN 403 Forbidden — re-resolve needed"
+                        )));
+                    }
+
                     let local_url = proxy.local_url();
                     tracing::info!(
                         local_url = %local_url,

@@ -782,8 +782,14 @@ impl SessionManager {
         // we invalidate the resolver cache, re-resolve the URL through the
         // current Tor circuit, and retry playback. This ensures the CDN
         // token is bound to the current exit IP. Maximum 2 retries.
+        //
+        // On each retry, we append the attempt number to the isolation
+        // username so Tor creates a NEW circuit with a DIFFERENT exit
+        // node. If the CDN blocks the first exit IP (some Tor exits are
+        // known to CDNs), rotating to a new circuit gives us a chance
+        // of getting an unblocked exit.
         let socks_addr = self.tor.as_ref().map(|t| t.socks_addr()).unwrap_or_default();
-        let isolation_username = self
+        let base_isolation = self
             .tor
             .as_ref()
             .map(|t| {
@@ -803,6 +809,26 @@ impl SessionManager {
 
         loop {
             attempt += 1;
+
+            // On retry (>1), append the attempt number to the isolation
+            // username to force Tor to build a NEW circuit with a different
+            // exit node. The base username is deterministic for the domain,
+            // so attempt 1 always gets the same circuit. But on retry,
+            // "picast-abc123-retry2" maps to a different circuit than
+            // "picast-abc123", giving us a fresh exit IP.
+            let isolation_username = if attempt > 1 {
+                format!("{}-retry{}", base_isolation, attempt)
+            } else {
+                base_isolation.clone()
+            };
+
+            if attempt > 1 {
+                tracing::info!(
+                    attempt = attempt,
+                    isolation_username = %isolation_username,
+                    "CDN retry: using new Tor circuit (different exit IP)"
+                );
+            }
 
             if let Some(ref playback) = self.playback {
                 let play_result = playback
