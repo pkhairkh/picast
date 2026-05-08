@@ -178,6 +178,103 @@ const DOODSTREAM_DOMAINS: &[&str] = &[
     "dood.cx",
 ];
 
+/// Check if a URL points to an HLS playlist (.m3u8).
+///
+/// HLS playlists are text files that reference multiple segment URLs.
+/// The `appsrc` + `StreamSource` pipeline CANNOT handle HLS — it only
+/// supports sequential byte streams (single MP4 files). When an HLS URL
+/// is returned by the resolver, the pipeline downloads the tiny playlist
+/// text and pushes it into appsrc, but parsebin/hlsdemux can't fetch the
+/// individual segments because there's no souphttpsrc to make HTTP requests.
+/// The result is no video output or extremely low FPS (1 fps).
+///
+/// ALL HLS URLs must be skipped in favor of direct MP4 URLs.
+fn is_hls_url(url: &str) -> bool {
+    let lower = url.to_lowercase();
+    lower.contains(".m3u8")
+}
+
+/// Extract a media URL from a JSON value, handling both simple strings
+/// and objects with multiple quality levels.
+///
+/// Voe's deobfuscated JSON can have `mp4` as either:
+/// - A simple string: `"mp4": "https://cdn.example.com/video.mp4"`
+/// - An object with quality levels: `"mp4": {"720": "url1", "1080": "url2"}`
+///
+/// When it's an object, we select the best quality for the Raspberry Pi 4's
+/// V4L2 hardware decoder:
+/// - Prefer 720p (optimal for Pi 4's H.264 HW decode)
+/// - Fall back to 480p, 360p (lower quality, but works)
+/// - Use 1080p only as last resort (may lag on some Pi 4 configs)
+///
+/// Returns `None` if the value is neither a string nor a quality-level object,
+/// or if all extracted URLs are HLS playlists.
+fn extract_media_from_json_value(value: &serde_json::Value) -> Option<String> {
+    // Case 1: Simple string URL
+    if let Some(url) = value.as_str() {
+        if !url.is_empty() && !is_hls_url(url) {
+            return Some(url.to_owned());
+        }
+        if is_hls_url(url) {
+            tracing::debug!(url = %url, "skipping HLS URL from JSON value — appsrc pipeline cannot handle HLS");
+        }
+        return None;
+    }
+
+    // Case 2: Object with quality levels (e.g., {"720": "url", "1080": "url"})
+    if let Some(obj) = value.as_object() {
+        // Quality preference order for Pi 4 V4L2 HW decode:
+        // 720p is the sweet spot — full hardware decode support, reasonable bitrate
+        // 1080p may work but pushes the V4L2 decoder's limits
+        // Lower qualities are fine but lower visual quality
+        let quality_order = ["720", "480", "360", "240", "1080"];
+
+        for quality in &quality_order {
+            if let Some(url_val) = obj.get(*quality) {
+                if let Some(url) = url_val.as_str() {
+                    if !url.is_empty() && !is_hls_url(url) {
+                        tracing::info!(
+                            quality = %quality,
+                            url = %url,
+                            "Voe: selected MP4 quality level from multi-quality object"
+                        );
+                        return Some(url.to_owned());
+                    }
+                    if is_hls_url(url) {
+                        tracing::debug!(
+                            quality = %quality,
+                            url = %url,
+                            "skipping HLS URL at quality level"
+                        );
+                    }
+                }
+            }
+        }
+
+        // No preferred quality level found — try any key in the object
+        for (key, url_val) in obj {
+            if let Some(url) = url_val.as_str() {
+                if !url.is_empty() && !is_hls_url(url) {
+                    tracing::info!(
+                        quality = %key,
+                        url = %url,
+                        "Voe: selected MP4 from object (non-standard quality key)"
+                    );
+                    return Some(url.to_owned());
+                }
+            }
+        }
+
+        tracing::warn!(
+            keys = ?obj.keys().collect::<Vec<_>>(),
+            "Voe: mp4 object contained no usable non-HLS URLs"
+        );
+        return None;
+    }
+
+    None
+}
+
 /// Known bait/test video domains and filenames that Voe and DoodStream
 /// use as decoy sources to foil scrapers.
 const BAIT_DOMAINS: &[&str] =
@@ -283,7 +380,7 @@ pub fn is_doodstream_domain(host: &str) -> bool {
 /// 2. Try Method 8: decode the obfuscated JSON in `<script type="application/json">`.
 /// 3. Try Method 7: decode the MKGMa-encoded source.
 /// 4. Try Method 6: decode the `a168c` Base64-encoded source.
-/// 5. Fallback: search for `var source = '...'` and direct `.mp4`/`.m3u8` URLs.
+/// 5. Fallback: search for `var source = '...'` and direct `.mp4` URLs (no HLS).
 ///
 /// `socks5_proxy` should be a full SOCKS5h proxy URL with isolation
 /// username, e.g. `socks5h://picast-abc123@127.0.0.1:9050`. This ensures
@@ -550,31 +647,65 @@ fn deobfuscate_embedded_json(raw_json: &str) -> Option<String> {
     let step6 = safe_b64_decode(&step5)?;
 
     // Try to parse as JSON and extract media URL
+    //
+    // URL extraction priority:
+    //   1. "mp4" key — direct MP4 URL (preferred, always works with appsrc)
+    //   2. "direct_access_url" — CDN direct URL (may be HLS, skip if so)
+    //   3. "source" — source URL (may be HLS, skip if so)
+    //   4. Regex fallback — search for .mp4 URLs in the text
+    //
+    // HLS (.m3u8) URLs are NEVER returned because the appsrc pipeline
+    // cannot handle them. HLS requires fetching multiple segment URLs,
+    // which appsrc's sequential byte-stream model can't provide.
+    //
+    // The "mp4" key is tried FIRST because:
+    //   - It always provides a direct MP4 URL (or multi-quality object)
+    //   - The other keys ("direct_access_url", "source") may return HLS URLs
+    //   - Previously, "direct_access_url" was tried first, causing the
+    //     resolver to return HLS URLs when "mp4" was a multi-quality object
+    //     (the .as_str() call failed on the object, falling through to "hls")
     if let Ok(parsed) = serde_json::from_str::<serde_json::Value>(&step6) {
         if let Some(obj) = parsed.as_object() {
+            // Priority 1: "mp4" key — direct MP4 URL or multi-quality object
+            if let Some(mp4_val) = obj.get("mp4") {
+                if let Some(url) = extract_media_from_json_value(mp4_val) {
+                    tracing::debug!(url = %url, "Voe method8: extracted MP4 URL from 'mp4' key");
+                    return Some(url);
+                }
+            }
+
+            // Priority 2: "direct_access_url" — skip if HLS
             if let Some(url) = obj.get("direct_access_url").and_then(|v| v.as_str()) {
-                if !url.is_empty() {
+                if !url.is_empty() && !is_hls_url(url) {
+                    tracing::debug!(url = %url, "Voe method8: extracted URL from 'direct_access_url'");
                     return Some(url.to_owned());
                 }
+                if is_hls_url(url) {
+                    tracing::debug!(url = %url, "Voe method8: skipping HLS URL in 'direct_access_url'");
+                }
             }
+
+            // Priority 3: "source" — skip if HLS
             if let Some(url) = obj.get("source").and_then(|v| v.as_str()) {
-                if !url.is_empty() {
+                if !url.is_empty() && !is_hls_url(url) {
+                    tracing::debug!(url = %url, "Voe method8: extracted URL from 'source'");
                     return Some(url.to_owned());
                 }
-            }
-            // Check for mp4/hls keys
-            for key in &["mp4", "hls"] {
-                if let Some(url) = obj.get(*key).and_then(|v| v.as_str()) {
-                    if !url.is_empty() {
-                        return Some(url.to_owned());
-                    }
+                if is_hls_url(url) {
+                    tracing::debug!(url = %url, "Voe method8: skipping HLS URL in 'source'");
                 }
+            }
+
+            // NEVER use the "hls" key — it always returns an HLS playlist
+            // that the appsrc pipeline cannot handle.
+            if obj.contains_key("hls") {
+                tracing::debug!("Voe method8: 'hls' key present but skipped — appsrc pipeline cannot handle HLS");
             }
         }
     }
 
-    // Fallback: regex search for media URLs
-    extract_media_url_from_text(&step6)
+    // Fallback: regex search for media URLs (MP4 only, no .m3u8)
+    extract_mp4_url_from_text(&step6)
 }
 
 // ── Method 7: MKGMa-encoded source ────────────────────────────────
@@ -595,24 +726,37 @@ fn try_method7(html: &str) -> Option<String> {
     let step5: String = step4.chars().rev().collect();
     let step6 = safe_b64_decode(&step5)?;
 
-    // Try JSON parse
+    // Try JSON parse — same priority as method 8:
+    // mp4 first, then direct_access_url, then source. Skip HLS.
     if let Ok(parsed) = serde_json::from_str::<serde_json::Value>(&step6) {
         if let Some(obj) = parsed.as_object() {
+            // Priority 1: "mp4" key
+            if let Some(mp4_val) = obj.get("mp4") {
+                if let Some(url) = extract_media_from_json_value(mp4_val) {
+                    if !is_bait_source(&url) {
+                        return Some(url);
+                    }
+                }
+            }
+
+            // Priority 2: "direct_access_url" — skip if HLS
             if let Some(url) = obj.get("direct_access_url").and_then(|v| v.as_str()) {
-                if !url.is_empty() && !is_bait_source(url) {
+                if !url.is_empty() && !is_bait_source(url) && !is_hls_url(url) {
                     return Some(url.to_owned());
                 }
             }
+
+            // Priority 3: "source" — skip if HLS
             if let Some(url) = obj.get("source").and_then(|v| v.as_str()) {
-                if !url.is_empty() && !is_bait_source(url) {
+                if !url.is_empty() && !is_bait_source(url) && !is_hls_url(url) {
                     return Some(url.to_owned());
                 }
             }
         }
     }
 
-    // Fallback: regex search
-    if let Some(url) = extract_media_url_from_text(&step6) {
+    // Fallback: regex search (MP4 only)
+    if let Some(url) = extract_mp4_url_from_text(&step6) {
         if !is_bait_source(&url) {
             return Some(url);
         }
@@ -638,24 +782,37 @@ fn try_method6(html: &str) -> Option<String> {
         .and_then(|b| String::from_utf8(b).ok())?;
     let reversed: String = decoded.chars().rev().collect();
 
-    // Try JSON parse
+    // Try JSON parse — same priority as method 8:
+    // mp4 first, then direct_access_url, then source. Skip HLS.
     if let Ok(parsed) = serde_json::from_str::<serde_json::Value>(&reversed) {
         if let Some(obj) = parsed.as_object() {
+            // Priority 1: "mp4" key
+            if let Some(mp4_val) = obj.get("mp4") {
+                if let Some(url) = extract_media_from_json_value(mp4_val) {
+                    if !is_bait_source(&url) {
+                        return Some(url);
+                    }
+                }
+            }
+
+            // Priority 2: "direct_access_url" — skip if HLS
             if let Some(url) = obj.get("direct_access_url").and_then(|v| v.as_str()) {
-                if !url.is_empty() && !is_bait_source(url) {
+                if !url.is_empty() && !is_bait_source(url) && !is_hls_url(url) {
                     return Some(url.to_owned());
                 }
             }
+
+            // Priority 3: "source" — skip if HLS
             if let Some(url) = obj.get("source").and_then(|v| v.as_str()) {
-                if !url.is_empty() && !is_bait_source(url) {
+                if !url.is_empty() && !is_bait_source(url) && !is_hls_url(url) {
                     return Some(url.to_owned());
                 }
             }
         }
     }
 
-    // Fallback: regex search
-    if let Some(url) = extract_media_url_from_text(&reversed) {
+    // Fallback: regex search (MP4 only)
+    if let Some(url) = extract_mp4_url_from_text(&reversed) {
         if !is_bait_source(&url) {
             return Some(url);
         }
@@ -705,24 +862,30 @@ fn extract_doodstream_media(embed_html: &str, embed_url: &str) -> Option<String>
         }
     }
 
-    // Try to find direct .mp4 URL in the page
-    extract_media_url_from_text(embed_html)
+    // Try to find direct .mp4 URL in the page (no HLS — appsrc can't handle it)
+    extract_mp4_url_from_text(embed_html)
 }
 
 // ── Fallback URL extraction ────────────────────────────────────────
 
-/// Try fallback methods: look for `var source = '...'`, direct mp4/m3u8 URLs.
+/// Try fallback methods: look for `var source = '...'`, direct mp4 URLs.
+///
+/// HLS (.m3u8) URLs are intentionally EXCLUDED because the appsrc pipeline
+/// cannot handle them. Only direct MP4 URLs are returned.
 fn try_fallback_urls(html: &str) -> Option<String> {
-    // Look for var source = 'https://...'
+    // Look for var source = 'https://...' — skip if HLS
     let re = regex_lite::Regex::new(r#"var\s+source\s*=\s*['"]([^'"]+)['"]"#).ok()?;
     if let Some(cap) = re.captures(html) {
         let url = cap.get(1)?.as_str();
-        if !is_bait_source(url) && !url.is_empty() {
+        if !is_bait_source(url) && !url.is_empty() && !is_hls_url(url) {
             return Some(url.to_owned());
+        }
+        if is_hls_url(url) {
+            tracing::debug!(url = %url, "Voe fallback: skipping HLS URL in var source");
         }
     }
 
-    // Look for direct mp4 URLs
+    // Look for direct mp4 URLs (preferred — works with appsrc pipeline)
     let re_mp4 = regex_lite::Regex::new(r#"(https?://[^"'<>]+\.mp4[^"'<>\s]*)"#).ok()?;
     for cap in re_mp4.captures_iter(html) {
         if let Some(m) = cap.get(1) {
@@ -733,16 +896,13 @@ fn try_fallback_urls(html: &str) -> Option<String> {
         }
     }
 
-    // Look for direct m3u8 URLs
-    let re_m3u8 = regex_lite::Regex::new(r#"(https?://[^"'<>]+\.m3u8[^"'<>\s]*)"#).ok()?;
-    for cap in re_m3u8.captures_iter(html) {
-        if let Some(m) = cap.get(1) {
-            let url = m.as_str();
-            if !is_bait_source(url) {
-                return Some(url.to_owned());
-            }
-        }
-    }
+    // NOTE: We intentionally do NOT search for .m3u8 URLs here.
+    // The appsrc + StreamSource pipeline cannot handle HLS streams —
+    // HLS requires fetching multiple segment URLs, which appsrc's
+    // sequential byte-stream model can't provide. Returning an HLS URL
+    // would result in the pipeline downloading the tiny playlist text
+    // and pushing it into appsrc, where parsebin either fails to parse
+    // it or hlsdemux can't fetch the segments (no souphttpsrc available).
 
     None
 }
@@ -841,9 +1001,12 @@ fn is_bait_source(source: &str) -> bool {
     false
 }
 
-/// Extract a media URL from arbitrary text using regex.
-fn extract_media_url_from_text(text: &str) -> Option<String> {
-    // Try mp4
+/// Extract a direct MP4 media URL from arbitrary text using regex.
+///
+/// Only returns .mp4 URLs — .m3u8 (HLS) URLs are excluded because the
+/// appsrc pipeline cannot handle HLS streams.
+fn extract_mp4_url_from_text(text: &str) -> Option<String> {
+    // Try mp4 only
     let re_mp4 = regex_lite::Regex::new(r#"(https?://[^\s"']+\.mp4[^\s"']*)"#).ok()?;
     for cap in re_mp4.captures_iter(text) {
         if let Some(m) = cap.get(1) {
@@ -854,17 +1017,8 @@ fn extract_media_url_from_text(text: &str) -> Option<String> {
         }
     }
 
-    // Try m3u8
-    let re_m3u8 = regex_lite::Regex::new(r#"(https?://[^\s"']+\.m3u8[^\s"']*)"#).ok()?;
-    for cap in re_m3u8.captures_iter(text) {
-        if let Some(m) = cap.get(1) {
-            let url = m.as_str();
-            if !is_bait_source(url) {
-                return Some(url.to_owned());
-            }
-        }
-    }
-
+    // No .m3u8 search — HLS is incompatible with the appsrc pipeline.
+    // If no MP4 URL is found, return None (the pipeline cannot play HLS).
     None
 }
 
@@ -1001,17 +1155,32 @@ fn build_result(
     title: &Option<String>,
     thumbnail: &Option<String>,
 ) -> ResolveResult {
-    let mime_type = if media_url.contains(".m3u8") {
+    let is_hls = media_url.contains(".m3u8");
+    let mime_type = if is_hls {
         Some("application/vnd.apple.mpegurl".to_string())
     } else {
         Some("video/mp4".to_string())
     };
 
-    let category = if media_url.contains(".m3u8") {
+    let category = if is_hls {
         UrlCategory::HlsManifest
     } else {
         UrlCategory::DirectMedia
     };
+
+    if is_hls {
+        tracing::warn!(
+            url = %media_url,
+            "Voe resolver: returned HLS URL — this should not happen! \
+             The appsrc pipeline cannot handle HLS streams. \
+             The mp4-first priority logic should have prevented this."
+        );
+    } else {
+        tracing::info!(
+            url = %media_url,
+            "Voe resolver: resolved direct MP4 URL (compatible with appsrc pipeline)"
+        );
+    }
 
     ResolveResult {
         source_url: source_url.to_owned(),
@@ -1042,6 +1211,68 @@ mod tests {
         assert_eq!(rot13("Hello"), "Uryyb");
         assert_eq!(rot13("Uryyb"), "Hello");
         assert_eq!(rot13("abc123"), "nop123");
+    }
+
+    #[test]
+    fn test_is_hls_url() {
+        assert!(is_hls_url("https://cdn.example.com/stream.m3u8"));
+        assert!(is_hls_url("https://cdn.example.com/stream.m3u8?token=abc"));
+        assert!(is_hls_url("https://cdn.example.com/stream.M3U8")); // case-insensitive
+        assert!(!is_hls_url("https://cdn.example.com/video.mp4"));
+        assert!(!is_hls_url("https://cdn.example.com/video.mp4?token=abc"));
+    }
+
+    #[test]
+    fn test_extract_media_from_json_value_string() {
+        // Simple string URL — should return it
+        let value = serde_json::json!("https://cdn.example.com/video.mp4?token=abc");
+        let result = extract_media_from_json_value(&value);
+        assert!(result.is_some());
+        assert_eq!(result.unwrap(), "https://cdn.example.com/video.mp4?token=abc");
+    }
+
+    #[test]
+    fn test_extract_media_from_json_value_skips_hls() {
+        // HLS string URL — should be skipped
+        let value = serde_json::json!("https://cdn.example.com/stream.m3u8?token=abc");
+        let result = extract_media_from_json_value(&value);
+        assert!(result.is_none(), "HLS URLs should be skipped");
+    }
+
+    #[test]
+    fn test_extract_media_from_json_value_object() {
+        // Multi-quality object — should prefer 720p
+        let value = serde_json::json!({
+            "1080": "https://cdn.example.com/1080.mp4",
+            "720": "https://cdn.example.com/720.mp4",
+            "480": "https://cdn.example.com/480.mp4"
+        });
+        let result = extract_media_from_json_value(&value);
+        assert!(result.is_some());
+        assert_eq!(result.unwrap(), "https://cdn.example.com/720.mp4");
+    }
+
+    #[test]
+    fn test_extract_media_from_json_value_object_hls_only() {
+        // Multi-quality object with only HLS URLs — should return None
+        let value = serde_json::json!({
+            "720": "https://cdn.example.com/720.m3u8",
+            "480": "https://cdn.example.com/480.m3u8"
+        });
+        let result = extract_media_from_json_value(&value);
+        assert!(result.is_none(), "HLS-only quality objects should return None");
+    }
+
+    #[test]
+    fn test_extract_media_from_json_value_object_mixed() {
+        // Multi-quality object with some HLS, some MP4 — should skip HLS
+        let value = serde_json::json!({
+            "1080": "https://cdn.example.com/1080.m3u8",
+            "720": "https://cdn.example.com/720.mp4"
+        });
+        let result = extract_media_from_json_value(&value);
+        assert!(result.is_some());
+        assert_eq!(result.unwrap(), "https://cdn.example.com/720.mp4");
     }
 
     #[test]
@@ -1117,25 +1348,25 @@ mod tests {
     }
 
     #[test]
-    fn test_extract_media_url_from_text_mp4() {
+    fn test_extract_mp4_url_from_text_mp4() {
         let text = "Some text with https://cdn.example.com/video123.mp4?token=abc embedded";
-        let result = extract_media_url_from_text(text);
+        let result = extract_mp4_url_from_text(text);
         assert!(result.is_some());
         assert!(result.unwrap().contains(".mp4"));
     }
 
     #[test]
-    fn test_extract_media_url_from_text_m3u8() {
+    fn test_extract_mp4_url_from_text_ignores_m3u8() {
+        // HLS URLs should NOT be returned — the appsrc pipeline can't handle them
         let text = "Source: https://cdn.example.com/stream.m3u8?session=xyz";
-        let result = extract_media_url_from_text(text);
-        assert!(result.is_some());
-        assert!(result.unwrap().contains(".m3u8"));
+        let result = extract_mp4_url_from_text(text);
+        assert!(result.is_none(), "HLS URLs should not be returned by extract_mp4_url_from_text");
     }
 
     #[test]
-    fn test_extract_media_url_ignores_bait() {
+    fn test_extract_mp4_url_ignores_bait() {
         let text = "https://test-videos.co.uk/vids/bigbuckbunny/Big_Buck_Bunny_1080_10s_5MB.mp4";
-        let result = extract_media_url_from_text(text);
+        let result = extract_mp4_url_from_text(text);
         assert!(result.is_none());
     }
 
