@@ -65,3 +65,29 @@ Stage Summary:
 - Audio fix: pulsesink + PulseAudio detection enables Bluetooth audio
 - User needs to git pull && ./deploy.sh
 - For Bluetooth: connect device, set sink_type to pulsesink via API
+
+---
+Task ID: 4
+Agent: main
+Task: Fix CDN 403 compilation error and add proactive IP mismatch detection
+
+Work Log:
+- User pulled latest code and got compilation error: SessionEvent::CdnForbidden not handled in ws.rs
+- Found two repos: /home/z/my-project/ (old) and /home/z/my-project/picast/ (latest)
+- Fixed ws.rs: added CdnForbidden match arm → ServerEvent::Error with CDN message
+- Fixed main.rs: added invalidate_cache() to ResolverAdapter (new ResolverTrait method)
+- Build passes with cargo check
+- Identified deeper issue: session::load() retry loop can't trigger because play() returns Ok before 403 arrives
+- Added proactive CDN IP check in PlaybackEngine::play():
+  - After pipeline creation, check Tor exit IP via SocksForwarder::check_exit_ip()
+  - Compare with CDN URL's &i= parameter (first 2 IP octets)
+  - If mismatch, return error with "CDN IP mismatch" → session retry loop triggers
+- Added extract_cdn_ip_prefix() helper to parse &i= from CDN URLs
+- Fixed is_cdn_retryable_error() to also match "Forbidden" (GStreamer's 403 message)
+- Committed and pushed as d37d88c + 33904f0
+
+Stage Summary:
+- Compilation error fixed (CdnForbidden + invalidate_cache)
+- Proactive CDN IP check prevents 403 before it happens
+- is_cdn_retryable_error() now matches both proactive and reactive 403 cases
+- User needs to `git pull && ./deploy.sh` on the Pi to test
