@@ -302,11 +302,8 @@ impl DisplayManager {
         // become the first DRM opener), re-open the device now.
         if self.drm_fd.is_none() {
             tracing::info!("re-opening DRM device for re-acquire");
-            let file = OpenOptions::new()
-                .read(true)
-                .write(true)
-                .open(&self.device_path)
-                .map_err(|e| {
+            let file =
+                OpenOptions::new().read(true).write(true).open(&self.device_path).map_err(|e| {
                     DisplayError::DeviceOpen(format!(
                         "re-open {} for re-acquire: {}",
                         self.device_path, e
@@ -489,8 +486,10 @@ impl DisplayManager {
         // Only possible if we have DRM master — get_crtc() for saving works
         // without master, but set_crtc() for restoration requires master.
         if has_master {
-            let crtc_handle = control::from_u32::<control::crtc::Handle>(crtc.crtc_id)
-                .ok_or_else(|| DisplayError::Modeset(format!("invalid CRTC id {}", crtc.crtc_id)))?;
+            let crtc_handle =
+                control::from_u32::<control::crtc::Handle>(crtc.crtc_id).ok_or_else(|| {
+                    DisplayError::Modeset(format!("invalid CRTC id {}", crtc.crtc_id))
+                })?;
             let crtc_info = fd.get_crtc(crtc_handle).ok();
             self.saved_crtc = Some(SavedCrtcState {
                 crtc_id: crtc.crtc_id,
@@ -564,16 +563,15 @@ impl DisplayManager {
             // DRM master — we can re-open and acquire master ourselves.
             if self.drm_fd.is_none() {
                 tracing::info!("re-opening DRM device for CRTC restoration");
-                let file = OpenOptions::new()
-                    .read(true)
-                    .write(true)
-                    .open(&self.device_path)
-                    .map_err(|e| {
-                        DisplayError::DeviceOpen(format!(
-                            "re-open {} for CRTC restore: {}",
-                            self.device_path, e
-                        ))
-                    })?;
+                let file =
+                    OpenOptions::new().read(true).write(true).open(&self.device_path).map_err(
+                        |e| {
+                            DisplayError::DeviceOpen(format!(
+                                "re-open {} for CRTC restore: {}",
+                                self.device_path, e
+                            ))
+                        },
+                    )?;
                 self.drm_fd = Some(Card(file));
             }
             if let Some(ref fd) = self.drm_fd {
@@ -599,9 +597,8 @@ impl DisplayManager {
                             },
                         };
                     if let Some(mode) = saved.mode {
-                        let framebuffer = saved
-                            .fb_id
-                            .and_then(control::from_u32::<control::framebuffer::Handle>);
+                        let framebuffer =
+                            saved.fb_id.and_then(control::from_u32::<control::framebuffer::Handle>);
                         let restore_result = fd.set_crtc(
                             crtc_handle,
                             framebuffer,
@@ -610,7 +607,9 @@ impl DisplayManager {
                             Some(mode),
                         );
                         match restore_result {
-                            Ok(()) => tracing::info!(crtc_id = saved.crtc_id, "CRTC state restored"),
+                            Ok(()) => {
+                                tracing::info!(crtc_id = saved.crtc_id, "CRTC state restored")
+                            },
                             Err(e) => tracing::warn!(
                                 crtc_id = saved.crtc_id,
                                 error = %e,
@@ -670,10 +669,7 @@ impl DisplayManager {
     ///
     /// Only available after `acquire()` has been called.
     pub fn active_connector_id(&self) -> Option<u32> {
-        self.connectors
-            .iter()
-            .find(|c| c.connected)
-            .map(|c| c.connector_id)
+        self.connectors.iter().find(|c| c.connected).map(|c| c.connector_id)
     }
 
     /// Return the raw DRM device file descriptor, if the device is open.
@@ -861,10 +857,7 @@ impl DisplayManager {
     ///
     /// Returns the mock connector ID (89) to simulate the hw implementation.
     pub fn active_connector_id(&self) -> Option<u32> {
-        self.connectors
-            .iter()
-            .find(|c| c.connected)
-            .map(|c| c.connector_id)
+        self.connectors.iter().find(|c| c.connected).map(|c| c.connector_id)
     }
 }
 

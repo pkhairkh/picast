@@ -50,17 +50,12 @@ impl ResolverSocksForwarder {
     ///
     /// Returns the forwarder with its local address. Configure reqwest
     /// to use `http://{local_addr}` as its HTTP proxy.
-    pub async fn start(
-        socks_addr: String,
-        isolation_username: String,
-    ) -> Result<Self, String> {
+    pub async fn start(socks_addr: String, isolation_username: String) -> Result<Self, String> {
         let listener = TcpListener::bind("127.0.0.1:0")
             .await
             .map_err(|e| format!("bind resolver forwarder: {}", e))?;
-        let local_addr = listener
-            .local_addr()
-            .map(|a| a.to_string())
-            .unwrap_or_else(|_| "127.0.0.1:0".into());
+        let local_addr =
+            listener.local_addr().map(|a| a.to_string()).unwrap_or_else(|_| "127.0.0.1:0".into());
 
         tracing::info!(
             local_addr = %local_addr,
@@ -109,10 +104,7 @@ impl ResolverSocksForwarder {
             }
         });
 
-        Ok(Self {
-            local_addr,
-            shutdown_tx: Some(shutdown_tx),
-        })
+        Ok(Self { local_addr, shutdown_tx: Some(shutdown_tx) })
     }
 
     /// The HTTP proxy URL for reqwest (e.g. "http://127.0.0.1:42321").
@@ -147,10 +139,7 @@ async fn handle_connect(
         if total >= buf.len() {
             return Err("CONNECT request too large".into());
         }
-        let n = client
-            .read(&mut buf[total..])
-            .await
-            .map_err(|e| format!("read CONNECT: {}", e))?;
+        let n = client.read(&mut buf[total..]).await.map_err(|e| format!("read CONNECT: {}", e))?;
         if n == 0 {
             return Err("client disconnected before sending CONNECT".into());
         }
@@ -233,10 +222,7 @@ async fn socks5_connect(
         .map_err(|e| format!("SOCKS5 greet: {}", e))?;
 
     let mut reply = [0u8; 2];
-    stream
-        .read_exact(&mut reply)
-        .await
-        .map_err(|e| format!("SOCKS5 greet reply: {}", e))?;
+    stream.read_exact(&mut reply).await.map_err(|e| format!("SOCKS5 greet reply: {}", e))?;
 
     if reply[0] != 0x05 {
         return Err(format!("not SOCKS5: version {}", reply[0]));
@@ -260,16 +246,10 @@ async fn socks5_connect(
     auth_req.push(password_bytes.len() as u8);
     auth_req.extend_from_slice(password_bytes);
 
-    stream
-        .write_all(&auth_req)
-        .await
-        .map_err(|e| format!("SOCKS5 auth write: {}", e))?;
+    stream.write_all(&auth_req).await.map_err(|e| format!("SOCKS5 auth write: {}", e))?;
 
     let mut auth_reply = [0u8; 2];
-    stream
-        .read_exact(&mut auth_reply)
-        .await
-        .map_err(|e| format!("SOCKS5 auth reply: {}", e))?;
+    stream.read_exact(&mut auth_reply).await.map_err(|e| format!("SOCKS5 auth reply: {}", e))?;
 
     if auth_reply[1] != 0x00 {
         return Err(format!("SOCKS5 auth rejected: status {}", auth_reply[1]));
@@ -287,10 +267,7 @@ async fn socks5_connect(
     connect_req.extend_from_slice(host_bytes);
     connect_req.extend_from_slice(&[(port >> 8) as u8, (port & 0xFF) as u8]);
 
-    stream
-        .write_all(&connect_req)
-        .await
-        .map_err(|e| format!("SOCKS5 CONNECT write: {}", e))?;
+    stream.write_all(&connect_req).await.map_err(|e| format!("SOCKS5 CONNECT write: {}", e))?;
 
     let mut reply_header = [0u8; 4];
     stream
@@ -315,20 +292,26 @@ async fn socks5_connect(
         0x01 => {
             let mut addr = [0u8; 6];
             stream.read_exact(&mut addr).await.map_err(|e| format!("SOCKS5 addr read: {}", e))?;
-        }
+        },
         0x03 => {
             let mut len_buf = [0u8; 1];
-            stream.read_exact(&mut len_buf).await.map_err(|e| format!("SOCKS5 domain len: {}", e))?;
+            stream
+                .read_exact(&mut len_buf)
+                .await
+                .map_err(|e| format!("SOCKS5 domain len: {}", e))?;
             let mut domain = vec![0u8; len_buf[0] as usize + 2];
-            stream.read_exact(&mut domain).await.map_err(|e| format!("SOCKS5 domain read: {}", e))?;
-        }
+            stream
+                .read_exact(&mut domain)
+                .await
+                .map_err(|e| format!("SOCKS5 domain read: {}", e))?;
+        },
         0x04 => {
             let mut addr = [0u8; 18];
             stream.read_exact(&mut addr).await.map_err(|e| format!("SOCKS5 IPv6 addr: {}", e))?;
-        }
+        },
         other => {
             return Err(format!("SOCKS5 unknown ATYP {}", other));
-        }
+        },
     }
 
     tracing::debug!(
@@ -345,15 +328,13 @@ fn parse_host_port(target: &str) -> Result<(String, u16), String> {
     if let Some(close) = target.find(']') {
         let host = &target[..=close];
         let port_str = target[close + 1..].trim_start_matches(':');
-        let port: u16 = port_str
-            .parse()
-            .map_err(|_| format!("invalid port in CONNECT target: {}", target))?;
+        let port: u16 =
+            port_str.parse().map_err(|_| format!("invalid port in CONNECT target: {}", target))?;
         return Ok((host.to_string(), port));
     }
 
-    let colon = target
-        .rfind(':')
-        .ok_or_else(|| format!("no port in CONNECT target: {}", target))?;
+    let colon =
+        target.rfind(':').ok_or_else(|| format!("no port in CONNECT target: {}", target))?;
     let host = &target[..colon];
     let port: u16 = target[colon + 1..]
         .parse()

@@ -88,9 +88,9 @@ use std::os::unix::io::RawFd;
 
 // nix re-exports libc, so we can use nix::libc for mmap, close, etc.
 #[cfg(feature = "hw")]
-use nix::libc;
-#[cfg(feature = "hw")]
 use glow::HasContext;
+#[cfg(feature = "hw")]
+use nix::libc;
 
 // ── Error Type ──────────────────────────────────────────────────────────
 
@@ -166,12 +166,7 @@ impl SandParams {
         let col_stride = height * 3 / 2;
         let num_cols = (width + 127) / 128; // ceil(width / 128)
         let buffer_size = num_cols as usize * col_stride as usize * 128;
-        Self {
-            width,
-            height,
-            col_stride,
-            buffer_size,
-        }
+        Self { width, height, col_stride, buffer_size }
     }
 
     /// Calculate the NV12 output buffer size for these frame dimensions.
@@ -505,9 +500,7 @@ impl V3dComputeEngine {
 
         // Step 5: Create glow GL context wrapper
         let gl = unsafe {
-            glow::Context::from_loader_function(|proc_name| {
-                egl.get_proc_address(proc_name)
-            })
+            glow::Context::from_loader_function(|proc_name| egl.get_proc_address(proc_name))
         };
 
         // Step 6: Verify GLES 3.1 compute shader support
@@ -518,15 +511,17 @@ impl V3dComputeEngine {
         };
 
         if !version.contains("OpenGL ES 3.1") && !version.contains("OpenGL ES 3.2") {
-            return Err(V3dError::NotAvailable(
-                format!("GLES 3.1 compute shaders not supported (version: {})", version)
-            ));
+            return Err(V3dError::NotAvailable(format!(
+                "GLES 3.1 compute shaders not supported (version: {})",
+                version
+            )));
         }
 
         // Step 7: Compile the SAND→NV12 compute shader
         let shader = unsafe {
-            let shader = gl.create_shader(glow::COMPUTE_SHADER)
-                .map_err(|_| V3dError::ShaderCompilation("failed to create compute shader object".into()))?;
+            let shader = gl.create_shader(glow::COMPUTE_SHADER).map_err(|_| {
+                V3dError::ShaderCompilation("failed to create compute shader object".into())
+            })?;
 
             gl.shader_source(shader, SAND_TO_NV12_SHADER);
             gl.compile_shader(shader);
@@ -535,13 +530,15 @@ impl V3dComputeEngine {
             if !success {
                 let log = gl.get_shader_info_log(shader);
                 gl.delete_shader(shader);
-                return Err(V3dError::ShaderCompilation(
-                    format!("SAND→NV12 compute shader compilation failed:\n{}", log)
-                ));
+                return Err(V3dError::ShaderCompilation(format!(
+                    "SAND→NV12 compute shader compilation failed:\n{}",
+                    log
+                )));
             }
 
-            let program = gl.create_program()
-                .map_err(|_| V3dError::ShaderCompilation("failed to create program object".into()))?;
+            let program = gl.create_program().map_err(|_| {
+                V3dError::ShaderCompilation("failed to create program object".into())
+            })?;
 
             gl.attach_shader(program, shader);
             gl.link_program(program);
@@ -551,9 +548,10 @@ impl V3dComputeEngine {
                 let log = gl.get_program_info_log(program);
                 gl.delete_program(program);
                 gl.delete_shader(shader);
-                return Err(V3dError::ShaderCompilation(
-                    format!("SAND→NV12 compute program link failed:\n{}", log)
-                ));
+                return Err(V3dError::ShaderCompilation(format!(
+                    "SAND→NV12 compute program link failed:\n{}",
+                    log
+                )));
             }
 
             // Shader object can be detached after linking
@@ -565,13 +563,11 @@ impl V3dComputeEngine {
 
         // Step 8: Create SSBOs
         let sand_ssbo = unsafe {
-            gl.create_buffer()
-                .map_err(|_| V3dError::Gl("failed to create SAND SSBO".into()))?
+            gl.create_buffer().map_err(|_| V3dError::Gl("failed to create SAND SSBO".into()))?
         };
 
         let nv12_ssbo = unsafe {
-            gl.create_buffer()
-                .map_err(|_| V3dError::Gl("failed to create NV12 SSBO".into()))?
+            gl.create_buffer().map_err(|_| V3dError::Gl("failed to create NV12 SSBO".into()))?
         };
 
         tracing::info!(
@@ -622,7 +618,9 @@ impl V3dComputeEngine {
         let gl = &self.egl_display;
 
         // Check if frame parameters changed (need to reallocate buffers)
-        let params_changed = self.frame_params.as_ref()
+        let params_changed = self
+            .frame_params
+            .as_ref()
             .map_or(true, |p| p.width != params.width || p.height != params.height);
 
         if params_changed {
@@ -670,7 +668,11 @@ impl V3dComputeEngine {
 
             // Map the SAND DMA-BUF into process memory and upload to SSBO
             let mapped = map_dmabuf(sand_dmabuf_fd, sand_size)?;
-            gl.buffer_sub_data_u8_slice(glow::SHADER_STORAGE_BUFFER, 0, std::slice::from_raw_parts(mapped, sand_size));
+            gl.buffer_sub_data_u8_slice(
+                glow::SHADER_STORAGE_BUFFER,
+                0,
+                std::slice::from_raw_parts(mapped, sand_size),
+            );
             unmap_dmabuf(mapped, sand_size);
         }
 
@@ -825,7 +827,9 @@ impl Drop for V3dComputeEngine {
 
         // Close output DMA-BUF fd if not consumed
         if let Some(fd) = self.output_dmabuf_fd.take() {
-            unsafe { libc::close(fd); }
+            unsafe {
+                libc::close(fd);
+            }
         }
 
         tracing::debug!("V3D compute engine destroyed");
@@ -924,21 +928,16 @@ impl EglLoader {
 /// This uses `mmap()` to map the DMA-BUF's physical memory into the
 /// process's address space. The mapping is read-only.
 fn map_dmabuf(fd: RawFd, size: usize) -> Result<*mut u8, V3dError> {
-    let ptr = unsafe {
-        libc::mmap(
-            std::ptr::null_mut(),
-            size,
-            libc::PROT_READ,
-            libc::MAP_SHARED,
-            fd,
-            0,
-        )
-    };
+    let ptr =
+        unsafe { libc::mmap(std::ptr::null_mut(), size, libc::PROT_READ, libc::MAP_SHARED, fd, 0) };
 
     if ptr == libc::MAP_FAILED {
-        return Err(V3dError::DmaBufImport(
-            format!("mmap DMA-BUF fd={} size={}: {}", fd, size, std::io::Error::last_os_error())
-        ));
+        return Err(V3dError::DmaBufImport(format!(
+            "mmap DMA-BUF fd={} size={}: {}",
+            fd,
+            size,
+            std::io::Error::last_os_error()
+        )));
     }
 
     Ok(ptr as *mut u8)
@@ -971,18 +970,22 @@ fn allocate_dmabuf(size: usize) -> Result<RawFd, V3dError> {
     };
 
     if fd < 0 {
-        return Err(V3dError::DmaBufAllocation(
-            format!("memfd_create failed: {}", std::io::Error::last_os_error())
-        ));
+        return Err(V3dError::DmaBufAllocation(format!(
+            "memfd_create failed: {}",
+            std::io::Error::last_os_error()
+        )));
     }
 
     // Set the file size
     let ret = unsafe { libc::ftruncate(fd, size as i64) };
     if ret < 0 {
-        unsafe { libc::close(fd); }
-        return Err(V3dError::DmaBufAllocation(
-            format!("ftruncate failed: {}", std::io::Error::last_os_error())
-        ));
+        unsafe {
+            libc::close(fd);
+        }
+        return Err(V3dError::DmaBufAllocation(format!(
+            "ftruncate failed: {}",
+            std::io::Error::last_os_error()
+        )));
     }
 
     Ok(fd)
@@ -991,20 +994,14 @@ fn allocate_dmabuf(size: usize) -> Result<RawFd, V3dError> {
 /// Write data into a DMA-BUF file descriptor.
 fn write_dmabuf(fd: RawFd, data: &[u8]) -> Result<(), V3dError> {
     let ptr = unsafe {
-        libc::mmap(
-            std::ptr::null_mut(),
-            data.len(),
-            libc::PROT_WRITE,
-            libc::MAP_SHARED,
-            fd,
-            0,
-        )
+        libc::mmap(std::ptr::null_mut(), data.len(), libc::PROT_WRITE, libc::MAP_SHARED, fd, 0)
     };
 
     if ptr == libc::MAP_FAILED {
-        return Err(V3dError::DmaBufAllocation(
-            format!("mmap for write failed: {}", std::io::Error::last_os_error())
-        ));
+        return Err(V3dError::DmaBufAllocation(format!(
+            "mmap for write failed: {}",
+            std::io::Error::last_os_error()
+        )));
     }
 
     unsafe {

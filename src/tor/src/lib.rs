@@ -589,10 +589,13 @@ impl TorManager {
 
         // Read the CONNECT response (variable length, domain type: min 10 bytes)
         let mut connect_resp = [0u8; 256];
-        let n = tokio::time::timeout(std::time::Duration::from_secs(15), stream.read(&mut connect_resp))
-            .await
-            .map_err(|_| TorError::HealthCheck("SOCKS5 CONNECT response timed out".into()))?
-            .map_err(|e| TorError::HealthCheck(format!("SOCKS5 CONNECT read failed: {}", e)))?;
+        let n = tokio::time::timeout(
+            std::time::Duration::from_secs(15),
+            stream.read(&mut connect_resp),
+        )
+        .await
+        .map_err(|_| TorError::HealthCheck("SOCKS5 CONNECT response timed out".into()))?
+        .map_err(|e| TorError::HealthCheck(format!("SOCKS5 CONNECT read failed: {}", e)))?;
 
         let latency_ms = connect_start.elapsed().as_millis() as u64;
 

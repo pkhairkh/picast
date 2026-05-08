@@ -15,8 +15,8 @@
 //!   the download token from the page, and constructs the direct
 //!   media URL from DoodStream's pass/dl API endpoint.
 
-use crate::{ResolveError, ResolveResult, UrlCategory};
 use crate::resolver_socks::ResolverSocksForwarder;
+use crate::{ResolveError, ResolveResult, UrlCategory};
 use base64::Engine;
 use scraper::{Html, Selector};
 use std::time::Duration;
@@ -41,7 +41,9 @@ const UA: &str = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (
 ///
 /// The `socks5_proxy` parameter should be a full SOCKS5h proxy URL with
 /// isolation username, e.g. `socks5h://picast-hash@127.0.0.1:9050`.
-async fn build_client(socks5_proxy: Option<&str>) -> Result<(reqwest::Client, Option<ResolverSocksForwarder>), ResolveError> {
+async fn build_client(
+    socks5_proxy: Option<&str>,
+) -> Result<(reqwest::Client, Option<ResolverSocksForwarder>), ResolveError> {
     let mut builder = reqwest::Client::builder()
         .timeout(Duration::from_secs(CUSTOM_RESOLVER_TIMEOUT_SECS))
         .user_agent(UA)
@@ -64,8 +66,9 @@ async fn build_client(socks5_proxy: Option<&str>) -> Result<(reqwest::Client, Op
             match ResolverSocksForwarder::start(socks_addr, username).await {
                 Ok(fwd) => {
                     let http_proxy_url = fwd.proxy_url();
-                    let proxy = reqwest::Proxy::all(&http_proxy_url)
-                        .map_err(|e| ResolveError::Network(format!("failed to configure HTTP proxy: {}", e)))?;
+                    let proxy = reqwest::Proxy::all(&http_proxy_url).map_err(|e| {
+                        ResolveError::Network(format!("failed to configure HTTP proxy: {}", e))
+                    })?;
                     builder = builder.proxy(proxy);
                     tracing::info!(
                         http_proxy = %http_proxy_url,
@@ -73,7 +76,7 @@ async fn build_client(socks5_proxy: Option<&str>) -> Result<(reqwest::Client, Op
                         "custom resolver: routing through local SOCKS5 forwarder (auth=0x02 only, same circuit as playback)"
                     );
                     forwarder = Some(fwd);
-                }
+                },
                 Err(e) => {
                     // Fallback: if the forwarder fails to start, fall back
                     // to reqwest's built-in SOCKS5 (suboptimal but better
@@ -82,16 +85,18 @@ async fn build_client(socks5_proxy: Option<&str>) -> Result<(reqwest::Client, Op
                         error = %e,
                         "failed to start resolver SOCKS5 forwarder — falling back to reqwest built-in SOCKS5 (may cause circuit mismatch)"
                     );
-                    let proxy = reqwest::Proxy::all(proxy_url)
-                        .map_err(|e| ResolveError::Network(format!("failed to configure SOCKS5 proxy: {}", e)))?;
+                    let proxy = reqwest::Proxy::all(proxy_url).map_err(|e| {
+                        ResolveError::Network(format!("failed to configure SOCKS5 proxy: {}", e))
+                    })?;
                     builder = builder.proxy(proxy);
-                }
+                },
             }
         } else {
             // Could not parse the SOCKS5h URL — use it as-is.
             tracing::warn!(proxy = %proxy_url, "could not parse SOCKS5h URL — using as-is (may cause circuit mismatch)");
-            let proxy = reqwest::Proxy::all(proxy_url)
-                .map_err(|e| ResolveError::Network(format!("failed to configure SOCKS5 proxy: {}", e)))?;
+            let proxy = reqwest::Proxy::all(proxy_url).map_err(|e| {
+                ResolveError::Network(format!("failed to configure SOCKS5 proxy: {}", e))
+            })?;
             builder = builder.proxy(proxy);
         }
     }
@@ -109,8 +114,7 @@ async fn build_client(socks5_proxy: Option<&str>) -> Result<(reqwest::Client, Op
 /// Returns: `Some(("picast-HASH", "127.0.0.1:9050"))`
 fn parse_socks5_url(url: &str) -> Option<(String, String)> {
     // Strip the scheme prefix
-    let rest = url.strip_prefix("socks5h://")
-        .or_else(|| url.strip_prefix("socks5://"))?;
+    let rest = url.strip_prefix("socks5h://").or_else(|| url.strip_prefix("socks5://"))?;
 
     // Split on '@' to separate username from host
     let (username, host_part) = if let Some(at_pos) = rest.find('@') {
@@ -176,17 +180,10 @@ const DOODSTREAM_DOMAINS: &[&str] = &[
 
 /// Known bait/test video domains and filenames that Voe and DoodStream
 /// use as decoy sources to foil scrapers.
-const BAIT_DOMAINS: &[&str] = &[
-    "test-videos.co.uk",
-    "sample-videos.com",
-    "commondatastorage.googleapis.com",
-];
+const BAIT_DOMAINS: &[&str] =
+    &["test-videos.co.uk", "sample-videos.com", "commondatastorage.googleapis.com"];
 
-const BAIT_FILENAMES: &[&str] = &[
-    "BigBuckBunny",
-    "Big_Buck_Bunny_1080_10s_5MB",
-    "bbb.mp4",
-];
+const BAIT_FILENAMES: &[&str] = &["BigBuckBunny", "Big_Buck_Bunny_1080_10s_5MB", "bbb.mp4"];
 
 // ── Public API ─────────────────────────────────────────────────────
 
@@ -211,10 +208,7 @@ pub fn is_voe_domain(host: &str) -> bool {
     let host_lower = host.to_lowercase();
 
     // Tier 1: Exact match against known domains
-    if VOE_DOMAINS
-        .iter()
-        .any(|d| host_lower == *d || host_lower.ends_with(&format!(".{}", d)))
-    {
+    if VOE_DOMAINS.iter().any(|d| host_lower == *d || host_lower.ends_with(&format!(".{}", d))) {
         return true;
     }
 
@@ -229,7 +223,7 @@ pub fn is_voe_domain(host: &str) -> bool {
         let name = &host_lower[..host_lower.len() - 4]; // strip .com
         let len = name.len();
         // Voe front-end domains are typically 15-35 chars of pure lowercase
-        if len >= 12 && len <= 40
+        if (12..=40).contains(&len)
             && name.chars().all(|c| c.is_ascii_lowercase())
             && !is_well_known_domain(name)
         {
@@ -240,7 +234,7 @@ pub fn is_voe_domain(host: &str) -> bool {
             // Random letter strings have ~19% vowels (5/26).
             let vowel_count = name.chars().filter(|c| "aeiou".contains(*c)).count();
             let vowel_ratio = vowel_count as f64 / len as f64;
-            if vowel_ratio >= 0.25 {
+            if vowel_ratio >= 0.20 {
                 return true;
             }
         }
@@ -253,20 +247,34 @@ pub fn is_voe_domain(host: &str) -> bool {
 /// should NOT be flagged as a potential Voe front-end.
 fn is_well_known_domain(name: &str) -> bool {
     const WELL_KNOWN: &[&str] = &[
-        "google", "youtube", "facebook", "twitter", "instagram",
-        "amazon", "microsoft", "apple", "netflix", "reddit",
-        "twitch", "vimeo", "dailymotion", "tiktok", "pinterest",
-        "tumblr", "linkedin", "whatsapp", "telegram", "discord",
+        "google",
+        "youtube",
+        "facebook",
+        "twitter",
+        "instagram",
+        "amazon",
+        "microsoft",
+        "apple",
+        "netflix",
+        "reddit",
+        "twitch",
+        "vimeo",
+        "dailymotion",
+        "tiktok",
+        "pinterest",
+        "tumblr",
+        "linkedin",
+        "whatsapp",
+        "telegram",
+        "discord",
     ];
-    WELL_KNOWN.iter().any(|&wk| name == wk)
+    WELL_KNOWN.contains(&name)
 }
 
 /// Check if a hostname should be handled by the DoodStream custom resolver.
 pub fn is_doodstream_domain(host: &str) -> bool {
     let host_lower = host.to_lowercase();
-    DOODSTREAM_DOMAINS
-        .iter()
-        .any(|d| host_lower == *d || host_lower.ends_with(&format!(".{}", d)))
+    DOODSTREAM_DOMAINS.iter().any(|d| host_lower == *d || host_lower.ends_with(&format!(".{}", d)))
 }
 
 /// Resolve a Voe (or Voe CDN front-end) URL to a direct media URL.
@@ -281,7 +289,10 @@ pub fn is_doodstream_domain(host: &str) -> bool {
 /// username, e.g. `socks5h://picast-abc123@127.0.0.1:9050`. This ensures
 /// the page fetch goes through the same Tor circuit as the media fetch,
 /// so the CDN's IP-bound token matches.
-pub async fn resolve_voe(url: &str, socks5_proxy: Option<&str>) -> Result<ResolveResult, ResolveError> {
+pub async fn resolve_voe(
+    url: &str,
+    socks5_proxy: Option<&str>,
+) -> Result<ResolveResult, ResolveError> {
     let (client, _forwarder) = build_client(socks5_proxy).await?;
     // _forwarder keeps the local HTTP→SOCKS5 proxy alive for the
     // duration of the resolve. It's dropped (and shut down) when
@@ -361,7 +372,10 @@ pub async fn resolve_voe(url: &str, socks5_proxy: Option<&str>) -> Result<Resolv
 /// username, e.g. `socks5h://picast-abc123@127.0.0.1:9050`. This ensures
 /// the page fetch goes through the same Tor circuit as the media fetch,
 /// so the CDN's IP-bound token matches.
-pub async fn resolve_doodstream(url: &str, socks5_proxy: Option<&str>) -> Result<ResolveResult, ResolveError> {
+pub async fn resolve_doodstream(
+    url: &str,
+    socks5_proxy: Option<&str>,
+) -> Result<ResolveResult, ResolveError> {
     let (client, _forwarder) = build_client(socks5_proxy).await?;
     // _forwarder keeps the local HTTP→SOCKS5 proxy alive for the
     // duration of the resolve. It's dropped (and shut down) when
@@ -406,10 +420,10 @@ pub async fn resolve_doodstream(url: &str, socks5_proxy: Option<&str>) -> Result
                 result.cookies = all_cookies;
                 return Ok(result);
             }
-        }
+        },
         Err(e) => {
             tracing::warn!(error = %e, "DoodStream: main page fetch failed, trying embed URL heuristic");
-        }
+        },
     }
 
     // ── Embed-URL heuristic ──────────────────────────────────────────
@@ -429,8 +443,14 @@ pub async fn resolve_doodstream(url: &str, socks5_proxy: Option<&str>) -> Result
         } else {
             format!(
                 "{}://{}{}",
-                url::Url::parse(url).ok().map(|u| u.scheme().to_string()).unwrap_or_else(|| "https".into()),
-                url::Url::parse(url).ok().and_then(|u| u.host_str().map(|h| h.to_string())).unwrap_or_else(|| "playmogo.com".into()),
+                url::Url::parse(url)
+                    .ok()
+                    .map(|u| u.scheme().to_string())
+                    .unwrap_or_else(|| "https".into()),
+                url::Url::parse(url)
+                    .ok()
+                    .and_then(|u| u.host_str().map(|h| h.to_string()))
+                    .unwrap_or_else(|| "playmogo.com".into()),
                 href
             )
         };
@@ -455,10 +475,10 @@ pub async fn resolve_doodstream(url: &str, socks5_proxy: Option<&str>) -> Result
                     result.cookies = all_cookies;
                     return Ok(result);
                 }
-            }
+            },
             Err(e) => {
                 tracing::warn!(error = %e, "DoodStream: embed page fetch also failed");
-            }
+            },
         }
     }
 
@@ -801,19 +821,14 @@ fn clean_base64(s: &str) -> Option<String> {
         cleaned
     };
     // Validate
-    base64::engine::general_purpose::STANDARD
-        .decode(&padded)
-        .ok()?;
+    base64::engine::general_purpose::STANDARD.decode(&padded).ok()?;
     Some(padded)
 }
 
 /// Check if a URL looks like a known test/bait video.
 fn is_bait_source(source: &str) -> bool {
     let lower = source.to_lowercase();
-    if BAIT_FILENAMES
-        .iter()
-        .any(|fn_| lower.contains(&fn_.to_lowercase()))
-    {
+    if BAIT_FILENAMES.iter().any(|fn_| lower.contains(&fn_.to_lowercase())) {
         return true;
     }
     if let Ok(parsed) = url::Url::parse(source) {
@@ -866,7 +881,10 @@ async fn fetch_page(
 ) -> Result<(String, Vec<String>), ResolveError> {
     let mut req = client
         .get(url)
-        .header("Accept", "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,*/*;q=0.8")
+        .header(
+            "Accept",
+            "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,*/*;q=0.8",
+        )
         .header("Accept-Language", "en-US,en;q=0.5")
         .header("Sec-Fetch-Dest", "document")
         .header("Sec-Fetch-Mode", "navigate")
@@ -877,15 +895,12 @@ async fn fetch_page(
         req = req.header("Referer", ref_url);
     }
 
-    let result = timeout(
-        Duration::from_secs(CUSTOM_RESOLVER_TIMEOUT_SECS),
-        req.send(),
-    )
-    .await
-    .map_err(|_| ResolveError::Network("custom resolver: HTTP request timed out".into()))?
-    .map_err(|e| {
-        ResolveError::Network(format!("custom resolver: HTTP request failed: {}", e))
-    })?;
+    let result = timeout(Duration::from_secs(CUSTOM_RESOLVER_TIMEOUT_SECS), req.send())
+        .await
+        .map_err(|_| ResolveError::Network("custom resolver: HTTP request timed out".into()))?
+        .map_err(|e| {
+            ResolveError::Network(format!("custom resolver: HTTP request failed: {}", e))
+        })?;
 
     let status = result.status();
     if !status.is_success() {
@@ -893,15 +908,12 @@ async fn fetch_page(
         let body = result.text().await.unwrap_or_default();
         let snippet = if body.len() > 500 { &body[..500] } else { &body };
         tracing::warn!(status = %status, url = url, body_snippet = snippet, "custom resolver: non-2xx response");
-        return Err(ResolveError::Network(format!(
-            "custom resolver: HTTP {} for {}",
-            status,
-            url
-        )));
+        return Err(ResolveError::Network(format!("custom resolver: HTTP {} for {}", status, url)));
     }
 
     // Capture Set-Cookie headers for CDN session cookies
-    let cookies: Vec<String> = result.headers()
+    let cookies: Vec<String> = result
+        .headers()
         .iter()
         .filter(|(name, _)| *name == "set-cookie")
         .filter_map(|(_, value)| value.to_str().ok())
@@ -919,10 +931,9 @@ async fn fetch_page(
         );
     }
 
-    let html = result
-        .text()
-        .await
-        .map_err(|e| ResolveError::Network(format!("custom resolver: failed to read response: {}", e)))?;
+    let html = result.text().await.map_err(|e| {
+        ResolveError::Network(format!("custom resolver: failed to read response: {}", e))
+    })?;
 
     Ok((html, cookies))
 }
@@ -1092,7 +1103,8 @@ mod tests {
 
     #[test]
     fn test_follow_js_redirect() {
-        let html = r#"<script>window.location.href = 'https://charlessheimprove.com/abc';</script>"#;
+        let html =
+            r#"<script>window.location.href = 'https://charlessheimprove.com/abc';</script>"#;
         let result = follow_js_redirect(html, "https://voe.sx/abc");
         assert_eq!(result, "https://charlessheimprove.com/abc");
     }
@@ -1142,17 +1154,10 @@ mod tests {
 
     #[test]
     fn test_build_result_m3u8() {
-        let result = build_result(
-            "https://voe.sx/abc",
-            "https://cdn.example.com/stream.m3u8",
-            &None,
-            &None,
-        );
+        let result =
+            build_result("https://voe.sx/abc", "https://cdn.example.com/stream.m3u8", &None, &None);
         assert_eq!(result.category, UrlCategory::HlsManifest);
-        assert_eq!(
-            result.mime_type,
-            Some("application/vnd.apple.mpegurl".into())
-        );
+        assert_eq!(result.mime_type, Some("application/vnd.apple.mpegurl".into()));
     }
 
     #[test]

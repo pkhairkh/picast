@@ -317,7 +317,6 @@ impl AppConfig {
             self.logging.level = v;
         }
     }
-
 }
 
 #[cfg(test)]

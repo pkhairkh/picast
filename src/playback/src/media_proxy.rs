@@ -90,17 +90,15 @@ impl MediaProxy {
         // This ensures reqwest uses the same Tor circuit as the resolver,
         // so the CDN sees the same exit IP as the one bound to the URL
         // token.
-        let socks_forwarder = SocksForwarder::start(
-            socks_addr.clone(),
-            isolation_username.clone(),
-        )
-        .await?;
+        let socks_forwarder =
+            SocksForwarder::start(socks_addr.clone(), isolation_username.clone()).await?;
 
         let proxy_url = socks_forwarder.proxy_url();
 
         // Build reqwest client that routes through the SOCKS forwarder.
-        let reqwest_proxy = reqwest::Proxy::all(&proxy_url)
-            .map_err(|e| format!("media proxy: failed to configure HTTP proxy for reqwest: {}", e))?;
+        let reqwest_proxy = reqwest::Proxy::all(&proxy_url).map_err(|e| {
+            format!("media proxy: failed to configure HTTP proxy for reqwest: {}", e)
+        })?;
 
         let client = reqwest::Client::builder()
             .user_agent(BROWSER_UA)
@@ -148,8 +146,8 @@ impl MediaProxy {
             // too slow for 720p video (2-5 Mbps needed), causing constant
             // buffer underruns and "A lot of buffers are being dropped"
             // warnings from kmssink.
-            .http2_initial_stream_window_size(2 * 1024 * 1024)       // 2 MB per stream
-            .http2_initial_connection_window_size(2 * 1024 * 1024)    // 2 MB total connection
+            .http2_initial_stream_window_size(2 * 1024 * 1024) // 2 MB per stream
+            .http2_initial_connection_window_size(2 * 1024 * 1024) // 2 MB total connection
             // NOTE: http2_adaptive_window(true) is intentionally NOT used
             // here. Adaptive window starts with the DEFAULT 64KB window
             // and grows over time, which overrides our explicit 2MB
@@ -163,10 +161,8 @@ impl MediaProxy {
         let listener = TcpListener::bind("127.0.0.1:0")
             .await
             .map_err(|e| format!("media proxy: bind: {}", e))?;
-        let local_addr = listener
-            .local_addr()
-            .map(|a| a.to_string())
-            .unwrap_or_else(|_| "127.0.0.1:0".into());
+        let local_addr =
+            listener.local_addr().map(|a| a.to_string()).unwrap_or_else(|_| "127.0.0.1:0".into());
 
         let (shutdown_tx, shutdown_rx) = oneshot::channel::<()>();
 
@@ -183,8 +179,7 @@ impl MediaProxy {
         // This is critical: previously, a 429 rejection was sent to the
         // new connection, which souphttpsrc treated as a fatal error,
         // causing the pipeline to die entirely.
-        let active_cancel: Arc<Mutex<Option<Arc<AtomicBool>>>> =
-            Arc::new(Mutex::new(None));
+        let active_cancel: Arc<Mutex<Option<Arc<AtomicBool>>>> = Arc::new(Mutex::new(None));
 
         // Clone values for the spawned server task — the originals are
         // needed to construct Self (used by preflight_check).
@@ -305,7 +300,8 @@ impl MediaProxy {
     /// makes CDN 403s synchronous errors that the retry loop can
     /// handle.
     pub async fn preflight_check(&self) -> Result<(), String> {
-        let mut req = self.client
+        let mut req = self
+            .client
             .head(&self.cdn_url)
             .header("Accept", "*/*")
             .header("Accept-Encoding", "identity;q=1, *;q=0")
@@ -325,7 +321,8 @@ impl MediaProxy {
             req = req.header("Cookie", &cookie_header);
         }
 
-        let response = self.client
+        let response = self
+            .client
             .execute(req.build().map_err(|e| format!("preflight: build request: {}", e))?)
             .await
             .map_err(|e| format!("preflight: CDN request failed: {}", e))?;
@@ -392,10 +389,7 @@ async fn handle_connection(
 ) -> Result<(), String> {
     // Read HTTP request from souphttpsrc.
     let mut buf = vec![0u8; 4096];
-    let n = stream
-        .read(&mut buf)
-        .await
-        .map_err(|e| format!("read request: {}", e))?;
+    let n = stream.read(&mut buf).await.map_err(|e| format!("read request: {}", e))?;
 
     if n == 0 {
         return Err("client disconnected before sending request".into());
@@ -496,13 +490,9 @@ async fn handle_connection(
     let mut response_header = format!("HTTP/1.1 {} {}\r\n", status_code, status_text);
 
     // Forward essential response headers.
-    for name in &[
-        "content-type",
-        "content-length",
-        "content-range",
-        "accept-ranges",
-        "cache-control",
-    ] {
+    for name in
+        &["content-type", "content-length", "content-range", "accept-ranges", "cache-control"]
+    {
         if let Some(value) = headers.get(*name) {
             if let Ok(v) = value.to_str() {
                 response_header.push_str(&format!("{}: {}\r\n", name, v));
@@ -604,7 +594,7 @@ async fn handle_connection(
                         "media proxy: streaming progress"
                     );
                 }
-            }
+            },
             Err(e) => {
                 tracing::warn!(
                     error = %e,
@@ -613,7 +603,7 @@ async fn handle_connection(
                     "media proxy: error reading from CDN stream"
                 );
                 break;
-            }
+            },
         }
     }
 
@@ -658,10 +648,7 @@ mod tests {
     #[test]
     fn test_extract_header() {
         let request = "GET / HTTP/1.1\r\nHost: localhost\r\nRange: bytes=0-1024\r\n\r\n";
-        assert_eq!(
-            extract_header(request, "Range"),
-            Some("bytes=0-1024".to_string())
-        );
+        assert_eq!(extract_header(request, "Range"), Some("bytes=0-1024".to_string()));
         assert_eq!(extract_header(request, "Host"), Some("localhost".to_string()));
         assert_eq!(extract_header(request, "X-Custom"), None);
     }
@@ -669,9 +656,6 @@ mod tests {
     #[test]
     fn test_extract_header_case_insensitive() {
         let request = "GET / HTTP/1.1\r\nrange: bytes=0-\r\n\r\n";
-        assert_eq!(
-            extract_header(request, "Range"),
-            Some("bytes=0-".to_string())
-        );
+        assert_eq!(extract_header(request, "Range"), Some("bytes=0-".to_string()));
     }
 }

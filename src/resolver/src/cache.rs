@@ -200,7 +200,11 @@ impl ResolveCache {
         match conn.execute("DELETE FROM resolved_urls WHERE source_url = ?", params![url]) {
             Ok(deleted) => {
                 if deleted > 0 {
-                    tracing::info!(url = url, deleted = deleted, "deleted cache entry for re-resolve");
+                    tracing::info!(
+                        url = url,
+                        deleted = deleted,
+                        "deleted cache entry for re-resolve"
+                    );
                 }
             },
             Err(e) => tracing::warn!(error = %e, url = url, "failed to delete cache entry"),

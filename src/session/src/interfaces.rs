@@ -56,10 +56,7 @@ pub trait ResolverTrait: Send + Sync {
     /// returns 403 Forbidden due to an IP-bound token that no longer
     /// matches the current Tor exit IP — re-resolving gets a fresh
     /// URL bound to the current exit IP.
-    async fn invalidate_cache(
-        &self,
-        url: &str,
-    );
+    async fn invalidate_cache(&self, url: &str);
 }
 
 // ── Playback ─────────────────────────────────────────────────────────

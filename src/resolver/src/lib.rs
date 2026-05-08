@@ -179,10 +179,7 @@ impl Resolver {
     /// resolved URLs survive server restarts. This avoids re-resolving
     /// every URL through Tor/yt-dlp on every boot, which would be
     /// slow and waste bandwidth.
-    pub fn with_persistent_cache(
-        tor: Arc<picast_tor::TorManager>,
-        path: &std::path::Path,
-    ) -> Self {
+    pub fn with_persistent_cache(tor: Arc<picast_tor::TorManager>, path: &std::path::Path) -> Self {
         Self { tor, cache: Arc::new(Mutex::new(ResolveCache::with_path(path))) }
     }
 
@@ -193,10 +190,7 @@ impl Resolver {
         path: &std::path::Path,
         ttl: std::time::Duration,
     ) -> Self {
-        Self {
-            tor,
-            cache: Arc::new(Mutex::new(ResolveCache::with_path_and_ttl(Some(path), ttl))),
-        }
+        Self { tor, cache: Arc::new(Mutex::new(ResolveCache::with_path_and_ttl(Some(path), ttl))) }
     }
 
     /// Resolve `url` into a [`ResolveResult`].
@@ -312,8 +306,13 @@ impl Resolver {
 
                     // Check DoodStream first (distinct resolver, no overlap with Voe)
                     if custom::is_doodstream_domain(host) {
-                        tracing::info!(url = url, resolver = "doodstream", "using DoodStream custom resolver (known domain)");
-                        let mut result = custom::resolve_doodstream(url, socks5_proxy.as_deref()).await?;
+                        tracing::info!(
+                            url = url,
+                            resolver = "doodstream",
+                            "using DoodStream custom resolver (known domain)"
+                        );
+                        let mut result =
+                            custom::resolve_doodstream(url, socks5_proxy.as_deref()).await?;
                         result.category = UrlCategory::WebPage;
                         {
                             let cache = self.cache.lock().await;
@@ -333,7 +332,11 @@ impl Resolver {
                         resolver = "voe",
                         known_domain = is_known_voe,
                         "trying Voe custom resolver{} for WebPage URL",
-                        if is_known_voe { " (known domain)" } else { " (unknown domain — may be a new Voe front-end)" }
+                        if is_known_voe {
+                            " (known domain)"
+                        } else {
+                            " (unknown domain — may be a new Voe front-end)"
+                        }
                     );
 
                     match custom::resolve_voe(url, socks5_proxy.as_deref()).await {
@@ -510,10 +513,7 @@ impl ResolverTrait for Resolver {
         })
     }
 
-    async fn invalidate_cache(
-        &self,
-        url: &str,
-    ) {
+    async fn invalidate_cache(&self, url: &str) {
         tracing::info!(url = url, "invalidating resolver cache for re-resolve");
         let cache = self.cache.lock().await;
         cache.delete(url);

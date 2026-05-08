@@ -147,14 +147,8 @@ impl YtdlpOutput {
             let mut audio_url: Option<String> = None;
 
             for fmt in formats {
-                let has_video = fmt
-                    .vcodec
-                    .as_ref()
-                    .is_some_and(|c| c != "none" && !c.is_empty());
-                let has_audio = fmt
-                    .acodec
-                    .as_ref()
-                    .is_some_and(|c| c != "none" && !c.is_empty());
+                let has_video = fmt.vcodec.as_ref().is_some_and(|c| c != "none" && !c.is_empty());
+                let has_audio = fmt.acodec.as_ref().is_some_and(|c| c != "none" && !c.is_empty());
 
                 if let Some(ref url) = fmt.url {
                     if !url.is_empty() {
@@ -376,10 +370,7 @@ fn determine_mime_type(
     acodec: &Option<String>,
     format: &Option<String>,
 ) -> Option<String> {
-    let has_vp9 = vcodec
-        .as_ref()
-        .map(|c| c.contains("vp9") || c.contains("vp09"))
-        .unwrap_or(false);
+    let has_vp9 = vcodec.as_ref().map(|c| c.contains("vp9") || c.contains("vp09")).unwrap_or(false);
     let has_av1 = vcodec.as_ref().map(|c| c.contains("av1")).unwrap_or(false);
     let has_opus = acodec.as_ref().map(|c| c.contains("opus")).unwrap_or(false);
     let is_webm_container = format.as_ref().map(|f| f.contains("webm")).unwrap_or(false);
@@ -654,24 +645,14 @@ mod tests {
     #[test]
     fn determine_mime_type_video_only_no_audio() {
         // Video codec present, no audio codec at all.
-        let mime = determine_mime_type(
-            &UrlCategory::WebPage,
-            &Some("avc1".into()),
-            &None,
-            &None,
-        );
+        let mime = determine_mime_type(&UrlCategory::WebPage, &Some("avc1".into()), &None, &None);
         assert_eq!(mime, Some("video/mp4".into()));
     }
 
     #[test]
     fn determine_mime_type_audio_only_no_video() {
         // No video codec at all, audio codec present.
-        let mime = determine_mime_type(
-            &UrlCategory::WebPage,
-            &None,
-            &Some("opus".into()),
-            &None,
-        );
+        let mime = determine_mime_type(&UrlCategory::WebPage, &None, &Some("opus".into()), &None);
         assert_eq!(mime, Some("audio/ogg".into()));
     }
 

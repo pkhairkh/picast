@@ -58,12 +58,18 @@ const MAX_CONNECTIONS: usize = 32;
 #[derive(Debug, Deserialize)]
 #[serde(tag = "type", rename_all = "SCREAMING_SNAKE_CASE")]
 enum ClientCommand {
-    Cast { url: String },
+    Cast {
+        url: String,
+    },
     Stop,
     Pause,
     Resume,
-    Seek { position_ms: u64 },
-    Volume { volume: u8 },
+    Seek {
+        position_ms: u64,
+    },
+    Volume {
+        volume: u8,
+    },
     /// Application-level keep-alive. The client sends PING and the
     /// server responds with a PONG event. This is distinct from
     /// the WebSocket protocol-level ping/pong frames — some clients
@@ -225,7 +231,8 @@ async fn accept_wss_stream(
     tls_acceptor: &TlsAcceptor,
     config: Option<tokio_tungstenite::tungstenite::protocol::WebSocketConfig>,
 ) -> Result<WsStream> {
-    let tls_stream = tls_acceptor.accept(stream).await.map_err(|e| anyhow!("TLS handshake failed: {}", e))?;
+    let tls_stream =
+        tls_acceptor.accept(stream).await.map_err(|e| anyhow!("TLS handshake failed: {}", e))?;
     let ws_stream = tokio_tungstenite::accept_async_with_config(tls_stream, config).await?;
     Ok(WsStream::Tls(Box::new(ws_stream)))
 }
@@ -241,7 +248,13 @@ async fn accept_ws_stream_plain(
 
 /// Type-erased WebSocket stream that supports both plain WS and WSS.
 enum WsStream {
-    Tls(Box<tokio_tungstenite::WebSocketStream<tokio_rustls::server::TlsStream<tokio::net::TcpStream>>>),
+    Tls(
+        Box<
+            tokio_tungstenite::WebSocketStream<
+                tokio_rustls::server::TlsStream<tokio::net::TcpStream>,
+            >,
+        >,
+    ),
     Plain(Box<tokio_tungstenite::WebSocketStream<tokio::net::TcpStream>>),
 }
 
@@ -269,7 +282,7 @@ impl WsStream {
 async fn handle_client(
     ws_stream: WsStream,
     session: Arc<SessionManager>,
-    _permit: tokio::sync::SemaphorePermit<'_>
+    _permit: tokio::sync::SemaphorePermit<'_>,
 ) -> Result<()> {
     let mut ws = ws_stream;
     let mut event_rx = session.subscribe();
@@ -436,7 +449,10 @@ async fn handle_command(session: &SessionManager, cmd: ClientCommand) -> Result<
 /// source URL, title) are used to populate the `MediaStatus` payload
 /// instead of hardcoded placeholder values. This gives clients an
 /// accurate snapshot of the player state on every event.
-fn map_session_event(event: &SessionEvent, current_session: Option<&MediaSession>) -> Option<ServerEvent> {
+fn map_session_event(
+    event: &SessionEvent,
+    current_session: Option<&MediaSession>,
+) -> Option<ServerEvent> {
     match event {
         SessionEvent::Playing { .. }
         | SessionEvent::Paused { .. }
@@ -544,11 +560,10 @@ fn map_session_event(event: &SessionEvent, current_session: Option<&MediaSession
                 })
             }
         },
-        SessionEvent::CdnForbidden { .. } => {
-            Some(ServerEvent::Error {
-                message: "CDN rejected request (403 Forbidden) — Tor exit IP mismatch, re-resolving…".into(),
-            })
-        },
+        SessionEvent::CdnForbidden { .. } => Some(ServerEvent::Error {
+            message: "CDN rejected request (403 Forbidden) — Tor exit IP mismatch, re-resolving…"
+                .into(),
+        }),
     }
 }
 
@@ -637,7 +652,15 @@ mod tests {
         let event = SessionEvent::Playing { id: session.id };
         let result = map_session_event(&event, Some(&session));
         assert!(result.is_some());
-        if let Some(ServerEvent::MediaStatus { state, position_ms, volume, source_url, title, .. }) = result {
+        if let Some(ServerEvent::MediaStatus {
+            state,
+            position_ms,
+            volume,
+            source_url,
+            title,
+            ..
+        }) = result
+        {
             assert_eq!(state, "playing");
             assert_eq!(position_ms, 5000);
             assert_eq!(volume, 75);
@@ -653,7 +676,15 @@ mod tests {
         let event = SessionEvent::Playing { id: uuid::Uuid::new_v4() };
         let result = map_session_event(&event, None);
         assert!(result.is_some());
-        if let Some(ServerEvent::MediaStatus { state, position_ms, volume, source_url, title, .. }) = result {
+        if let Some(ServerEvent::MediaStatus {
+            state,
+            position_ms,
+            volume,
+            source_url,
+            title,
+            ..
+        }) = result
+        {
             assert_eq!(state, "playing");
             assert_eq!(position_ms, 0);
             assert_eq!(volume, 100);

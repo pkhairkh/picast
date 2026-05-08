@@ -131,11 +131,8 @@ impl StreamSource {
         cookies: Vec<String>,
     ) -> Result<Self, String> {
         // Start SOCKS forwarder for reqwest's Tor routing.
-        let socks_forwarder = SocksForwarder::start(
-            socks_addr.clone(),
-            isolation_username.clone(),
-        )
-        .await?;
+        let socks_forwarder =
+            SocksForwarder::start(socks_addr.clone(), isolation_username.clone()).await?;
 
         let proxy_url = socks_forwarder.proxy_url();
 
@@ -186,7 +183,8 @@ impl StreamSource {
     /// Returns the CDN's Content-Length header if available, which
     /// is used to estimate the video bitrate.
     pub async fn preflight_check(&self) -> Result<Option<u64>, String> {
-        let mut req = self.client
+        let mut req = self
+            .client
             .head(&self.cdn_url)
             .header("Accept", "*/*")
             .header("Accept-Encoding", "identity;q=1, *;q=0")
@@ -206,7 +204,8 @@ impl StreamSource {
             req = req.header("Cookie", &cookie_header);
         }
 
-        let response = self.client
+        let response = self
+            .client
             .execute(req.build().map_err(|e| format!("preflight: build request: {}", e))?)
             .await
             .map_err(|e| format!("preflight: CDN request failed: {}", e))?;
@@ -221,7 +220,10 @@ impl StreamSource {
         );
 
         if status.as_u16() == 403 {
-            return Err("CDN 403 Forbidden — re-resolve needed (exit IP may be blocked by CDN anti-bot)".into());
+            return Err(
+                "CDN 403 Forbidden — re-resolve needed (exit IP may be blocked by CDN anti-bot)"
+                    .into(),
+            );
         }
 
         if !status.is_success() && status.as_u16() != 206 {
@@ -233,7 +235,8 @@ impl StreamSource {
         }
 
         // Extract Content-Length for bitrate estimation.
-        let content_length = response.headers()
+        let content_length = response
+            .headers()
             .get("content-length")
             .and_then(|v| v.to_str().ok())
             .and_then(|v| v.parse::<u64>().ok());
@@ -305,7 +308,7 @@ impl StreamSource {
                 Err(e) => {
                     tracing::error!(error = %e, "stream source: CDN request failed");
                     return;
-                }
+                },
             };
 
             let status = response.status();
@@ -313,10 +316,8 @@ impl StreamSource {
 
             // Store HTTP status and content metadata
             *progress.http_status.lock().unwrap() = Some(status.as_u16());
-            *progress.content_type.lock().unwrap() = headers
-                .get("content-type")
-                .and_then(|v| v.to_str().ok())
-                .map(|s| s.to_string());
+            *progress.content_type.lock().unwrap() =
+                headers.get("content-type").and_then(|v| v.to_str().ok()).map(|s| s.to_string());
             *progress.total_bytes.lock().unwrap() = headers
                 .get("content-length")
                 .and_then(|v| v.to_str().ok())
@@ -344,10 +345,7 @@ impl StreamSource {
 
             while let Some(chunk_result) = body_stream.next().await {
                 if cancel.load(Ordering::Relaxed) {
-                    tracing::info!(
-                        total_bytes = offset,
-                        "stream source: download cancelled"
-                    );
+                    tracing::info!(total_bytes = offset, "stream source: download cancelled");
                     return;
                 }
 
@@ -363,10 +361,11 @@ impl StreamSource {
                         // Send chunk to the channel. If the channel is full
                         // (appsrc's queue is full), this will wait until
                         // space is available, providing natural backpressure.
-                        if data_tx.send(DataChunk {
-                            data: chunk,
-                            offset: chunk_offset,
-                        }).await.is_err() {
+                        if data_tx
+                            .send(DataChunk { data: chunk, offset: chunk_offset })
+                            .await
+                            .is_err()
+                        {
                             // Receiver dropped — pipeline was destroyed
                             tracing::debug!(
                                 total_bytes = offset,
@@ -383,7 +382,8 @@ impl StreamSource {
                         if last_progress_update.elapsed() >= progress_update_interval {
                             let elapsed = last_progress_update.elapsed().as_secs_f64();
                             if elapsed > 0.0 {
-                                let kbps = (bytes_since_last_update * 8) / (elapsed * 1000.0) as u64;
+                                let kbps =
+                                    (bytes_since_last_update * 8) / (elapsed * 1000.0) as u64;
                                 progress.throughput_kbps.store(kbps, Ordering::Relaxed);
                             }
                             bytes_since_last_update = 0;
@@ -391,7 +391,10 @@ impl StreamSource {
 
                             // Log progress periodically (every ~10 MB)
                             if offset % (10 * 1024 * 1024) < chunk_len {
-                                let total_elapsed = progress.start_time.lock().unwrap()
+                                let total_elapsed = progress
+                                    .start_time
+                                    .lock()
+                                    .unwrap()
                                     .map(|t| t.elapsed().as_secs())
                                     .unwrap_or(0);
                                 let throughput = progress.throughput_kbps.load(Ordering::Relaxed);
@@ -405,7 +408,7 @@ impl StreamSource {
                                 );
                             }
                         }
-                    }
+                    },
                     Err(e) => {
                         tracing::warn!(
                             error = %e,
@@ -413,13 +416,12 @@ impl StreamSource {
                             "stream source: error reading from CDN stream"
                         );
                         break;
-                    }
+                    },
                 }
             }
 
-            let total_elapsed = progress.start_time.lock().unwrap()
-                .map(|t| t.elapsed().as_secs())
-                .unwrap_or(0);
+            let total_elapsed =
+                progress.start_time.lock().unwrap().map(|t| t.elapsed().as_secs()).unwrap_or(0);
             tracing::info!(
                 total_bytes = offset,
                 elapsed_s = total_elapsed,
@@ -443,7 +445,11 @@ impl StreamSource {
         let total_bytes = *self.progress.total_bytes.lock().unwrap();
         let http_status = *self.progress.http_status.lock().unwrap();
         let content_type = self.progress.content_type.lock().unwrap().clone();
-        let elapsed_secs = self.progress.start_time.lock().unwrap()
+        let elapsed_secs = self
+            .progress
+            .start_time
+            .lock()
+            .unwrap()
             .map(|t| t.elapsed().as_secs_f64())
             .unwrap_or(0.0);
 

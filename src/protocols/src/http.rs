@@ -347,9 +347,7 @@ async fn handle_request(
             let payload = read_body_json::<VolumeRequest>(body).await?;
             let volume = payload.clamped_volume();
             match session.set_volume(volume).await {
-                Ok(()) => {
-                    json_response(StatusCode::OK, &serde_json::json!({"volume": volume}))
-                },
+                Ok(()) => json_response(StatusCode::OK, &serde_json::json!({"volume": volume})),
                 Err(e) => {
                     let status = match &e {
                         picast_session::SessionError::NoActiveSession => StatusCode::CONFLICT,
@@ -377,10 +375,13 @@ async fn handle_request(
                         sink_type = %payload.sink_type,
                         "audio device updated via API"
                     );
-                    json_response(StatusCode::OK, &serde_json::json!({
-                        "device": payload.device,
-                        "sink_type": payload.sink_type,
-                    }))
+                    json_response(
+                        StatusCode::OK,
+                        &serde_json::json!({
+                            "device": payload.device,
+                            "sink_type": payload.sink_type,
+                        }),
+                    )
                 },
                 Err(e) => error_response(StatusCode::INTERNAL_SERVER_ERROR, &e.to_string()),
             }
@@ -388,9 +389,7 @@ async fn handle_request(
 
         // Get audio device.
         (Method::GET, "/api/audio-device") => match session.audio_device().await {
-            Ok(device) => {
-                json_response(StatusCode::OK, &serde_json::json!({"device": device}))
-            },
+            Ok(device) => json_response(StatusCode::OK, &serde_json::json!({"device": device})),
             Err(e) => error_response(StatusCode::INTERNAL_SERVER_ERROR, &e.to_string()),
         },
 
@@ -439,7 +438,11 @@ async fn read_body_json<T: serde::de::DeserializeOwned>(body: Incoming) -> Resul
     use http_body_util::BodyExt;
     let bytes = body.collect().await?.to_bytes();
     if bytes.len() > MAX_BODY_SIZE {
-        return Err(anyhow::anyhow!("request body too large ({} bytes, max {})", bytes.len(), MAX_BODY_SIZE));
+        return Err(anyhow::anyhow!(
+            "request body too large ({} bytes, max {})",
+            bytes.len(),
+            MAX_BODY_SIZE
+        ));
     }
     Ok(serde_json::from_slice(&bytes)?)
 }
@@ -455,7 +458,9 @@ fn is_safe_cast_url(url: &str) -> Result<()> {
         "file" => Err(anyhow::anyhow!("file:// URLs are not allowed — use http:// or https://")),
         "data" => Err(anyhow::anyhow!("data: URLs are not allowed — use http:// or https://")),
         "javascript" => Err(anyhow::anyhow!("javascript: URLs are not allowed")),
-        scheme => Err(anyhow::anyhow!("unsupported URL scheme: {} — use http:// or https://", scheme)),
+        scheme => {
+            Err(anyhow::anyhow!("unsupported URL scheme: {} — use http:// or https://", scheme))
+        },
     }
 }
 
@@ -495,9 +500,8 @@ fn list_alsa_devices() -> Vec<AlsaDevice> {
         });
 
         // Try to list PulseAudio sinks for more specific options.
-        if let Ok(output) = std::process::Command::new("pactl")
-            .args(["list", "short", "sinks"])
-            .output()
+        if let Ok(output) =
+            std::process::Command::new("pactl").args(["list", "short", "sinks"]).output()
         {
             if let Ok(stdout) = String::from_utf8(output.stdout) {
                 for line in stdout.lines() {
@@ -505,13 +509,14 @@ fn list_alsa_devices() -> Vec<AlsaDevice> {
                     let parts: Vec<&str> = line.split_whitespace().collect();
                     if parts.len() >= 2 {
                         let sink_name = parts[1].to_string();
-                        let display_name = if sink_name.contains("bluez") || sink_name.contains("bluetooth") {
-                            format!("PulseAudio Bluetooth ({})", sink_name)
-                        } else if sink_name.contains("hdmi") {
-                            format!("PulseAudio HDMI ({})", sink_name)
-                        } else {
-                            format!("PulseAudio ({})", sink_name)
-                        };
+                        let display_name =
+                            if sink_name.contains("bluez") || sink_name.contains("bluetooth") {
+                                format!("PulseAudio Bluetooth ({})", sink_name)
+                            } else if sink_name.contains("hdmi") {
+                                format!("PulseAudio HDMI ({})", sink_name)
+                            } else {
+                                format!("PulseAudio ({})", sink_name)
+                            };
                         devices.push(AlsaDevice {
                             device: sink_name.clone(),
                             card_name: display_name,
@@ -541,7 +546,9 @@ fn list_alsa_devices() -> Vec<AlsaDevice> {
             || std::path::Path::new("/run/bluealsa").exists()
             || std::process::Command::new("dbus-send")
                 .args([
-                    "--system", "--dest=org.bluealsa", "/org/bluealsa",
+                    "--system",
+                    "--dest=org.bluealsa",
+                    "/org/bluealsa",
                     "org.freedesktop.DBus.Introspectable.Introspect",
                 ])
                 .output()
@@ -550,9 +557,8 @@ fn list_alsa_devices() -> Vec<AlsaDevice> {
 
         if bluealsa_running {
             // Try to list connected Bluetooth audio devices via bluetoothctl
-            if let Ok(output) = std::process::Command::new("bluetoothctl")
-                .args(["devices", "Connected"])
-                .output()
+            if let Ok(output) =
+                std::process::Command::new("bluetoothctl").args(["devices", "Connected"]).output()
             {
                 if let Ok(stdout) = String::from_utf8(output.stdout) {
                     for line in stdout.lines() {
@@ -633,7 +639,7 @@ fn list_alsa_devices() -> Vec<AlsaDevice> {
                 });
             }
             return devices;
-        }
+        },
     };
 
     for line in pcm_content.lines() {

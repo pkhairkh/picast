@@ -457,9 +457,7 @@ impl SessionManager {
             PlayerState::Error => {
                 SessionEvent::Error { id: session_id, message: "entered error state".into() }
             },
-            PlayerState::Buffering => {
-                SessionEvent::Buffering { id: session_id, percent: 0 }
-            },
+            PlayerState::Buffering => SessionEvent::Buffering { id: session_id, percent: 0 },
             _ => return Ok(target), // No broadcast for Seeking here
         };
         let _ = self.event_tx.send(event);
@@ -529,7 +527,18 @@ impl SessionManager {
                 other => SessionError::Database(other),
             })?;
 
-        let (id_str, source_url, resolved_url, state_str, position_ms, duration_ms, volume, title, created_at_str, updated_at_str) = raw;
+        let (
+            id_str,
+            source_url,
+            resolved_url,
+            state_str,
+            position_ms,
+            duration_ms,
+            volume,
+            title,
+            created_at_str,
+            updated_at_str,
+        ) = raw;
 
         let id = Uuid::parse_str(&id_str).map_err(|e| {
             SessionError::Subsystem(format!("corrupt session ID '{}': {}", id_str, e))
@@ -832,7 +841,13 @@ impl SessionManager {
 
             if let Some(ref playback) = self.playback {
                 let play_result = playback
-                    .play(&current_resolve.direct_url, url, &socks_addr, &isolation_username, current_resolve.cookies.clone())
+                    .play(
+                        &current_resolve.direct_url,
+                        url,
+                        &socks_addr,
+                        &isolation_username,
+                        current_resolve.cookies.clone(),
+                    )
                     .await;
 
                 match play_result {
@@ -965,7 +980,10 @@ impl SessionManager {
         // If we're in Playing/Paused/Buffering/Seeking, stop the pipeline first.
         if matches!(
             session.state,
-            PlayerState::Playing | PlayerState::Paused | PlayerState::Buffering | PlayerState::Seeking
+            PlayerState::Playing
+                | PlayerState::Paused
+                | PlayerState::Buffering
+                | PlayerState::Seeking
         ) {
             if let Some(ref playback) = self.playback {
                 let _ = playback.stop().await;
@@ -1126,9 +1144,10 @@ impl SessionManager {
         session_id: Uuid,
     ) -> Result<interfaces::ResolveInfo, SessionError> {
         let resolve_result = if let Some(ref resolver) = self.resolver {
-            resolver.resolve(url).await.map_err(|e| {
-                SessionError::ResolutionFailed(e.to_string())
-            })?
+            resolver
+                .resolve(url)
+                .await
+                .map_err(|e| SessionError::ResolutionFailed(e.to_string()))?
         } else {
             return Err(SessionError::Subsystem("no resolver configured".into()));
         };
@@ -1352,6 +1371,7 @@ mod tests {
                 direct_url: format!("{}?direct=1", url),
                 title: Some("Mock Title".to_string()),
                 duration_ms: Some(300000),
+                cookies: vec![],
             })
         }
 

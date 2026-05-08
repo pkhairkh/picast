@@ -53,15 +53,15 @@
 //! Most streams already report bt709 in their H.264 VUI parameters, and
 //! v4l2h264dec passes this through to kmssink correctly without intervention.
 
-use crate::{BufferHealth, PipelineConfig, PlaybackError};
 use crate::media_proxy::MediaProxy;
 use crate::stream_source::StreamSource;
+use crate::{BufferHealth, PipelineConfig, PlaybackError};
 use gstreamer::prelude::*;
 use gstreamer::{Element, ElementFactory, Pipeline, State};
-use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::Arc;
 #[cfg(feature = "hevc")]
 use picast_v3d::V3dComputeEngine;
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::Arc;
 
 /// Ensure GStreamer is initialised exactly once.
 static GST_INIT: std::sync::OnceLock<Result<(), String>> = std::sync::OnceLock::new();
@@ -70,18 +70,16 @@ static GST_INIT: std::sync::OnceLock<Result<(), String>> = std::sync::OnceLock::
 /// Returns an error if initialisation fails (instead of panicking),
 /// and subsequent calls will return the same error.
 fn ensure_gst_init() -> Result<(), PlaybackError> {
-    match GST_INIT.get_or_init(|| {
-        match gstreamer::init() {
-            Ok(()) => {
-                tracing::debug!("GStreamer initialised successfully");
-                Ok(())
-            },
-            Err(e) => {
-                let message = format!("GStreamer init failed (permanent): {}", e);
-                tracing::error!("{}", message);
-                Err(message)
-            },
-        }
+    match GST_INIT.get_or_init(|| match gstreamer::init() {
+        Ok(()) => {
+            tracing::debug!("GStreamer initialised successfully");
+            Ok(())
+        },
+        Err(e) => {
+            let message = format!("GStreamer init failed (permanent): {}", e);
+            tracing::error!("{}", message);
+            Err(message)
+        },
     }) {
         Ok(()) => Ok(()),
         Err(message) => Err(PlaybackError::Gstreamer(message.clone())),
@@ -210,7 +208,8 @@ impl GstPipeline {
             || url.starts_with("http://localhost:")
             || url.starts_with("http://[::1]:");
 
-        let use_stream_source = !is_loopback_url && !socks_addr.is_empty() && !isolation_username.is_empty();
+        let use_stream_source =
+            !is_loopback_url && !socks_addr.is_empty() && !isolation_username.is_empty();
 
         // ── Source element ──────────────────────────────────────────
         //
@@ -254,7 +253,7 @@ impl GstPipeline {
                     "stream source: preflight CDN check failed — re-resolve needed"
                 );
                 return Err(PlaybackError::PipelineCreation(
-                    "CDN 403 Forbidden — re-resolve needed".into()
+                    "CDN 403 Forbidden — re-resolve needed".into(),
                 ));
             }
 
@@ -269,16 +268,15 @@ impl GstPipeline {
 
             // Create appsrc element for pushing downloaded data.
             let appsrc = ElementFactory::make("appsrc")
-                .property("stream-type", 0i32)  // GST_APP_STREAM_TYPE_STREAM — sequential, no seeking
-                .property("format", 2i32)       // GST_FORMAT_BYTES
+                .property("stream-type", 0i32) // GST_APP_STREAM_TYPE_STREAM — sequential, no seeking
+                .property("format", 2i32) // GST_FORMAT_BYTES
                 .property("is-live", false)
-                .property("block", false)        // Don't block push-buffer when queue is full
+                .property("block", false) // Don't block push-buffer when queue is full
                 .build()
                 .map_err(|e| PlaybackError::PipelineCreation(format!("appsrc: {}", e)))?;
 
             stream_source = Some(source);
             appsrc
-
         } else if is_loopback_url {
             // ── Loopback URL: souphttpsrc directly ──
             tracing::debug!("loopback media URL detected; connecting directly");
@@ -297,7 +295,9 @@ impl GstPipeline {
                 .map_err(|e| PlaybackError::PipelineCreation(format!("souphttpsrc: {}", e)))?
         } else {
             // ── No isolation username: souphttpsrc directly ──
-            tracing::warn!("no isolation username provided; connecting directly to CDN (not through Tor)");
+            tracing::warn!(
+                "no isolation username provided; connecting directly to CDN (not through Tor)"
+            );
             ElementFactory::make("souphttpsrc")
                 .property("location", url)
                 .property("timeout", 120u32)
@@ -333,8 +333,8 @@ impl GstPipeline {
             .property("max-size-bytes", 200_000_000u32) // 200 MB — larger buffer for appsrc path (no souphttpsrc buffering)
             .property("max-size-time", 120_000_000_000u64) // 120 seconds of media data — more headroom for slow Tor links
             .property("use-buffering", true)
-            .property("high-percent", 80i32)  // start playing when 80% full
-            .property("low-percent", 15i32)   // pause when buffer drops to 15% — pause early to avoid complete depletion
+            .property("high-percent", 80i32) // start playing when 80% full
+            .property("low-percent", 15i32) // pause when buffer drops to 15% — pause early to avoid complete depletion
             .build()
             .map_err(|e| PlaybackError::PipelineCreation(format!("queue2: {}", e)))?;
 
@@ -500,16 +500,21 @@ impl GstPipeline {
             );
         }
 
-        let audiosink = audiosink_builder
-            .build()
-            .map_err(|e| {
-                PlaybackError::PipelineCreation(format!("{}: {}", config.audio_sink, e))
-            })?;
+        let audiosink = audiosink_builder.build().map_err(|e| {
+            PlaybackError::PipelineCreation(format!("{}: {}", config.audio_sink, e))
+        })?;
 
         // ── Assemble pipeline ───────────────────────────────────────
         let mut all_elements: Vec<&Element> = vec![
-            &src, &queue2, &parsebin, &video_sink,
-            &audio_queue, &audioconvert, &audioresample, &volume, &audiosink,
+            &src,
+            &queue2,
+            &parsebin,
+            &video_sink,
+            &audio_queue,
+            &audioconvert,
+            &audioresample,
+            &volume,
+            &audiosink,
         ];
         if let Some(ref dec) = audio_decoder {
             all_elements.push(dec);
@@ -529,12 +534,26 @@ impl GstPipeline {
         //   (will fail caps negotiation for encoded audio, but the fakesink
         //    fallback in the pad-added handler prevents pipeline death)
         if let Some(ref dec) = audio_decoder {
-            Element::link_many([&audio_queue, dec, &audioconvert, &audioresample, &volume, &audiosink])
-                .map_err(|e| PlaybackError::PipelineCreation(format!("link audio chain (with decoder): {}", e)))?;
-            tracing::info!("audio chain: audio_queue → avdec_aac → audioconvert → audioresample → volume → {}", config.audio_sink);
+            Element::link_many([
+                &audio_queue,
+                dec,
+                &audioconvert,
+                &audioresample,
+                &volume,
+                &audiosink,
+            ])
+            .map_err(|e| {
+                PlaybackError::PipelineCreation(format!("link audio chain (with decoder): {}", e))
+            })?;
+            tracing::info!(
+                "audio chain: audio_queue → avdec_aac → audioconvert → audioresample → volume → {}",
+                config.audio_sink
+            );
         } else {
             Element::link_many([&audio_queue, &audioconvert, &audioresample, &volume, &audiosink])
-                .map_err(|e| PlaybackError::PipelineCreation(format!("link audio chain (no decoder): {}", e)))?;
+                .map_err(|e| {
+                    PlaybackError::PipelineCreation(format!("link audio chain (no decoder): {}", e))
+                })?;
             tracing::warn!("audio chain has no decoder — encoded audio streams will be dropped");
         }
 
@@ -988,10 +1007,8 @@ impl GstPipeline {
                     // Push the chunk into appsrc as a GStreamer buffer.
                     if let Some(appsrc) = appsrc_weak.upgrade() {
                         let buffer = gstreamer::Buffer::from_slice(chunk.data.to_vec());
-                        let result = appsrc.emit_by_name::<gstreamer::FlowReturn>(
-                            "push-buffer",
-                            &[&buffer],
-                        );
+                        let result =
+                            appsrc.emit_by_name::<gstreamer::FlowReturn>("push-buffer", &[&buffer]);
                         match result {
                             gstreamer::FlowReturn::Ok => {},
                             gstreamer::FlowReturn::Flushing => {
@@ -1141,9 +1158,9 @@ impl GstPipeline {
             }
         }
 
-        kmssink_builder.build().map_err(|e| {
-            PlaybackError::PipelineCreation(format!("{}: {}", config.video_sink, e))
-        })
+        kmssink_builder
+            .build()
+            .map_err(|e| PlaybackError::PipelineCreation(format!("{}: {}", config.video_sink, e)))
     }
 
     /// Build the hardware-accelerated video branch:
@@ -1179,16 +1196,12 @@ impl GstPipeline {
             .property("max-size-buffers", 200u32)
             .property("max-size-time", 5_000_000_000u64)
             .build()
-            .map_err(|e| {
-                PlaybackError::PipelineCreation(format!("video_queue: {}", e))
-            })?;
+            .map_err(|e| PlaybackError::PipelineCreation(format!("video_queue: {}", e)))?;
 
         // h264parse ensures the stream is properly framed for V4L2 decode.
         let h264parse = ElementFactory::make("h264parse")
             .build()
-            .map_err(|e| {
-                PlaybackError::PipelineCreation(format!("h264parse: {}", e))
-            })?;
+            .map_err(|e| PlaybackError::PipelineCreation(format!("h264parse: {}", e)))?;
 
         // V4L2 hardware H.264 decoder using bcm2835-codec on Pi 4.
         // Use dmabuf mode for zero-copy decode — decoded frames stay in
@@ -1203,14 +1216,9 @@ impl GstPipeline {
         // to the GEnum type when `build()` applies the properties. Setting
         // them on the built element with `set_property_from_str()` ensures
         // GStreamer's type conversion is invoked properly.
-        let v4l2dec = ElementFactory::make("v4l2h264dec")
-            .build()
-            .map_err(|e| {
-                PlaybackError::PipelineCreation(format!(
-                    "v4l2h264dec (may not be available): {}",
-                    e
-                ))
-            })?;
+        let v4l2dec = ElementFactory::make("v4l2h264dec").build().map_err(|e| {
+            PlaybackError::PipelineCreation(format!("v4l2h264dec (may not be available): {}", e))
+        })?;
 
         // Set dmabuf io-modes on the built element for reliable type conversion.
         // GST_V4L2_IO_DMABUF = 3 (nick: "dmabuf").
@@ -1250,7 +1258,10 @@ impl GstPipeline {
         })?;
 
         Element::link_many([&video_queue, &h264parse, &v4l2dec, &kmssink]).map_err(|e| {
-            PlaybackError::PipelineCreation(format!("link video_queue→h264parse→v4l2h264dec→kmssink: {}", e))
+            PlaybackError::PipelineCreation(format!(
+                "link video_queue→h264parse→v4l2h264dec→kmssink: {}",
+                e
+            ))
         })?;
 
         // Create ghost pads for the bin (on the queue element, which is the entry point).
@@ -1318,23 +1329,21 @@ impl GstPipeline {
     /// intercept and transform buffers in-place within the pipeline.
     #[cfg(feature = "hevc")]
     #[allow(dead_code)]
-    fn build_hevc_video_bin(config: &PipelineConfig) -> Result<(Element, Element, Option<V3dComputeEngine>), PlaybackError> {
+    fn build_hevc_video_bin(
+        config: &PipelineConfig,
+    ) -> Result<(Element, Element, Option<V3dComputeEngine>), PlaybackError> {
         let video_queue = ElementFactory::make("queue")
             .property("max-size-buffers", 200u32)
             .property("max-size-time", 5_000_000_000u64)
             .build()
-            .map_err(|e| {
-                PlaybackError::PipelineCreation(format!("hevc video_queue: {}", e))
-            })?;
+            .map_err(|e| PlaybackError::PipelineCreation(format!("hevc video_queue: {}", e)))?;
 
         // h265parse ensures the stream is properly framed for V4L2 stateless
         // decode. The stateless HEVC decoder requires properly delimited NALUs
         // with SPS/PPS/VPS prepended to IDR frames.
         let h265parse = ElementFactory::make("h265parse")
             .build()
-            .map_err(|e| {
-                PlaybackError::PipelineCreation(format!("h265parse: {}", e))
-            })?;
+            .map_err(|e| PlaybackError::PipelineCreation(format!("h265parse: {}", e)))?;
 
         // V4L2 stateless HEVC decoder using rpivid on Pi 4.
         // This element uses the V4L2 Request API (stateless decode), where
@@ -1360,15 +1369,15 @@ impl GstPipeline {
         // The V3D compute shader (or bcm2835-ISP) will convert SAND128→NV12.
         let v4l2h265dec = ElementFactory::make("v4l2slh265dec")
             .build()
-            .map_err(|e| {
-                PlaybackError::PipelineCreation(format!("v4l2slh265dec: {}", e))
-            })?;
+            .map_err(|e| PlaybackError::PipelineCreation(format!("v4l2slh265dec: {}", e)))?;
 
         // The stateless decoder auto-negotiates DMA-BUF I/O mode internally.
         // No explicit output-io-mode / capture-io-mode setting needed
         // (and attempting to set them would panic — they don't exist on
         // GstV4l2Decoder-based elements).
-        tracing::info!("v4l2slh265dec: stateless decoder created (DMA-BUF auto-negotiated by GstV4l2Decoder)");
+        tracing::info!(
+            "v4l2slh265dec: stateless decoder created (DMA-BUF auto-negotiated by GstV4l2Decoder)"
+        );
 
         // ── V3D Compute Shader Engine ──────────────────────────────
         //
@@ -1433,30 +1442,30 @@ impl GstPipeline {
             let appsink = ElementFactory::make("appsink")
                 .property("emit-signals", true)
                 .property("max-buffers", 2u32)
-                .property("drop", false)  // Never drop buffers — causes visual artifacts
+                .property("drop", false) // Never drop buffers — causes visual artifacts
                 .property_from_str("caps", "video/x-raw,format=NV12_64Z32")
                 .build()
-                .map_err(|e| {
-                    PlaybackError::PipelineCreation(format!("hevc appsink: {}", e))
-                })?;
+                .map_err(|e| PlaybackError::PipelineCreation(format!("hevc appsink: {}", e)))?;
 
             let appsrc = ElementFactory::make("appsrc")
-                .property("format", 1i32)  // GST_FORMAT_TIME
+                .property("format", 1i32) // GST_FORMAT_TIME
                 .property_from_str("caps", "video/x-raw,format=NV12")
-                .property("stream-type", 0i32)  // GST_APP_STREAM_TYPE_STREAM
+                .property("stream-type", 0i32) // GST_APP_STREAM_TYPE_STREAM
                 .build()
-                .map_err(|e| {
-                    PlaybackError::PipelineCreation(format!("hevc appsrc: {}", e))
-                })?;
+                .map_err(|e| PlaybackError::PipelineCreation(format!("hevc appsrc: {}", e)))?;
 
             bin.add_many([&video_queue, &h265parse, &v4l2h265dec, &appsink, &appsrc, &kmssink])
-                .map_err(|e| PlaybackError::PipelineCreation(format!("add HEVC video elements: {}", e)))?;
+                .map_err(|e| {
+                    PlaybackError::PipelineCreation(format!("add HEVC video elements: {}", e))
+                })?;
 
-            Element::link_many([&video_queue, &h265parse, &v4l2h265dec, &appsink])
-                .map_err(|e| PlaybackError::PipelineCreation(format!("link HEVC decode chain: {}", e)))?;
+            Element::link_many([&video_queue, &h265parse, &v4l2h265dec, &appsink]).map_err(
+                |e| PlaybackError::PipelineCreation(format!("link HEVC decode chain: {}", e)),
+            )?;
 
-            Element::link_many([&appsrc, &kmssink])
-                .map_err(|e| PlaybackError::PipelineCreation(format!("link HEVC display chain: {}", e)))?;
+            Element::link_many([&appsrc, &kmssink]).map_err(|e| {
+                PlaybackError::PipelineCreation(format!("link HEVC display chain: {}", e))
+            })?;
 
             tracing::info!(
                 "HEVC video chain: video_queue → h265parse → v4l2slh265dec(SAND128) → appsink → [V3D compute] → appsrc → kmssink"
@@ -1481,10 +1490,14 @@ impl GstPipeline {
                 })?;
 
             bin.add_many([&video_queue, &h265parse, &v4l2h265dec, &v4l2convert, &kmssink])
-                .map_err(|e| PlaybackError::PipelineCreation(format!("add HEVC ISP video elements: {}", e)))?;
+                .map_err(|e| {
+                    PlaybackError::PipelineCreation(format!("add HEVC ISP video elements: {}", e))
+                })?;
 
             Element::link_many([&video_queue, &h265parse, &v4l2h265dec, &v4l2convert, &kmssink])
-                .map_err(|e| PlaybackError::PipelineCreation(format!("link HEVC ISP video chain: {}", e)))?;
+                .map_err(|e| {
+                    PlaybackError::PipelineCreation(format!("link HEVC ISP video chain: {}", e))
+                })?;
 
             tracing::info!(
                 "HEVC video chain (ISP fallback): video_queue → h265parse → v4l2slh265dec → v4l2convert(ISP) → kmssink"
@@ -1492,8 +1505,10 @@ impl GstPipeline {
         }
 
         let sink_pad = video_queue.static_pad("sink").expect("video_queue should have a sink pad");
-        bin.add_pad(&gstreamer::GhostPad::with_target(&sink_pad).expect("create HEVC video ghost pad"))
-            .map_err(|e| PlaybackError::PipelineCreation(format!("HEVC video ghost pad: {}", e)))?;
+        bin.add_pad(
+            &gstreamer::GhostPad::with_target(&sink_pad).expect("create HEVC video ghost pad"),
+        )
+        .map_err(|e| PlaybackError::PipelineCreation(format!("HEVC video ghost pad: {}", e)))?;
 
         let bin_element: Element =
             bin.dynamic_cast::<Element>().expect("bin to element cast should succeed");
@@ -1509,9 +1524,7 @@ impl GstPipeline {
             .property("max-size-buffers", 200u32)
             .property("max-size-time", 5_000_000_000u64)
             .build()
-            .map_err(|e| {
-                PlaybackError::PipelineCreation(format!("sw video_queue: {}", e))
-            })?;
+            .map_err(|e| PlaybackError::PipelineCreation(format!("sw video_queue: {}", e)))?;
 
         let avdec = ElementFactory::make("avdec_h264")
             .build()
@@ -1521,8 +1534,8 @@ impl GstPipeline {
             .build()
             .map_err(|e| PlaybackError::PipelineCreation(format!("videoconvert: {}", e)))?;
 
-        let mut kmssink_builder = ElementFactory::make(&config.video_sink)
-            .property("can-scale", true);
+        let mut kmssink_builder =
+            ElementFactory::make(&config.video_sink).property("can-scale", true);
         if let Some(drm_fd) = config.drm_fd {
             if drm_fd >= 0 {
                 kmssink_builder = kmssink_builder.property("fd", drm_fd);
@@ -1796,7 +1809,8 @@ impl GstPipeline {
         // compensation is not needed (and would cause A/V desync in
         // the opposite direction — audio delayed behind video).
         sw_config.audio_ts_offset_ns = 0;
-        let new = Self::new(url, source_url, _socks_addr, _isolation_username, &sw_config, cookies).await?;
+        let new = Self::new(url, source_url, _socks_addr, _isolation_username, &sw_config, cookies)
+            .await?;
 
         // Replace self with the new pipeline.
         *self = new;
@@ -1812,12 +1826,12 @@ impl Drop for GstPipeline {
         // Without this, GStreamer prints "Trying to dispose element X,
         // but it is in READY/PAUSED instead of the NULL state" warnings
         // when a failed pipeline is dropped.
-        
+
         // Signal the appsrc push task to stop (if running).
         if let Some(cancel) = &self._push_cancel {
             cancel.store(true, Ordering::Relaxed);
         }
-        
+
         if self.state != PipelineState::Null {
             // Drop the bus watch first to prevent callbacks during shutdown.
             self.bus_watch = None;

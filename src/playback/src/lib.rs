@@ -20,7 +20,7 @@
 //!     let mut engine = PlaybackEngine::new(config)?;
 //!
 //!     let mut events = engine.events();
-//!     engine.play("https://example.com/video.mp4", "https://example.com/page", "127.0.0.1:9050", "picast-abc123").await?;
+//!     engine.play("https://example.com/video.mp4", "https://example.com/page", "127.0.0.1:9050", "picast-abc123", vec![]).await?;
 //!
 //!     while let Ok(event) = events.recv().await {
 //!         println!("Event: {:?}", event);
@@ -32,11 +32,11 @@
 #[cfg(feature = "hw")]
 pub mod events;
 #[cfg(feature = "hw")]
+mod media_proxy;
+#[cfg(feature = "hw")]
 pub mod pipeline;
 #[cfg(feature = "hw")]
 mod socks_forwarder;
-#[cfg(feature = "hw")]
-mod media_proxy;
 #[cfg(feature = "hw")]
 mod stream_source;
 
@@ -49,9 +49,9 @@ use gstreamer::State;
 #[cfg(feature = "hw")]
 use pipeline::GstPipeline;
 use serde::{Deserialize, Serialize};
-use std::sync::atomic::{AtomicBool, Ordering};
 #[cfg(not(feature = "hw"))]
 use std::sync::atomic::AtomicU64;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use thiserror::Error;
 #[cfg(feature = "hw")]
@@ -362,9 +362,8 @@ fn detect_audio_output() -> (String, String) {
 
     // Check for connected Bluetooth audio devices
     let has_connected_bt = (has_bt_card || bluealsa_running) && {
-        if let Ok(output) = std::process::Command::new("bluetoothctl")
-            .args(["devices", "Connected"])
-            .output()
+        if let Ok(output) =
+            std::process::Command::new("bluetoothctl").args(["devices", "Connected"]).output()
         {
             if let Ok(stdout) = String::from_utf8(output.stdout) {
                 stdout.lines().any(|line| line.starts_with("Device "))
@@ -394,9 +393,8 @@ fn detect_audio_output() -> (String, String) {
         let mut connected = false;
 
         // Get list of paired devices
-        if let Ok(paired_output) = std::process::Command::new("bluetoothctl")
-            .args(["devices", "Paired"])
-            .output()
+        if let Ok(paired_output) =
+            std::process::Command::new("bluetoothctl").args(["devices", "Paired"]).output()
         {
             if let Ok(paired_stdout) = String::from_utf8(paired_output.stdout) {
                 for line in paired_stdout.lines() {
@@ -482,9 +480,8 @@ fn detect_audio_output() -> (String, String) {
         }
 
         // Re-check connected devices after auto-reconnect attempt
-        if let Ok(output) = std::process::Command::new("bluetoothctl")
-            .args(["devices", "Connected"])
-            .output()
+        if let Ok(output) =
+            std::process::Command::new("bluetoothctl").args(["devices", "Connected"]).output()
         {
             if let Ok(stdout) = String::from_utf8(output.stdout) {
                 stdout.lines().any(|line| line.starts_with("Device "))
@@ -501,9 +498,8 @@ fn detect_audio_output() -> (String, String) {
         // We need this for both BlueALSA and PulseAudio paths.
         let bt_addr: Option<String> = {
             let mut found: Option<String> = None;
-            if let Ok(output) = std::process::Command::new("bluetoothctl")
-                .args(["devices", "Connected"])
-                .output()
+            if let Ok(output) =
+                std::process::Command::new("bluetoothctl").args(["devices", "Connected"]).output()
             {
                 if let Ok(stdout) = String::from_utf8(output.stdout) {
                     for line in stdout.lines() {
@@ -532,10 +528,13 @@ fn detect_audio_output() -> (String, String) {
             // We only fall back to pulsesink if the BlueALSA ALSA plugin is
             // not installed (rare on Debian/Raspbian with bluealsa package).
             let bluealsa_plugin = std::path::Path::new(
-                "/usr/lib/aarch64-linux-gnu/alsa-lib/libasound_module_pcm_bluealsa.so"
-            ).exists() || std::path::Path::new(
-                "/usr/lib/arm-linux-gnueabihf/alsa-lib/libasound_module_pcm_bluealsa.so"
-            ).exists();
+                "/usr/lib/aarch64-linux-gnu/alsa-lib/libasound_module_pcm_bluealsa.so",
+            )
+            .exists()
+                || std::path::Path::new(
+                    "/usr/lib/arm-linux-gnueabihf/alsa-lib/libasound_module_pcm_bluealsa.so",
+                )
+                .exists();
 
             if bluealsa_plugin {
                 tracing::info!(
@@ -565,7 +564,10 @@ fn detect_audio_output() -> (String, String) {
                             for sink_line in sinks_stdout.lines() {
                                 // Look for bluez or a2dp in sink name
                                 let lower = sink_line.to_lowercase();
-                                if lower.contains("bluez") || lower.contains("a2dp") || lower.contains("bluetooth") {
+                                if lower.contains("bluez")
+                                    || lower.contains("a2dp")
+                                    || lower.contains("bluetooth")
+                                {
                                     let sink_name = sink_line.split_whitespace().nth(1);
                                     if let Some(name) = sink_name {
                                         tracing::info!(
@@ -842,7 +844,7 @@ impl PlaybackEngine {
                                      Pipeline errors and state changes will go unreported."
                                 );
                                 return;
-                            }
+                            },
                         };
                         let main_loop = gstreamer::glib::MainLoop::new(Some(&context), false);
                         tracing::info!(
@@ -895,8 +897,6 @@ impl PlaybackEngine {
             mock_event_tx,
         })
     }
-
-
 
     /// Load a URL and transition to the Playing state.
     ///
@@ -952,10 +952,19 @@ impl PlaybackEngine {
         // in the message so the session layer's retry loop can invalidate
         // the cache and re-resolve the URL through the current circuit.
         if !socks_addr.is_empty() && !isolation_username.is_empty() {
-            if let Some(exit_ip) = crate::socks_forwarder::SocksForwarder::check_exit_ip(socks_addr, isolation_username).await {
+            if let Some(exit_ip) = crate::socks_forwarder::SocksForwarder::check_exit_ip(
+                socks_addr,
+                isolation_username,
+            )
+            .await
+            {
                 // Extract the &i= parameter from the CDN URL (first 2 IP octets)
                 if let Some(cdn_ip_prefix) = extract_cdn_ip_prefix(url) {
-                    let exit_ip_prefix = format!("{}.{}", exit_ip.split('.').next().unwrap_or(""), exit_ip.split('.').nth(1).unwrap_or(""));
+                    let exit_ip_prefix = format!(
+                        "{}.{}",
+                        exit_ip.split('.').next().unwrap_or(""),
+                        exit_ip.split('.').nth(1).unwrap_or("")
+                    );
                     if cdn_ip_prefix != exit_ip_prefix {
                         tracing::warn!(
                             cdn_ip_prefix = %cdn_ip_prefix,
@@ -989,7 +998,15 @@ impl PlaybackEngine {
             "constructing playback pipeline"
         );
 
-        let mut pipeline = GstPipeline::new(url, source_url, socks_addr, isolation_username, &self.config, &cookies).await?;
+        let mut pipeline = GstPipeline::new(
+            url,
+            source_url,
+            socks_addr,
+            isolation_username,
+            &self.config,
+            &cookies,
+        )
+        .await?;
 
         // Set up bus watch to forward GStreamer messages as events.
         let event_tx = self.event_tx.clone();
@@ -1303,7 +1320,10 @@ impl PlaybackEngine {
         // Start playback — try HW decode first, fall back to SW on failure.
         match play_result {
             Ok(()) => {
-                tracing::info!("pipeline prerolled successfully (hw_accel={})", self.config.hw_accel);
+                tracing::info!(
+                    "pipeline prerolled successfully (hw_accel={})",
+                    self.config.hw_accel
+                );
                 *guard = Some(pipeline);
 
                 // Spawn a diagnostic task that checks the pipeline state
@@ -1318,7 +1338,8 @@ impl PlaybackEngine {
                     // that video/audio pads are linked.
                     tokio::time::sleep(std::time::Duration::from_secs(10)).await;
                     if let Some(pipe) = pipeline_weak_diag.upgrade() {
-                        let (result, current, pending) = pipe.state(gstreamer::ClockTime::from_mseconds(0));
+                        let (result, current, pending) =
+                            pipe.state(gstreamer::ClockTime::from_mseconds(0));
                         tracing::info!(
                             result = ?result,
                             current = ?current,
@@ -1330,7 +1351,9 @@ impl PlaybackEngine {
                         // try a state transition.  Only set Playing if we're at
                         // Paused — setting Playing from Ready creates an impossible
                         // transition that blocks the pipeline forever.
-                        if current != State::Playing && pending_auto_play_diag.load(Ordering::Relaxed) {
+                        if current != State::Playing
+                            && pending_auto_play_diag.load(Ordering::Relaxed)
+                        {
                             if current == State::Paused {
                                 tracing::warn!(
                                     current = ?current,
@@ -1355,7 +1378,8 @@ impl PlaybackEngine {
                                 tokio::spawn(async move {
                                     tokio::time::sleep(std::time::Duration::from_secs(2)).await;
                                     if let Some(p) = pipe_weak.upgrade() {
-                                        let (_, cur, _) = p.state(gstreamer::ClockTime::from_mseconds(0));
+                                        let (_, cur, _) =
+                                            p.state(gstreamer::ClockTime::from_mseconds(0));
                                         if cur == State::Paused {
                                             tracing::info!("recovery: pipeline reached Paused — transitioning to Playing");
                                             let _ = p.set_state(State::Playing);
@@ -1394,7 +1418,9 @@ impl PlaybackEngine {
                                 match elem_iter.next() {
                                     Ok(Some(e)) => {
                                         if e.factory()
-                                            .map(|f: gstreamer::ElementFactory| f.name() == "parsebin")
+                                            .map(|f: gstreamer::ElementFactory| {
+                                                f.name() == "parsebin"
+                                            })
                                             .unwrap_or(false)
                                         {
                                             parsebin_elem_opt = Some(e);
@@ -1410,14 +1436,18 @@ impl PlaybackEngine {
                                 loop {
                                     match pad_iter.next() {
                                         Ok(Some(pad)) => {
-                                            let caps = pad.current_caps()
+                                            let caps = pad
+                                                .current_caps()
                                                 .map(|c: gstreamer::Caps| c.to_string())
                                                 .unwrap_or_default();
                                             let is_linked = pad.is_linked();
 
                                             // Determine media type from caps
-                                            let media_type = pad.current_caps()
-                                                .and_then(|c| c.structure(0).map(|s| s.name().to_string()))
+                                            let media_type = pad
+                                                .current_caps()
+                                                .and_then(|c| {
+                                                    c.structure(0).map(|s| s.name().to_string())
+                                                })
                                                 .unwrap_or_default();
                                             let is_video = media_type.starts_with("video/");
                                             let is_audio = media_type.starts_with("audio/");
@@ -1438,13 +1468,15 @@ impl PlaybackEngine {
                                             // since current_caps() may not be available yet.
                                             let effective_is_video = is_video
                                                 || (!media_type.contains("audio/")
-                                                    && pad.query_caps(None)
+                                                    && pad
+                                                        .query_caps(None)
                                                         .structure(0)
                                                         .map(|s| s.name().starts_with("video/"))
                                                         .unwrap_or(false));
                                             let effective_is_audio = is_audio
                                                 || (media_type.contains("audio/")
-                                                    || pad.query_caps(None)
+                                                    || pad
+                                                        .query_caps(None)
                                                         .structure(0)
                                                         .map(|s| s.name().starts_with("audio/"))
                                                         .unwrap_or(false));
@@ -1469,7 +1501,9 @@ impl PlaybackEngine {
                             }
 
                             if video_linked {
-                                tracing::info!("video pad linked ✓ — parsebin video pad is connected");
+                                tracing::info!(
+                                    "video pad linked ✓ — parsebin video pad is connected"
+                                );
                             } else {
                                 tracing::error!(
                                     "NO video pad linked after 8s — parsebin did not connect video to the video bin. \
@@ -1479,9 +1513,13 @@ impl PlaybackEngine {
                                 );
                             }
                             if audio_linked {
-                                tracing::info!("audio pad linked ✓ — parsebin audio pad is connected");
+                                tracing::info!(
+                                    "audio pad linked ✓ — parsebin audio pad is connected"
+                                );
                             } else {
-                                tracing::warn!("no audio pad linked after 8s — audio track may be missing");
+                                tracing::warn!(
+                                    "no audio pad linked after 8s — audio track may be missing"
+                                );
                             }
                         }
                     }
@@ -1489,7 +1527,8 @@ impl PlaybackEngine {
                     // Second check at 20s — detailed state dump + FPS measurement
                     tokio::time::sleep(std::time::Duration::from_secs(12)).await;
                     if let Some(pipe) = pipeline_weak_diag.upgrade() {
-                        let (result, current, pending) = pipe.state(gstreamer::ClockTime::from_mseconds(0));
+                        let (result, current, pending) =
+                            pipe.state(gstreamer::ClockTime::from_mseconds(0));
                         tracing::info!(
                             result = ?result,
                             current = ?current,
@@ -1525,15 +1564,21 @@ impl PlaybackEngine {
                         // Walk all elements and log their states to find
                         // which one is stuck and blocking preroll.
                         if current != State::Playing {
-                            tracing::warn!("pipeline NOT playing after 20s — dumping per-element state:");
+                            tracing::warn!(
+                                "pipeline NOT playing after 20s — dumping per-element state:"
+                            );
                             if let Ok(bin) = pipe.dynamic_cast::<gstreamer::Bin>() {
                                 let mut elem_iter = bin.iterate_elements();
                                 loop {
                                     match elem_iter.next() {
                                         Ok(Some(e)) => {
-                                            let (res, st, pend) = e.state(gstreamer::ClockTime::from_mseconds(0));
-                                            let factory_name = e.factory()
-                                                .map(|f: gstreamer::ElementFactory| f.name().to_string())
+                                            let (res, st, pend) =
+                                                e.state(gstreamer::ClockTime::from_mseconds(0));
+                                            let factory_name = e
+                                                .factory()
+                                                .map(|f: gstreamer::ElementFactory| {
+                                                    f.name().to_string()
+                                                })
                                                 .unwrap_or_default();
                                             tracing::warn!(
                                                 element = %e.name(),
@@ -1544,12 +1589,17 @@ impl PlaybackEngine {
                                                 "element state"
                                             );
                                             // Also check elements inside bins (e.g. video bin)
-                                            if let Ok(sub_bin) = e.dynamic_cast::<gstreamer::Bin>() {
+                                            if let Ok(sub_bin) = e.dynamic_cast::<gstreamer::Bin>()
+                                            {
                                                 let mut sub_iter = sub_bin.iterate_elements();
                                                 loop {
                                                     match sub_iter.next() {
                                                         Ok(Some(se)) => {
-                                                            let (sr, sst, sp) = se.state(gstreamer::ClockTime::from_mseconds(0));
+                                                            let (sr, sst, sp) = se.state(
+                                                                gstreamer::ClockTime::from_mseconds(
+                                                                    0,
+                                                                ),
+                                                            );
                                                             let sub_factory = se.factory()
                                                                 .map(|f: gstreamer::ElementFactory| f.name().to_string())
                                                                 .unwrap_or_default();
@@ -1583,7 +1633,9 @@ impl PlaybackEngine {
 
                 Ok(())
             },
-            Err(PlaybackError::Gstreamer(ref msg)) if self.config.hw_accel && is_negotiation_error(msg) => {
+            Err(PlaybackError::Gstreamer(ref msg))
+                if self.config.hw_accel && is_negotiation_error(msg) =>
+            {
                 // V4L2 caps negotiation failed — fall back to software decode.
                 tracing::warn!(
                     error = %msg,
@@ -1594,7 +1646,14 @@ impl PlaybackEngine {
                 let _ = failed_pipeline.stop();
                 drop(failed_pipeline);
                 drop(guard); // release lock before fallback call
-                self.play_software_fallback(url, source_url, socks_addr, isolation_username, &cookies).await
+                self.play_software_fallback(
+                    url,
+                    source_url,
+                    socks_addr,
+                    isolation_username,
+                    &cookies,
+                )
+                .await
             },
             Err(e) => {
                 tracing::error!(error = %e, "pipeline play() failed");
@@ -1606,7 +1665,16 @@ impl PlaybackEngine {
                 if self.config.hw_accel {
                     tracing::warn!("attempting software decode fallback after play failure");
                     drop(guard);
-                    match self.play_software_fallback(url, source_url, socks_addr, isolation_username, &cookies).await {
+                    match self
+                        .play_software_fallback(
+                            url,
+                            source_url,
+                            socks_addr,
+                            isolation_username,
+                            &cookies,
+                        )
+                        .await
+                    {
                         Ok(()) => Ok(()),
                         Err(fallback_err) => {
                             tracing::error!(error = %fallback_err, "software decode fallback also failed");
@@ -1656,7 +1724,9 @@ impl PlaybackEngine {
             "constructing SOFTWARE DECODE fallback pipeline (avdec_h264 → videoconvert → kmssink)"
         );
 
-        let mut pipeline = GstPipeline::new(url, source_url, socks_addr, isolation_username, &sw_config, cookies).await?;
+        let mut pipeline =
+            GstPipeline::new(url, source_url, socks_addr, isolation_username, &sw_config, cookies)
+                .await?;
 
         // Set up bus watch for the fallback pipeline.
         let event_tx = self.event_tx.clone();
@@ -2112,8 +2182,11 @@ mod tests {
         let config = PipelineConfig::default();
         assert_eq!(config.video_sink, "kmssink");
         // audio_sink is auto-detected: "alsasink" (HDMI) or "pulsesink" (Bluetooth)
-        assert!(config.audio_sink == "alsasink" || config.audio_sink == "pulsesink",
-            "audio_sink should be alsasink or pulsesink, got: {}", config.audio_sink);
+        assert!(
+            config.audio_sink == "alsasink" || config.audio_sink == "pulsesink",
+            "audio_sink should be alsasink or pulsesink, got: {}",
+            config.audio_sink
+        );
         assert_eq!(config.buffer_duration_ms, 3000);
         assert!(config.hw_accel);
         assert!((config.volume - 1.0).abs() < f64::EPSILON);
@@ -2192,7 +2265,7 @@ mod tests {
 
         // Play
         engine
-            .play("https://example.com/video.mp4", "https://example.com/video.mp4", "", "")
+            .play("https://example.com/video.mp4", "https://example.com/video.mp4", "", "", vec![])
             .await
             .expect("mock play should succeed");
         assert_eq!(engine.mock_state(), PlaybackState::Playing);
@@ -2227,7 +2300,10 @@ mod tests {
         }
 
         // Load a URL
-        engine.play("https://example.com/video.mp4", "https://example.com/video.mp4", "", "").await.unwrap();
+        engine
+            .play("https://example.com/video.mp4", "https://example.com/video.mp4", "", "", vec![])
+            .await
+            .unwrap();
 
         // Seek to 5000 ms
         engine.seek(5000).await.expect("mock seek should succeed");
@@ -2276,7 +2352,10 @@ mod tests {
         assert!(engine.duration_ms().await.is_err());
 
         // Load a URL
-        engine.play("https://example.com/video.mp4", "https://example.com/video.mp4", "", "").await.unwrap();
+        engine
+            .play("https://example.com/video.mp4", "https://example.com/video.mp4", "", "", vec![])
+            .await
+            .unwrap();
 
         // Position should be 0 right after play
         let pos = engine.position_ms().await.expect("position_ms should succeed");
@@ -2301,7 +2380,10 @@ mod tests {
         assert!(!health.is_buffering);
 
         // After play, buffer health should be healthy
-        engine.play("https://example.com/video.mp4", "https://example.com/video.mp4", "", "").await.unwrap();
+        engine
+            .play("https://example.com/video.mp4", "https://example.com/video.mp4", "", "", vec![])
+            .await
+            .unwrap();
 
         let health = engine.buffer_health().await;
         assert_eq!(health.fill_percent, 100);
@@ -2361,13 +2443,19 @@ mod tests {
         let engine = PlaybackEngine::new(PipelineConfig::default()).unwrap();
 
         // Load and seek to some position
-        engine.play("https://example.com/video.mp4", "https://example.com/video.mp4", "", "").await.unwrap();
+        engine
+            .play("https://example.com/video.mp4", "https://example.com/video.mp4", "", "", vec![])
+            .await
+            .unwrap();
         engine.seek(120_000).await.unwrap();
         let pos = engine.position_ms().await.unwrap();
         assert_eq!(pos, 120_000);
 
         // Play again — position should reset to 0
-        engine.play("https://example.com/other.mp4", "https://example.com/other.mp4", "", "").await.unwrap();
+        engine
+            .play("https://example.com/other.mp4", "https://example.com/other.mp4", "", "", vec![])
+            .await
+            .unwrap();
         let pos = engine.position_ms().await.unwrap();
         assert_eq!(pos, 0, "position should reset to 0 on play");
     }
@@ -2377,7 +2465,10 @@ mod tests {
         let engine = PlaybackEngine::new(PipelineConfig::default()).unwrap();
 
         // Load and play
-        engine.play("https://example.com/video.mp4", "https://example.com/video.mp4", "", "").await.unwrap();
+        engine
+            .play("https://example.com/video.mp4", "https://example.com/video.mp4", "", "", vec![])
+            .await
+            .unwrap();
 
         // Resume while playing should fail
         let result = engine.resume().await;

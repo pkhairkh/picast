@@ -190,9 +190,7 @@ impl picast_session::interfaces::ResolverTrait for ResolverAdapter {
 /// 3. The `logging.level` field in the TOML config file
 fn init_tracing(config_level: &str) {
     use tracing_subscriber::EnvFilter;
-    let level_directive = config_level
-        .parse()
-        .unwrap_or_else(|_| "info".parse().unwrap());
+    let level_directive = config_level.parse().unwrap_or_else(|_| "info".parse().unwrap());
     tracing_subscriber::fmt()
         .with_env_filter(EnvFilter::from_default_env().add_directive(level_directive))
         .with_thread_ids(true)
@@ -333,9 +331,8 @@ async fn main() -> Result<()> {
     }
     info!(audio_device = %pipeline_config.audio_device, "playback engine will use ALSA device");
     #[cfg(feature = "hw")]
-    let playback_engine: Arc<picast_playback::PlaybackEngine> = {
-        Arc::new(picast_playback::PlaybackEngine::new(pipeline_config)?)
-    };
+    let playback_engine: Arc<picast_playback::PlaybackEngine> =
+        { Arc::new(picast_playback::PlaybackEngine::new(pipeline_config)?) };
     #[cfg(not(feature = "hw"))]
     let playback_engine: Arc<picast_playback::PlaybackEngine> = {
         info!("hw feature disabled — playback engine running in mock mode");
@@ -345,10 +342,8 @@ async fn main() -> Result<()> {
 
     // 4d. Resolver — use a persistent cache so resolved URLs survive restarts.
     let cache_path = std::path::Path::new("/var/lib/picast/resolve-cache.db");
-    let resolver = Arc::new(picast_resolver::Resolver::with_persistent_cache(
-        tor_manager.clone(),
-        cache_path,
-    ));
+    let resolver =
+        Arc::new(picast_resolver::Resolver::with_persistent_cache(tor_manager.clone(), cache_path));
     info!(cache = %cache_path.display(), "Resolver created (persistent cache)");
 
     // ── 5. Session manager ────────────────────────────────────────────
@@ -384,15 +379,15 @@ async fn main() -> Result<()> {
             Ok(Some(acceptor)) => {
                 info!("TLS enabled — serving HTTPS and WSS");
                 Some(acceptor)
-            }
+            },
             Ok(None) => {
                 warn!("TLS cert/key paths set but acceptor returned None — falling back to plain HTTP/WS");
                 None
-            }
+            },
             Err(e) => {
                 warn!(error = %e, "Failed to load TLS cert/key — falling back to plain HTTP/WS");
                 None
-            }
+            },
         }
     } else {
         info!("TLS not configured — serving plain HTTP and WS");
@@ -401,7 +396,8 @@ async fn main() -> Result<()> {
 
     let mut http_server =
         picast_protocols::HttpApiServer::new(&config.server.http_addr, session.clone());
-    let mut ws_server = picast_protocols::WebSocketServer::new(&config.server.ws_addr, session.clone());
+    let mut ws_server =
+        picast_protocols::WebSocketServer::new(&config.server.ws_addr, session.clone());
 
     if let Some(acceptor) = tls_acceptor {
         http_server = http_server.with_tls(acceptor.clone());

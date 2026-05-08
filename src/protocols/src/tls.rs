@@ -19,8 +19,10 @@ pub fn load_tls_acceptor(cert_path: &str, key_path: &str) -> Result<Option<TlsAc
         return Ok(None);
     }
 
-    let certs = load_certs(cert_path).with_context(|| format!("failed to load TLS cert from {}", cert_path))?;
-    let key = load_key(key_path).with_context(|| format!("failed to load TLS key from {}", key_path))?;
+    let certs = load_certs(cert_path)
+        .with_context(|| format!("failed to load TLS cert from {}", cert_path))?;
+    let key =
+        load_key(key_path).with_context(|| format!("failed to load TLS key from {}", key_path))?;
 
     let config = ServerConfig::builder()
         .with_no_client_auth()
