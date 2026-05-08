@@ -49,9 +49,19 @@ use uuid::Uuid;
 /// CDN IP mismatch errors are retryable because they indicate the Tor
 /// circuit has rotated since URL resolution. Re-resolving gets a fresh
 /// URL bound to the current exit IP.
+///
+/// Matches:
+/// - "CDN IP mismatch" — returned by the proactive IP check in
+///   PlaybackEngine::play()
+/// - "re-resolve needed" — suffix of the CDN IP mismatch error
+/// - "Forbidden" — GStreamer's HTTP 403 error message (fallback for
+///   cases where the proactive check was skipped or the CDN uses a
+///   different IP-binding mechanism)
 fn is_cdn_retryable_error(error: &Box<dyn std::error::Error + Send + Sync>) -> bool {
     let msg = error.to_string();
-    msg.contains("CDN IP mismatch") || msg.contains("re-resolve needed")
+    msg.contains("CDN IP mismatch")
+        || msg.contains("re-resolve needed")
+        || msg.contains("Forbidden")
 }
 
 // ── Errors ───────────────────────────────────────────────────────────

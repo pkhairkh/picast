@@ -318,6 +318,36 @@ fn is_negotiation_error(msg: &str) -> bool {
         || lower.contains("could not link")
 }
 
+// ── CDN IP prefix extraction ────────────────────────────────────────
+
+/// Extract the IP-bound token prefix from a CDN URL's query parameters.
+///
+/// Many video CDNs (e.g. Voe) embed an IP-binding token in the URL as
+/// `&i=XXX.YYY` where `XXX.YYY` represents the first two octets of the
+/// IP address that was used when the URL was resolved. If the current
+/// Tor exit IP doesn't start with `XXX.YYY`, the CDN will return 403
+/// Forbidden because the IP-bound token no longer matches.
+///
+/// Returns `Some("XXX.YYY")` if the `&i=` parameter is found, or `None`
+/// if the URL doesn't contain one (not all CDN URLs are IP-bound).
+#[cfg(feature = "hw")]
+fn extract_cdn_ip_prefix(url: &str) -> Option<String> {
+    // Look for &i= or ?i= in the URL query string
+    let url_str = url;
+    for prefix in &["&i=", "?i="] {
+        if let Some(pos) = url_str.find(prefix) {
+            let after = &url_str[pos + prefix.len()..];
+            // The IP prefix is everything up to the next & or end of string
+            let value = after.split('&').next().unwrap_or("");
+            // Validate it looks like an IP prefix (e.g., "192.42")
+            if value.contains('.') && value.chars().all(|c| c.is_ascii_digit() || c == '.') {
+                return Some(value.to_string());
+            }
+        }
+    }
+    None
+}
+
 // ── Playback Engine ──────────────────────────────────────────────────
 
 /// The main playback engine backed by GStreamer.
@@ -570,6 +600,55 @@ impl PlaybackEngine {
         );
 
         let mut pipeline = GstPipeline::new(url, source_url, socks_addr, isolation_username, &self.config).await?;
+
+        // ── Proactive Tor exit IP vs CDN URL IP-token check ───────────
+        //
+        // CDN URLs from resolvers like Voe contain IP-bound tokens (e.g.
+        // `&i=192.42`) that tie the URL to a specific exit IP. If the Tor
+        // circuit has rotated since the resolver produced the URL, the
+        // fetcher's exit IP will differ from the URL's bound IP, and the
+        // CDN will return 403 Forbidden.
+        //
+        // We proactively check for this mismatch BEFORE starting playback.
+        // If the IPs don't match, we return an error with "CDN IP mismatch"
+        // in the message so the session layer's retry loop can invalidate
+        // the cache and re-resolve the URL through the current circuit.
+        //
+        // This is much more reliable than waiting for the asynchronous 403
+        // from GStreamer (which arrives AFTER play() has already returned
+        // Ok and is not easily bridged back to the session retry loop).
+        if !socks_addr.is_empty() && !isolation_username.is_empty() {
+            if let Some(exit_ip) = crate::socks_forwarder::SocksForwarder::check_exit_ip(socks_addr, isolation_username).await {
+                // Extract the &i= parameter from the CDN URL (first 2 IP octets)
+                if let Some(cdn_ip_prefix) = extract_cdn_ip_prefix(url) {
+                    let exit_ip_prefix = format!("{}.{}", exit_ip.split('.').next().unwrap_or(""), exit_ip.split('.').nth(1).unwrap_or(""));
+                    if cdn_ip_prefix != exit_ip_prefix {
+                        tracing::warn!(
+                            cdn_ip_prefix = %cdn_ip_prefix,
+                            exit_ip = %exit_ip,
+                            exit_ip_prefix = %exit_ip_prefix,
+                            url = url,
+                            "CDN IP mismatch detected — URL bound to different exit IP than current Tor circuit. \
+                             Returning error so session layer can re-resolve."
+                        );
+                        // Stop the pipeline we just created (it hasn't started yet)
+                        let _ = pipeline.stop();
+                        return Err(PlaybackError::Gstreamer(
+                            format!("CDN IP mismatch: URL bound to {}.* but current Tor exit is {} — re-resolve needed",
+                                    cdn_ip_prefix, exit_ip)
+                        ));
+                    } else {
+                        tracing::info!(
+                            cdn_ip_prefix = %cdn_ip_prefix,
+                            exit_ip = %exit_ip,
+                            "CDN IP check passed — URL and Tor exit match"
+                        );
+                    }
+                }
+            } else {
+                tracing::warn!("could not determine Tor exit IP — skipping proactive CDN IP check");
+            }
+        }
 
         // Set up bus watch to forward GStreamer messages as events.
         let event_tx = self.event_tx.clone();
