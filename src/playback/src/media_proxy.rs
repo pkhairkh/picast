@@ -125,6 +125,37 @@ impl MediaProxy {
             // the raw bytes, not decompressed content.
             .no_gzip()
             .no_brotli()
+            // ── HTTP/2 flow control: critical for Tor streaming ──────
+            //
+            // The HTTP/2 default initial window size is 65,535 bytes (64KB).
+            // On a high-latency Tor connection (~300-500ms RTT), this
+            // severely limits throughput:
+            //
+            //   max_throughput = window_size / RTT
+            //   64KB / 0.3s    = 213 KB/s = 1.7 Mbps  (default)
+            //   2MB  / 0.3s    = 6.7 MB/s = 53 Mbps   (our setting)
+            //
+            // Even though Tor's actual bandwidth is typically 1-5 Mbps,
+            // the 64KB window doesn't even allow Tor to fully utilise
+            // its available bandwidth — the CDN must wait for window
+            // updates after every 64KB, and each round-trip through
+            // Tor takes 300-500ms. Increasing the window to 2MB allows
+            // the CDN to keep sending data without waiting for acks,
+            // letting Tor's internal buffering and flow control manage
+            // the actual throughput.
+            //
+            // Without this fix, observed throughput was 379 kbps — far
+            // too slow for 720p video (2-5 Mbps needed), causing constant
+            // buffer underruns and "A lot of buffers are being dropped"
+            // warnings from kmssink.
+            .http2_initial_stream_window_size(2 * 1024 * 1024)       // 2 MB per stream
+            .http2_initial_connection_window_size(2 * 1024 * 1024)    // 2 MB total connection
+            // NOTE: http2_adaptive_window(true) is intentionally NOT used
+            // here. Adaptive window starts with the DEFAULT 64KB window
+            // and grows over time, which overrides our explicit 2MB
+            // settings. For Tor streaming, we need the large window
+            // IMMEDIATELY — the CDN must be able to send 2MB without
+            // waiting for window updates, from the very first byte.
             .build()
             .map_err(|e| format!("media proxy: failed to build reqwest client: {}", e))?;
 
