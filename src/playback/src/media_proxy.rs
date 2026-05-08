@@ -155,6 +155,13 @@ impl MediaProxy {
         let active_cancel: Arc<Mutex<Option<Arc<AtomicBool>>>> =
             Arc::new(Mutex::new(None));
 
+        // Clone values for the spawned server task — the originals are
+        // needed to construct Self (used by preflight_check).
+        let server_client = client.clone();
+        let server_cdn_url = cdn_url.clone();
+        let server_source_url = source_url.clone();
+        let server_cookies = cookies.clone();
+
         // Spawn the server task.
         tokio::spawn(async move {
             let listener = listener;
@@ -165,10 +172,10 @@ impl MediaProxy {
                     accept_result = listener.accept() => {
                         match accept_result {
                             Ok((stream, peer)) => {
-                                let client = client.clone();
-                                let cdn_url = cdn_url.clone();
-                                let source_url = source_url.clone();
-                                let cookies = cookies.clone();
+                                let client = server_client.clone();
+                                let cdn_url = server_cdn_url.clone();
+                                let source_url = server_source_url.clone();
+                                let cookies = server_cookies.clone();
                                 let active_cancel = active_cancel.clone();
 
                                 // Cancel any previous connection to make room
@@ -244,7 +251,7 @@ impl MediaProxy {
             local_addr,
             shutdown_tx: Some(shutdown_tx),
             _socks_forwarder: socks_forwarder,
-            client: client.clone(),
+            client,
             cdn_url,
             source_url,
             cookies,
