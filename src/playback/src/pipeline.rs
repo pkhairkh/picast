@@ -349,11 +349,11 @@ impl GstPipeline {
         // the "buffer underrun → long refill → play briefly → underrun again"
         // cycle that causes choppy playback.
         let queue2 = ElementFactory::make("queue2")
-            .property("max-size-bytes", 100_000_000u32) // 100 MB — large byte buffer for Tor
-            .property("max-size-time", 60_000_000_000u64) // 60 seconds of media data
+            .property("max-size-bytes", 50_000_000u32) // 50 MB — sufficient for Tor; 100 MB takes too long to fill initially
+            .property("max-size-time", 30_000_000_000u64) // 30 seconds of media data
             .property("use-buffering", true)
-            .property("high-percent", 95i32)  // start playing when 95% full — wait longer during initial buffering to build a deep buffer before consuming
-            .property("low-percent", 2i32)    // pause when buffer drops to 2% — avoid premature pause/resume cycles on slow Tor links
+            .property("high-percent", 80i32)  // start playing when 80% full — good balance between initial wait and buffer depth
+            .property("low-percent", 2i32)    // pause when buffer drops to 2% — avoid premature pause/resume cycles
             .build()
             .map_err(|e| PlaybackError::PipelineCreation(format!("queue2: {}", e)))?;
 
@@ -397,35 +397,23 @@ impl GstPipeline {
 
         // ── Audio decoder ──────────────────────────────────────────
         //
-        // We use `decodebin3` for audio decoding instead of hardcoding a single
-        // decoder. Video CDNs serve audio in various formats:
-        //   - AAC (audio/mpeg, mpegversion=4) — most common in MP4 containers
-        //   - MP3 (audio/mpeg, mpegversion=1) — common in HLS streams
-        //   - Opus (audio/x-opus) — common in WebM/DASH
-        //   - Vorbis (audio/x-vorbis) — common in WebM
+        // Use `avdec_aac` directly for AAC decoding. This is the lowest-latency
+        // path because it avoids decodebin3's internal parsebin + multiqueue, which
+        // add ~200-500ms of buffering latency and cause audio-video desync.
         //
-        // Previously, only `avdec_aac` was used, which meant MP3 and Opus audio
-        // streams failed to link (caps mismatch) → fakesink fallback → no audio.
+        // Audio codec detection happens in the parsebin pad-added callback,
+        // where we check the audio caps. If the stream is not AAC, the pad
+        // fails to link to the AAC-only decoder, and a fakesink is added so
+        // video can still play. This is acceptable because AAC is by far the
+        // most common codec in MP4 containers from video CDNs.
         //
-        // `decodebin3` auto-detects the codec and plugs the right decoder.
-        // It handles all formats that have an installed GStreamer decoder plugin.
-        // If decodebin3 is not available (unlikely), we fall back to avdec_aac.
-        //
-        // The `audio_queue → decodebin3 → audioconvert` chain means:
-        //   - parsebin outputs encoded audio on its pad
-        //   - audio_queue buffers encoded audio
-        //   - decodebin3 decodes to raw PCM
-        //   - audioconvert handles format conversion to the sink's requirements
-        let audio_decoder = ElementFactory::make("decodebin3")
+        // Future improvement: detect the codec in pad-added and dynamically
+        // create the right decoder (avdec_mp3, avdec_opus, etc.).
+        let audio_decoder = ElementFactory::make("avdec_aac")
             .build()
-            .or_else(|_| ElementFactory::make("decodebin").build())
-            .or_else(|_| {
-                tracing::warn!("decodebin3/decodebin not available — falling back to avdec_aac (AAC only)");
-                ElementFactory::make("avdec_aac").build()
-                    .or_else(|_| ElementFactory::make("fdkaacdec").build())
-            })
+            .or_else(|_| ElementFactory::make("fdkaacdec").build())
             .map_err(|e| {
-                tracing::warn!("no audio decoder available — audio will be disabled: {}", e);
+                tracing::warn!("no AAC decoder available (avdec_aac or fdkaacdec) — audio will be disabled: {}", e);
                 e
             }).ok();
 
@@ -510,71 +498,18 @@ impl GstPipeline {
         })?;
 
         // Link audio chain.
-        //
-        // With decodebin3/decodebin: audio_queue → decodebin3 [→ dynamic src pad] → audioconvert
-        //   decodebin3 creates source pads dynamically, so we can't link it to
-        //   audioconvert at construction time. We connect to its "pad-added" signal
-        //   and link the new pad to audioconvert's sink.
-        //
-        // With avdec_aac (fallback): audio_queue → avdec_aac → audioconvert
-        //
-        // Both paths continue: audioconvert → audioresample → volume → alsasink
-        let uses_decodebin = audio_decoder.as_ref().map(|d| {
-            let factory_name = d.factory().map(|f: gstreamer::ElementFactory| f.name()).unwrap_or_default();
-            factory_name == "decodebin3" || factory_name == "decodebin"
-        }).unwrap_or(false);
-
+        // If we have an audio decoder: audio_queue → avdec_aac → audioconvert → audioresample → volume → alsasink
+        // If no decoder available:        audio_queue → audioconvert → audioresample → volume → alsasink
+        //   (will fail caps negotiation for encoded audio, but the fakesink
+        //    fallback in the pad-added handler prevents pipeline death)
         if let Some(ref dec) = audio_decoder {
-            if uses_decodebin {
-                // Link audio_queue → decodebin3 only (decodebin3's output is
-                // linked dynamically via pad-added signal below)
-                Element::link_many([&audio_queue, dec])
-                    .map_err(|e| PlaybackError::PipelineCreation(format!("link audio_queue→decodebin: {}", e)))?;
-
-                // Connect decodebin3's pad-added signal to link its output
-                // to audioconvert. decodebin3 creates source pads after
-                // detecting the input codec.
-                let audioconvert_weak = audioconvert.downgrade();
-                dec.connect_pad_added(move |_dec, pad| {
-                    let ac = match audioconvert_weak.upgrade() {
-                        Some(ac) => ac,
-                        None => return,
-                    };
-                    let sink_pad = ac.static_pad("sink")
-                        .expect("audioconvert should have a sink pad");
-                    if sink_pad.is_linked() {
-                        return; // already linked
-                    }
-                    match pad.link(&sink_pad) {
-                        Ok(_) => tracing::info!(
-                            caps = %pad.current_caps().map(|c| c.to_string()).unwrap_or_default(),
-                            "linked audio decodebin → audioconvert"
-                        ),
-                        Err(e) => tracing::error!(
-                            error = ?e,
-                            "failed to link audio decodebin → audioconvert"
-                        ),
-                    }
-                });
-
-                tracing::info!("audio chain: audio_queue → decodebin3 → (dynamic) → audioconvert → audioresample → volume → {}", config.audio_sink);
-            } else {
-                // Static decoder (avdec_aac) — link all elements at once
-                Element::link_many([&audio_queue, dec, &audioconvert, &audioresample, &volume, &audiosink])
-                    .map_err(|e| PlaybackError::PipelineCreation(format!("link audio chain (with decoder): {}", e)))?;
-                tracing::info!("audio chain: audio_queue → avdec_aac → audioconvert → audioresample → volume → {}", config.audio_sink);
-            }
+            Element::link_many([&audio_queue, dec, &audioconvert, &audioresample, &volume, &audiosink])
+                .map_err(|e| PlaybackError::PipelineCreation(format!("link audio chain (with decoder): {}", e)))?;
+            tracing::info!("audio chain: audio_queue → avdec_aac → audioconvert → audioresample → volume → {}", config.audio_sink);
         } else {
             Element::link_many([&audio_queue, &audioconvert, &audioresample, &volume, &audiosink])
                 .map_err(|e| PlaybackError::PipelineCreation(format!("link audio chain (no decoder): {}", e)))?;
             tracing::warn!("audio chain has no decoder — encoded audio streams will be dropped");
-        }
-
-        // Link the tail of the audio chain: audioconvert → audioresample → volume → audiosink
-        // (only needed for decodebin3 path — static decoder path already linked above)
-        if uses_decodebin {
-            Element::link_many([&audioconvert, &audioresample, &volume, &audiosink])
-                .map_err(|e| PlaybackError::PipelineCreation(format!("link audio tail: {}", e)))?;
         }
 
         // ── Dynamic pad linking (parsebin → video/audio) ────────────

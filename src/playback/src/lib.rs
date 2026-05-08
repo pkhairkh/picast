@@ -944,11 +944,9 @@ impl PlaybackEngine {
                     // BUFFERING messages to pause/resume the pipeline.
                     //
                     // **Initial buffering (before first play):**
-                    //   - Buffer >= high-percent (95%): transition to Playing
-                    //     and clear initial_buffering flag. We wait for 95%
-                    //     (not 80%) to build a deep buffer before consuming,
-                    //     which prevents the "play briefly → underrun → pause →
-                    //     refill → repeat" sawtooth cycle on slow Tor links.
+                    //   - Buffer >= high-percent (80%): transition to Playing
+                    //     and clear initial_buffering flag. We wait for 80%
+                    //     to build a reasonable buffer before consuming.
                     //
                     // **During playback (after first play):**
                     //   - Buffer < low-percent (2%): pause to refill
@@ -964,12 +962,12 @@ impl PlaybackEngine {
                     // (handled by kmssink's max-lateness) for much smoother
                     // perceived playback.
                     if let Some(pipe) = pipeline_weak_bus.upgrade() {
-                        if percent >= 95 {
-                            // Buffer is fully loaded — start/resume playing.
+                        if percent >= 80 {
+                            // Buffer is sufficiently full — start/resume playing.
                             if initial_buffering_bus.load(Ordering::Relaxed) {
                                 tracing::info!(
                                     percent = percent,
-                                    "buffering reached 95% — \
+                                    "buffering reached 80% — \
                                      clearing initial_buffering flag and starting playback"
                                 );
                                 initial_buffering_bus.store(false, Ordering::Relaxed);
@@ -980,15 +978,14 @@ impl PlaybackEngine {
                             if current == State::Paused {
                                 tracing::info!(
                                     percent = percent,
-                                    "buffer fully loaded — resuming playback"
+                                    "buffer sufficiently full — resuming playback"
                                 );
                                 let _ = pipe.set_state(State::Playing);
                             }
                         } else if percent >= 50 && !initial_buffering_bus.load(Ordering::Relaxed) {
                             // During playback (not initial buffering): resume
                             // from a buffer underrun pause when buffer refills
-                            // to 50%. This is lower than the initial threshold
-                            // (95%) to avoid frequent pause/resume cycles.
+                            // to 50%.
                             let (_, current, _) = pipe.state(gstreamer::ClockTime::from_mseconds(0));
                             if current == State::Paused {
                                 tracing::info!(

@@ -278,6 +278,24 @@ async fn handle_connect(
         tracing::debug!(error = %e, "could not set TCP_NODELAY on remote stream");
     }
 
+    // Increase SO_RCVBUF on the Tor-side socket from the kernel default
+    // (~128 KB) to 512 KB. A larger receive buffer prevents flow-control
+    // stalls: when the forwarder is busy writing a chunk to souphttpsrc,
+    // the kernel can still buffer incoming data from Tor without the TCP
+    // window shrinking and throttling the Tor relay. On a 5 Mbps Tor
+    // stream with 256 KB BufWriter, a 512 KB SO_RCVBUF gives ~1 second
+    // of read-ahead even if the forwarder thread is momentarily delayed.
+    if let Err(e) = remote.set_recv_buffer_size(512 * 1024) {
+        tracing::debug!(error = %e, "could not set SO_RCVBUF on remote stream");
+    }
+
+    // Also increase SO_SNDBUF on the client side (souphttpsrc side) to
+    // 512 KB. This allows larger write bursts when forwarding data from
+    // Tor to souphttpsrc, reducing the number of write syscalls.
+    if let Err(e) = client.set_send_buffer_size(512 * 1024) {
+        tracing::debug!(error = %e, "could not set SO_SNDBUF on client stream");
+    }
+
     tracing::info!(
         target = %target,
         "SOCKS5 forwarder: tunnel established through Tor — CDN will see resolver's exit IP"
