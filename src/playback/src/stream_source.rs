@@ -73,8 +73,16 @@ pub struct StreamSource {
     _socks_forwarder: SocksForwarder,
     /// The reqwest client used for CDN requests.
     client: reqwest::Client,
-    /// CDN URL being downloaded.
+    /// CDN URL being downloaded (may be the speed-unlimited or original URL
+    /// depending on fallback state).
     cdn_url: String,
+    /// The original CDN URL (with sp= if present). Used as fallback if
+    /// the speed-unlimited URL is rejected by the CDN (403).
+    original_cdn_url: String,
+    /// The CDN URL with the sp= parameter stripped. Some(None) means
+    /// we already fell back to the original URL. None means the original
+    /// URL had no sp= parameter (no rate limit bypass needed).
+    speed_unlimited_cdn_url: Option<Option<String>>,
     /// Source URL for Referer header.
     source_url: String,
     /// Cookies from the resolver session.
@@ -195,9 +203,31 @@ impl StreamSource {
         // Store CDN rate limit in shared progress state for the pipeline
         *progress.cdn_rate_limit_kbps.lock().unwrap() = cdn_rate_limit;
 
+        // Try to strip the sp= parameter to get a speed-unlimited URL.
+        // If the CDN accepts the modified URL, we can download at full speed
+        // instead of being capped at the sp= rate.
+        let original_cdn_url = cdn_url.clone();
+        let speed_unlimited_cdn_url = strip_cdn_speed_param(&cdn_url);
+        let cdn_url = if let Some(ref unlimited) = speed_unlimited_cdn_url {
+            tracing::info!(
+                original_url = %original_cdn_url,
+                unlimited_url = %unlimited,
+                "stream source: stripped sp= parameter from CDN URL — will try speed-unlimited URL first"
+            );
+            unlimited.clone()
+        } else {
+            cdn_url
+        };
+
         let (data_tx, data_rx) = mpsc::channel(CHANNEL_CAPACITY);
 
         let cancel = Arc::new(AtomicBool::new(false));
+
+        // Wrap speed_unlimited_cdn_url in Option<Option<String>>:
+        //   None              — original URL had no sp= (no bypass possible)
+        //   Some(Some(url))   — speed-unlimited URL available, not yet tried
+        //   Some(None)        — already fell back to original URL
+        let speed_unlimited_field = speed_unlimited_cdn_url.map(Some);
 
         Ok(Self {
             data_rx,
@@ -205,6 +235,8 @@ impl StreamSource {
             _socks_forwarder: socks_forwarder,
             client,
             cdn_url,
+            original_cdn_url,
+            speed_unlimited_cdn_url: speed_unlimited_field,
             source_url,
             cookies,
             progress,
@@ -226,7 +258,47 @@ impl StreamSource {
     ///
     /// Returns the CDN's Content-Length header if available, which
     /// is used to estimate the video bitrate.
-    pub async fn preflight_check(&self) -> Result<Option<u64>, String> {
+    ///
+    /// If the CDN returns 403 for the speed-unlimited URL (sp= stripped),
+    /// this method automatically falls back to the original rate-limited
+    /// URL and retries the preflight check.
+    pub async fn preflight_check(&mut self) -> Result<Option<u64>, String> {
+        let result = self.do_preflight_request().await;
+
+        match result {
+            Ok(content_length) => {
+                // If the speed-unlimited URL was accepted, the CDN rate
+                // limit no longer applies — clear it so the pipeline
+                // doesn't use rate-limited buffering parameters.
+                if self.speed_unlimited_cdn_url.is_some() {
+                    tracing::info!(
+                        "stream source: CDN accepted speed-unlimited URL (sp= stripped) — \
+                         rate limit bypassed, clearing cdn_rate_limit_kbps"
+                    );
+                    *self.progress.cdn_rate_limit_kbps.lock().unwrap() = None;
+                }
+                Ok(content_length)
+            },
+            Err(e) => {
+                // Check if this might be a 403 from the speed-unlimited URL
+                // and we have a fallback available.
+                if e.contains("403") && self.speed_unlimited_cdn_url.is_some() {
+                    tracing::info!(
+                        error = %e,
+                        "stream source: CDN rejected speed-unlimited URL, falling back to rate-limited URL"
+                    );
+                    self.fallback_to_rate_limited_url();
+                    // Retry with the original URL
+                    self.do_preflight_request().await
+                } else {
+                    Err(e)
+                }
+            }
+        }
+    }
+
+    /// Internal: perform a single preflight HTTP HEAD request.
+    async fn do_preflight_request(&self) -> Result<Option<u64>, String> {
         let mut req = self
             .client
             .head(&self.cdn_url)
@@ -284,6 +356,15 @@ impl StreamSource {
             .get("content-length")
             .and_then(|v| v.to_str().ok())
             .and_then(|v| v.parse::<u64>().ok());
+
+        // Store Content-Length in shared progress state for the pipeline.
+        // This fixes a bug where Content-Length was available from the
+        // preflight response but not stored in ProgressState, so the
+        // pipeline couldn't use it for bitrate estimation until the
+        // actual GET download started.
+        if let Some(cl) = content_length {
+            *self.progress.total_bytes.lock().unwrap() = Some(cl);
+        }
 
         Ok(content_length)
     }
@@ -486,6 +567,33 @@ impl StreamSource {
         self.data_rx.recv().await
     }
 
+    /// Fall back to the original rate-limited CDN URL.
+    ///
+    /// Called when the CDN rejects the speed-unlimited URL (sp= stripped)
+    /// with a 403. Switches `cdn_url` back to the original URL that includes
+    /// the sp= parameter.
+    ///
+    /// Returns `true` if fallback happened (was using speed-unlimited URL),
+    /// `false` if already using the original URL (no fallback needed).
+    pub fn fallback_to_rate_limited_url(&mut self) -> bool {
+        if self.speed_unlimited_cdn_url.is_some() {
+            tracing::info!(
+                unlimited_url = %self.cdn_url,
+                original_url = %self.original_cdn_url,
+                "stream source: falling back from speed-unlimited URL to original rate-limited URL"
+            );
+            self.cdn_url = self.original_cdn_url.clone();
+            self.speed_unlimited_cdn_url = Some(None); // mark as already fallen back
+            // Update rate limit in progress state since we're now using
+            // the rate-limited URL again
+            let rate_limit = extract_cdn_speed_param(&self.cdn_url);
+            *self.progress.cdn_rate_limit_kbps.lock().unwrap() = rate_limit;
+            true
+        } else {
+            false
+        }
+    }
+
     /// Get the current download progress.
     pub fn progress(&self) -> DownloadProgress {
         self.progress.snapshot()
@@ -527,4 +635,68 @@ fn extract_cdn_speed_param(url: &str) -> Option<u64> {
         }
     }
     None
+}
+
+/// Strip the CDN speed-limit parameter (`sp=`) from a URL's query string.
+///
+/// Returns `Some(modified_url)` if the `sp=` parameter was found and removed,
+/// or `None` if there was no `sp=` parameter in the URL.
+///
+/// Handles all positions of `sp=` in the query string:
+/// - `?sp=380` at the start of query string
+/// - `&sp=380` in the middle of query string
+/// - `&sp=380` at the end of query string (no trailing &)
+///
+/// # Examples
+/// ```
+/// // Middle of query string
+/// assert_eq!(
+///     strip_cdn_speed_param("https://cdn.example.com/video.mp4?t=abc&sp=380&i=199.195"),
+///     Some("https://cdn.example.com/video.mp4?t=abc&i=199.195".to_string())
+/// );
+/// // Start of query string
+/// assert_eq!(
+///     strip_cdn_speed_param("https://cdn.example.com/video.mp4?sp=380&t=abc"),
+///     Some("https://cdn.example.com/video.mp4?t=abc".to_string())
+/// );
+/// // End of query string
+/// assert_eq!(
+///     strip_cdn_speed_param("https://cdn.example.com/video.mp4?t=abc&sp=380"),
+///     Some("https://cdn.example.com/video.mp4?t=abc".to_string())
+/// );
+/// // No sp= parameter
+/// assert_eq!(strip_cdn_speed_param("https://cdn.example.com/video.mp4?t=abc"), None);
+/// ```
+fn strip_cdn_speed_param(url: &str) -> Option<String> {
+    // First check if there's an sp= parameter at all
+    let has_sp = url.contains("?sp=") || url.contains("&sp=");
+    if !has_sp {
+        return None;
+    }
+
+    // Try &sp= first (middle or end of query string)
+    if let Some(pos) = url.find("&sp=") {
+        let before = &url[..pos];
+        let after = &url[pos + 4..]; // skip "&sp="
+        let value_len = after.find('&').unwrap_or(after.len());
+        let rest = &after[value_len..];
+        return Some(format!("{}{}", before, rest));
+    }
+
+    // Try ?sp= (start of query string)
+    if let Some(pos) = url.find("?sp=") {
+        let before = &url[..pos];
+        let after = &url[pos + 4..]; // skip "?sp="
+        let value_len = after.find('&').unwrap_or(after.len());
+        let rest = &after[value_len..];
+        if rest.is_empty() {
+            // sp= was the only query parameter — remove the ? entirely
+            Some(before.to_string())
+        } else {
+            // Replace ?sp=...& with ? (next param becomes first)
+            Some(format!("{}?{}", before, &rest[1..])) // rest starts with &
+        }
+    } else {
+        None
+    }
 }

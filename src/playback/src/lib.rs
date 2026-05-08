@@ -1074,6 +1074,14 @@ impl PlaybackEngine {
         // trigger the Paused→Playing auto-transition.
         let pipeline_weak_bus = pipeline.pipeline().downgrade();
 
+        // Capture rate-limited status for the bus watch to use different
+        // buffering thresholds. Rate-limited streams need more aggressive
+        // buffering (start at 95%, resume at 95%, pause at <5%) compared
+        // to normal streams (start at 80%, resume at 80%, pause at <10%).
+        let is_rate_limited = pipeline.is_rate_limited();
+        let rate_limited_resume_percent: u8 = if is_rate_limited { 95 } else { 80 };
+        let rate_limited_pause_percent: u8 = if is_rate_limited { 5 } else { 10 };
+
         let bus_watch = bus.add_watch(move |_bus, msg| {
             use gstreamer::MessageView;
 
@@ -1249,25 +1257,32 @@ impl PlaybackEngine {
                     // The result was rapid Playing↔Paused cycling every few
                     // seconds, making playback unwatchable.
                     //
-                    // New thresholds (pause at <15%, resume at >=80%):
-                    //   - Pause earlier (15% vs 2%) — buffer still has some
-                    //     data, giving the download more time to recover
-                    //   - Resume later (80% vs 50%) — buffer is well-filled
-                    //     before playback resumes, allowing longer play periods
-                    //   - This trades longer pauses for longer play periods,
-                    //     resulting in much smoother perceived playback
+                    // Adaptive buffering thresholds based on rate-limited status:
+                    //
+                    // Normal streams:
+                    //   - Resume at >=80% — buffer is well-filled before playback
+                    //   - Pause at <10% — give more play time before pausing
+                    //
+                    // Rate-limited streams (sp= parameter present):
+                    //   - Resume at >=95% — wait for nearly full buffer to maximise
+                    //     play time before the buffer inevitably drains (download speed
+                    //     is capped below video bitrate)
+                    //   - Pause at <5% — give maximum play time before pausing,
+                    //     since the buffer will take a long time to refill
+                    //
+                    // Rate-limited streams MUST resume at 95% (vs 80% for normal)
+                    // because their download speed is capped — a buffer at 80% on
+                    // a rate-limited stream will drain much faster than it can
+                    // refill, leading to rapid play-pause cycling. Waiting for
+                    // 95% ensures the maximum possible play duration.
                     if let Some(pipe) = pipeline_weak_bus.upgrade() {
-                        if percent >= 80 {
+                        if percent >= rate_limited_resume_percent {
                             // Buffer is sufficiently full — start/resume playing.
-                            // The queue2 high-percent is set to 95%, but we
-                            // transition at 80% to avoid waiting too long on
-                            // fast streams. The 95% high-percent ensures queue2
-                            // doesn't signal "buffering complete" until 95%,
-                            // giving us maximum initial cushion for rate-limited
-                            // streams. Once it reaches 80%, playback is viable.
                             if initial_buffering_bus.load(Ordering::Relaxed) {
                                 tracing::info!(
                                     percent = percent,
+                                    is_rate_limited = is_rate_limited,
+                                    resume_threshold = rate_limited_resume_percent,
                                     "buffering reached {}% — \
                                      clearing initial_buffering flag and starting playback",
                                     percent
@@ -1307,21 +1322,18 @@ impl PlaybackEngine {
                                      will auto-play when preroll completes"
                                 );
                             }
-                        } else if percent < 10 && !initial_buffering_bus.load(Ordering::Relaxed) {
+                        } else if percent < rate_limited_pause_percent && !initial_buffering_bus.load(Ordering::Relaxed) {
                             // Buffer low during playback — pause to refill.
                             // Only pause if we're NOT in initial buffering
                             // (we're already paused then).
-                            // Pause at 10% — with the 400 MB buffer, this
-                            // still represents ~40 MB of data, enough to
-                            // keep playing while the download catches up.
-                            // Lower than the previous 15% because the larger
-                            // buffer (400 MB) takes longer to refill, and
-                            // pausing too early causes unnecessary interruptions.
                             let (_, current, _) = pipe.state(gstreamer::ClockTime::from_mseconds(0));
                             if current == State::Playing {
                                 tracing::warn!(
                                     percent = percent,
-                                    "buffer low (<10%) — pausing to refill"
+                                    is_rate_limited = is_rate_limited,
+                                    pause_threshold = rate_limited_pause_percent,
+                                    "buffer low (<{}%) — pausing to refill",
+                                    rate_limited_pause_percent
                                 );
                                 let _ = pipe.set_state(State::Paused);
                             }

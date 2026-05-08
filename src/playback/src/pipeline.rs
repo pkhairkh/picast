@@ -106,6 +106,10 @@ pub struct GstPipeline {
     /// Shared download progress state, updated by the StreamSource
     /// download task and read via `download_progress()`.
     download_progress: Arc<ProgressState>,
+    /// Whether the stream is rate-limited by the CDN (sp= parameter).
+    /// When true, the bus watch uses more aggressive buffering thresholds
+    /// to minimise rebuffer pauses.
+    is_rate_limited: bool,
     /// V3D compute shader engine for SAND→NV12 conversion.
     /// Only present when HEVC decode is enabled and V3D is available.
     #[cfg(feature = "hevc")]
@@ -246,10 +250,13 @@ impl GstPipeline {
             .map_err(|e| PlaybackError::PipelineCreation(e))?;
 
             // Preflight CDN check — verify the CDN accepts this Tor circuit.
+            // The preflight_check method now handles automatic fallback from
+            // speed-unlimited URL to rate-limited URL if the CDN rejects the
+            // modified URL (sp= stripped) with 403.
             if let Err(e) = source.preflight_check().await {
                 tracing::warn!(
                     error = %e,
-                    "stream source: preflight CDN check failed — re-resolve needed"
+                    "stream source: preflight CDN check failed (including fallback) — re-resolve needed"
                 );
                 return Err(PlaybackError::PipelineCreation(
                     "CDN 403 Forbidden — re-resolve needed".into(),
@@ -363,35 +370,44 @@ impl GstPipeline {
         // For the appsrc path (CDN URLs): queue2 provides the primary
         // buffering mechanism. appsrc pushes data from the StreamSource
         // channel at the CDN's download rate. queue2 accumulates this
-        // data and controls when playback starts (high-percent=95%).
+        // data and controls when playback starts (high-percent).
         //
-        // max-size-bytes=400 MB (increased from 200 MB): With the appsrc
-        // path, there's no souphttpsrc doing its own buffering, so queue2
-        // is the sole buffer. 400 MB provides maximum cushion for
-        // CDN-rate-limited streams where sp= caps throughput below the
-        // video bitrate. On a 379 kbps Tor link with a 1.4 Mbps video,
-        // starting with a full 400 MB buffer gives:
-        //   400 MB / (1.4 Mbps - 0.379 Mbps) ≈ 312 seconds of play
-        // before rebuffering is needed.
-        //
-        // high-percent=95 (increased from 80): Wait for 95% buffer fill
-        // before starting playback. This maximises the initial buffer
-        // cushion for CDN-rate-limited streams. At 95% of 400 MB = 380 MB,
-        // a 1.4 Mbps video on a 379 kbps link plays for ~297 seconds
-        // before rebuffering.
-        //
-        // The previous 80% threshold started playback too early for
-        // rate-limited streams, causing the buffer to drain below the
-        // low-percent threshold within minutes, triggering frequent
-        // rebuffer pauses.
-        let queue2 = ElementFactory::make("queue2")
-            .property("max-size-bytes", 400_000_000u32) // 400 MB — larger buffer for CDN-rate-limited streams
-            .property("max-size-time", 300_000_000_000u64) // 300 seconds of media data — more headroom for slow Tor links
-            .property("use-buffering", true)
-            .property("high-percent", 95i32) // start playing when 95% full — maximise initial buffer for rate-limited streams
-            .property("low-percent", 10i32) // pause when buffer drops to 10% — give more play time before pausing
-            .build()
-            .map_err(|e| PlaybackError::PipelineCreation(format!("queue2: {}", e)))?;
+        // Adaptive buffering: if the stream is rate-limited by the CDN
+        // (sp= parameter present and not successfully bypassed), we use
+        // maximum buffering parameters to minimise rebuffer pauses.
+        // Rate-limited streams have a fixed ceiling on download speed,
+        // so the buffer will drain faster than it fills once playback
+        // starts. A larger buffer and higher thresholds give more
+        // play time before rebuffering is needed.
+        let is_rate_limited = download_progress.cdn_rate_limit_kbps.lock().unwrap().is_some();
+
+        let queue2 = if is_rate_limited {
+            // Rate-limited stream: use maximum buffering
+            tracing::info!(
+                "queue2: using rate-limited buffering profile (500 MB buffer, 600s max time, 99% high-percent)"
+            );
+            ElementFactory::make("queue2")
+                .property("max-size-bytes", 500_000_000u32) // 500 MB — absolute max buffer
+                .property("max-size-time", 600_000_000_000u64) // 600 seconds — 10 minutes
+                .property("use-buffering", true)
+                .property("high-percent", 99i32) // Wait until 99% full before playing
+                .property("low-percent", 5i32) // Only pause at 5% — give maximum play time
+                .build()
+                .map_err(|e| PlaybackError::PipelineCreation(format!("queue2: {}", e)))?
+        } else {
+            // Normal stream: standard buffering
+            tracing::info!(
+                "queue2: using standard buffering profile (400 MB buffer, 300s max time, 95% high-percent)"
+            );
+            ElementFactory::make("queue2")
+                .property("max-size-bytes", 400_000_000u32) // 400 MB — larger buffer for CDN streams
+                .property("max-size-time", 300_000_000_000u64) // 300 seconds of media data
+                .property("use-buffering", true)
+                .property("high-percent", 95i32) // start playing when 95% full
+                .property("low-percent", 10i32) // pause when buffer drops to 10%
+                .build()
+                .map_err(|e| PlaybackError::PipelineCreation(format!("queue2: {}", e)))?
+        };
 
         // ── Demuxer ─────────────────────────────────────────────────
         let parsebin = ElementFactory::make("parsebin")
@@ -1142,6 +1158,7 @@ impl GstPipeline {
             bus_watch: None,
             push_cancel,
             download_progress,
+            is_rate_limited,
             #[cfg(feature = "hevc")]
             _v3d_engine: None, // V3D compute disabled — EGL context creation not yet implemented
         })
@@ -1907,6 +1924,15 @@ impl GstPipeline {
     /// Retain the bus watch guard so GStreamer keeps dispatching messages.
     pub fn set_bus_watch(&mut self, guard: gstreamer::bus::BusWatchGuard) {
         self.bus_watch = Some(guard);
+    }
+
+    /// Return whether the stream is rate-limited by the CDN (sp= parameter).
+    ///
+    /// When true, the bus watch should use more aggressive buffering
+    /// thresholds (start at 95%, pause at <5%, resume at >=95%) to
+    /// minimise rebuffer pauses on rate-limited streams.
+    pub fn is_rate_limited(&self) -> bool {
+        self.is_rate_limited
     }
 
     /// Return the current pipeline state.
