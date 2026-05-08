@@ -333,37 +333,131 @@ fn detect_audio_output() -> (String, String) {
         }
     };
 
-    if has_connected_bt {
-        // Check if PulseAudio is actually available before committing to
-        // pulsesink. If PA isn't running, pulsesink will fail at pipeline
-        // creation time, and the user gets no audio at all.
-        let pulse_available = std::process::Command::new("pactl")
-            .args(["info"])
-            .output()
-            .map(|o| o.status.success())
-            .unwrap_or(false);
+    // ── BT auto-reconnect after reboot ──────────────────────────────
+    // On Raspberry Pi, Bluetooth A2DP devices do NOT auto-reconnect
+    // after a reboot. The BT adapter comes up, paired devices are known,
+    // but they remain disconnected until something explicitly connects.
+    // This means PiCast's audio detection finds no connected BT device
+    // and falls back to HDMI, even though the user's BT speaker is
+    // paired and available.
+    //
+    // We fix this by proactively connecting any paired-but-disconnected
+    // BT devices that support A2DP, then waiting briefly for the
+    // connection to establish before checking again.
+    let has_connected_bt = if has_connected_bt {
+        true
+    } else {
+        // No connected BT device found — try to auto-connect paired devices
+        let mut connected = false;
 
-        if pulse_available {
-            if let Some((card_idx, name)) = bt_cards.first() {
-                tracing::info!(
-                    card_index = card_idx,
-                    card_name = %name,
-                    "audio auto-detect: Bluetooth device connected + PulseAudio available — using pulsesink"
-                );
-            } else {
-                tracing::info!(
-                    "audio auto-detect: BlueALSA daemon running + BT device connected + PulseAudio available — using pulsesink"
-                );
+        // Get list of paired devices
+        if let Ok(paired_output) = std::process::Command::new("bluetoothctl")
+            .args(["devices", "Paired"])
+            .output()
+        {
+            if let Ok(paired_stdout) = String::from_utf8(paired_output.stdout) {
+                for line in paired_stdout.lines() {
+                    if let Some(rest) = line.strip_prefix("Device ") {
+                        let parts: Vec<&str> = rest.splitn(2, ' ').collect();
+                        if parts.len() >= 2 {
+                            let bt_addr = parts[0];
+                            let bt_name = parts[1];
+
+                            // Check if this device supports A2DP (audio).
+                            // We check the UUIDs for AudioSink (A2DP sink =
+                            // speaker/headphones). Not all paired devices
+                            // are audio devices (e.g. keyboards, mice).
+                            let is_audio_device = {
+                                if let Ok(info_output) = std::process::Command::new("bluetoothctl")
+                                    .args(["info", bt_addr])
+                                    .output()
+                                {
+                                    if let Ok(info_stdout) = String::from_utf8(info_output.stdout) {
+                                        info_stdout.lines().any(|l| {
+                                            let l = l.trim();
+                                            // A2DP Audio Sink UUID = 0000110b-0000-1000-8000-00805f9b34fb
+                                            // Most bluetoothctl versions show "Audio Sink" or "A2DP Sink"
+                                            l.contains("Audio Sink")
+                                                || l.contains("A2DP Sink")
+                                                || l.contains("A2DP")
+                                                || l.contains("Headset")
+                                                || l.contains("Handsfree")
+                                        })
+                                    } else {
+                                        false
+                                    }
+                                } else {
+                                    // Can't check UUIDs — try connecting anyway
+                                    // (worst case, a non-audio device connects
+                                    // but won't interfere with audio routing)
+                                    true
+                                }
+                            };
+
+                            if is_audio_device {
+                                tracing::info!(
+                                    bt_address = %bt_addr,
+                                    bt_name = %bt_name,
+                                    "audio auto-detect: attempting to auto-connect paired BT audio device (not connected after reboot)"
+                                );
+                                // Connect the device. bluetoothctl connect is
+                                // async — it returns immediately but the
+                                // connection takes 1-3 seconds to establish.
+                                let _ = std::process::Command::new("bluetoothctl")
+                                    .args(["connect", bt_addr])
+                                    .output();
+                                connected = true;
+                            }
+                        }
+                    }
+                }
             }
-            // pulsesink with no device = PulseAudio default sink, which
-            // auto-routes to the connected Bluetooth device.
-            return ("pulsesink".into(), String::new());
+        }
+
+        if connected {
+            // Wait for BT connection to establish. A2DP connection
+            // typically takes 2-4 seconds on Pi 4. We wait up to 5
+            // seconds, checking every 500ms.
+            tracing::info!("audio auto-detect: waiting for BT auto-reconnect to establish...");
+            for attempt in 1..=10 {
+                std::thread::sleep(std::time::Duration::from_millis(500));
+                if let Ok(output) = std::process::Command::new("bluetoothctl")
+                    .args(["devices", "Connected"])
+                    .output()
+                {
+                    if let Ok(stdout) = String::from_utf8(output.stdout) {
+                        if stdout.lines().any(|line| line.starts_with("Device ")) {
+                            tracing::info!(
+                                attempt = attempt,
+                                "audio auto-detect: BT device connected after auto-reconnect"
+                            );
+                            break;
+                        }
+                    }
+                }
+            }
+        }
+
+        // Re-check connected devices after auto-reconnect attempt
+        if let Ok(output) = std::process::Command::new("bluetoothctl")
+            .args(["devices", "Connected"])
+            .output()
+        {
+            if let Ok(stdout) = String::from_utf8(output.stdout) {
+                stdout.lines().any(|line| line.starts_with("Device "))
+            } else {
+                false
+            }
         } else {
-            // PulseAudio not available. Use the BlueALSA ALSA plugin with
-            // alsasink. The BlueALSA ALSA plugin (`bluealsa:DEV=...,PROFILE=a2dp`)
-            // is provided by the `bluealsa` package and works with alsasink
-            // without PulseAudio. This is the standard BT audio path on Pi
-            // systems without PulseAudio running.
+            false
+        }
+    };
+
+    if has_connected_bt {
+        // Get the MAC address of the first connected BT device.
+        // We need this for both BlueALSA and PulseAudio paths.
+        let bt_addr: Option<String> = {
+            let mut found: Option<String> = None;
             if let Ok(output) = std::process::Command::new("bluetoothctl")
                 .args(["devices", "Connected"])
                 .output()
@@ -373,21 +467,92 @@ fn detect_audio_output() -> (String, String) {
                         if let Some(rest) = line.strip_prefix("Device ") {
                             let parts: Vec<&str> = rest.splitn(2, ' ').collect();
                             if parts.len() >= 2 {
-                                let bt_addr = parts[0];
-                                tracing::info!(
-                                    bt_address = %bt_addr,
-                                    bt_name = parts[1],
-                                    "audio auto-detect: Bluetooth device connected + BlueALSA available (no PulseAudio) — \
-                                     using alsasink with BlueALSA ALSA plugin"
-                                );
-                                return ("alsasink".into(), format!("bluealsa:DEV={},PROFILE=a2dp", bt_addr));
+                                found = Some(parts[0].to_string());
+                                break;
                             }
                         }
                     }
                 }
             }
+            found
+        };
+
+        if let Some(ref addr) = bt_addr {
+            // Prefer BlueALSA + alsasink over PulseAudio, even when PA is
+            // running. On Pi 4, PA's default sink is often the 3.5mm
+            // headphone jack (alsa_output.platform-fe00b840.mailbox), NOT
+            // the BT speaker. Using pulsesink with PA's default sink sends
+            // audio to the wrong output. BlueALSA+alsasink is more reliable
+            // because it routes directly to the specific BT device via the
+            // ALSA plugin, without depending on PA's sink configuration.
+            //
+            // We only fall back to pulsesink if the BlueALSA ALSA plugin is
+            // not installed (rare on Debian/Raspbian with bluealsa package).
+            let bluealsa_plugin = std::path::Path::new(
+                "/usr/lib/aarch64-linux-gnu/alsa-lib/libasound_module_pcm_bluealsa.so"
+            ).exists() || std::path::Path::new(
+                "/usr/lib/arm-linux-gnueabihf/alsa-lib/libasound_module_pcm_bluealsa.so"
+            ).exists();
+
+            if bluealsa_plugin {
+                tracing::info!(
+                    bt_address = %addr,
+                    "audio auto-detect: BT device connected + BlueALSA ALSA plugin available — \
+                     using alsasink with bluealsa:DEV={},PROFILE=a2dp",
+                    addr
+                );
+                return ("alsasink".into(), format!("bluealsa:DEV={},PROFILE=a2dp", addr));
+            } else {
+                // BlueALSA ALSA plugin not installed — try PulseAudio as fallback.
+                // We also set the PA default sink to the BT device so pulsesink
+                // routes correctly (PA default is often the headphone jack).
+                let pulse_available = std::process::Command::new("pactl")
+                    .args(["info"])
+                    .output()
+                    .map(|o| o.status.success())
+                    .unwrap_or(false);
+
+                if pulse_available {
+                    // Try to find and set the BT PA sink as default
+                    if let Ok(sinks_output) = std::process::Command::new("pactl")
+                        .args(["list", "sinks", "short"])
+                        .output()
+                    {
+                        if let Ok(sinks_stdout) = String::from_utf8(sinks_output.stdout) {
+                            for sink_line in sinks_stdout.lines() {
+                                // Look for bluez or a2dp in sink name
+                                let lower = sink_line.to_lowercase();
+                                if lower.contains("bluez") || lower.contains("a2dp") || lower.contains("bluetooth") {
+                                    let sink_name = sink_line.split_whitespace().nth(1);
+                                    if let Some(name) = sink_name {
+                                        tracing::info!(
+                                            sink = %name,
+                                            "audio auto-detect: setting PulseAudio default sink to BT device"
+                                        );
+                                        let _ = std::process::Command::new("pactl")
+                                            .args(["set-default-sink", name])
+                                            .output();
+                                    }
+                                    break;
+                                }
+                            }
+                        }
+                    }
+                    tracing::info!(
+                        bt_address = %addr,
+                        "audio auto-detect: BT device connected + PulseAudio available (no BlueALSA plugin) — using pulsesink"
+                    );
+                    return ("pulsesink".into(), String::new());
+                } else {
+                    tracing::warn!(
+                        "audio auto-detect: BT device connected but neither BlueALSA plugin nor PulseAudio available — \
+                         falling back to HDMI"
+                    );
+                }
+            }
+        } else {
             tracing::warn!(
-                "audio auto-detect: Bluetooth device connected but could not get BT address — \
+                "audio auto-detect: BT device reported as connected but could not get BT address — \
                  falling back to HDMI"
             );
         }
