@@ -172,6 +172,10 @@ impl picast_session::interfaces::ResolverTrait for ResolverAdapter {
             duration_ms: result.duration,
         })
     }
+
+    async fn invalidate_cache(&self, url: &str) {
+        self.0.invalidate_cache(url).await;
+    }
 }
 
 // AppConfig is now in config.rs with full TOML support.

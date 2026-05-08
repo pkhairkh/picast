@@ -550,6 +550,11 @@ fn map_session_event(event: &SessionEvent, current_session: Option<&MediaSession
                 })
             }
         },
+        SessionEvent::CdnForbidden { .. } => {
+            Some(ServerEvent::Error {
+                message: "CDN rejected request (403 Forbidden) — Tor exit IP mismatch, re-resolving…".into(),
+            })
+        },
     }
 }
 
