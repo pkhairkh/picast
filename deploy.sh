@@ -146,6 +146,41 @@ if [[ "$SKIP_BUILD" == false ]]; then
         exit 1
     fi
 
+    # ── HEVC decoder prerequisites ──────────────────────────────────────
+    # The v4l2slh265dec GStreamer element requires the rpivid V4L2 driver
+    # to be loaded. On Raspberry Pi OS, this requires uncommenting or
+    # adding 'dtoverlay=rpivid-v4l2' in /boot/config.txt (or
+    # /boot/firmware/config.txt on some Pi OS versions).
+    echo "      Checking HEVC decoder prerequisites..."
+
+    if gst-inspect-1.0 v4l2slh265dec &>/dev/null; then
+        echo "      v4l2slh265dec: available"
+    elif gst-inspect-1.0 v4l2h265dec &>/dev/null; then
+        echo "      v4l2h265dec: available (stateful)"
+    else
+        echo "      WARNING: No HEVC GStreamer decoder element found."
+        echo "      HEVC streams will fall back to H.264 hardware decode."
+        echo ""
+        echo "      To enable HEVC hardware decode on Raspberry Pi 4:"
+        echo "        1. Edit /boot/config.txt (or /boot/firmware/config.txt)"
+        echo "        2. Uncomment or add:  dtoverlay=rpivid-v4l2"
+        echo "        3. Reboot"
+        echo "        4. Verify: gst-inspect-1.0 v4l2slh265dec"
+    fi
+
+    # ── EGL/GLES libraries for V3D compute ──────────────────────────
+    # The V3D compute shader engine requires libEGL and libGLESv2 for
+    # EGL context creation and OpenGL ES 3.1 compute shader dispatch.
+    if [[ -f /usr/lib/aarch64-linux-gnu/libEGL.so.1 ]] || \
+       [[ -f /usr/lib/arm-linux-gnueabihf/libEGL.so.1 ]]; then
+        echo "      EGL/GLES: libraries found"
+    else
+        echo "      Installing EGL/GLES libraries for V3D compute engine..."
+        sudo apt-get install -y libegl1-mesa-dev libgles2-mesa-dev 2>/dev/null || \
+            sudo apt-get install -y libegl-dev libgles2-dev 2>/dev/null || \
+            echo "      WARNING: Could not install EGL/GLES packages — V3D compute may not work"
+    fi
+
     (cd "$REPO_DIR" && cargo build --release --features hw,hevc)
     echo "      Build complete."
 else

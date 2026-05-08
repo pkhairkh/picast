@@ -348,6 +348,34 @@ impl GstPipeline {
             .map_err(|e| PlaybackError::PipelineCreation(format!("parsebin: {}", e)))?;
 
         // ── Video elements ──────────────────────────────────────────
+        //
+        // When the `hevc` feature is enabled, try building the HEVC pipeline
+        // first. If the HEVC decoder (v4l2slh265dec) is not available on this
+        // system, fall back to the H.264 hardware decode pipeline. This allows
+        // the same binary to work on Pi systems with or without the rpivid HEVC
+        // decoder overlay enabled.
+        #[cfg(feature = "hevc")]
+        let (video_bin, video_sink, v3d_engine) = if config.hw_accel {
+            match Self::build_hevc_video_bin(config) {
+                Ok(result) => {
+                    tracing::info!("using HEVC/H.265 hardware decode pipeline (v4l2slh265dec + V3D/ISP conversion)");
+                    result
+                },
+                Err(e) => {
+                    tracing::warn!(
+                        error = %e,
+                        "HEVC pipeline not available — falling back to H.264 hardware decode"
+                    );
+                    let (vbin, vsink) = Self::build_hw_video_bin(config)?;
+                    (vbin, vsink, None)
+                },
+            }
+        } else {
+            let (vbin, vsink) = Self::build_sw_video_bin(config)?;
+            (vbin, vsink, None)
+        };
+
+        #[cfg(not(feature = "hevc"))]
         let (video_bin, video_sink) = if config.hw_accel {
             Self::build_hw_video_bin(config)?
         } else {
@@ -722,7 +750,7 @@ impl GstPipeline {
             bus_watch: None,
             _socks_forwarder: socks_forwarder,
             #[cfg(feature = "hevc")]
-            _v3d_engine: None,
+            _v3d_engine: v3d_engine,
         })
     }
 
