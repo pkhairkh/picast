@@ -148,6 +148,16 @@ impl GstPipeline {
             .property("location", url)
             .property("timeout", 30u32)
             .property("user-agent", BROWSER_UA)
+            // Increase the read blocksize from the default 4 KB to 64 KB.
+            // souphttpsrc reads data from the HTTP connection in chunks of
+            // `blocksize` bytes. With the default 4 KB, streaming a 5 Mbps
+            // video requires ~150 read() calls per second, each one going
+            // through the SOCKS5 forwarder → Tor → CDN round-trip. Larger
+            // blocks reduce syscall frequency and allow souphttpsrc to
+            // accumulate more data per read, improving throughput on high-
+            // latency Tor tunnels. 64 KB matches the buffer size that
+            // browsers use for media downloads.
+            .property("blocksize", 65_536u32)
             .build()
             .map_err(|e| PlaybackError::PipelineCreation(format!("souphttpsrc: {}", e)))?;
 
