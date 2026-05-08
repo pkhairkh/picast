@@ -255,7 +255,12 @@ impl GstPipeline {
 
         let src = ElementFactory::make("souphttpsrc")
             .property("location", &src_url)
-            .property("timeout", 30u32)
+            // Socket I/O timeout: if no data arrives for this many seconds,
+            // the connection is considered dead. Through Tor, throughput can
+            // be bursty with pauses of several seconds, so 120s gives enough
+            // headroom. The media proxy (which souphttpsrc connects to on
+            // localhost) handles CDN reconnection transparently.
+            .property("timeout", 120u32)
             .property("user-agent", BROWSER_UA)
             // Increase the read blocksize from the default 4 KB to 256 KB.
             // souphttpsrc reads data from the HTTP connection in chunks of

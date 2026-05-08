@@ -32,7 +32,7 @@
 use crate::socks_forwarder::SocksForwarder;
 use futures_util::StreamExt;
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::{TcpListener, TcpStream};
 use tokio::sync::oneshot;
@@ -95,7 +95,20 @@ impl MediaProxy {
         let client = reqwest::Client::builder()
             .user_agent(BROWSER_UA)
             .proxy(reqwest_proxy)
-            .timeout(std::time::Duration::from_secs(30))
+            // IMPORTANT: Do NOT set .timeout() here!
+            //
+            // reqwest's .timeout() is a TOTAL request timeout that covers
+            // connection + reading the entire response body. For streaming
+            // a 400+ MB video file, a 30-second timeout kills the stream
+            // after ~11 MB, causing "error decoding response body" and
+            // constant rebuffering.
+            //
+            // Instead, we rely on:
+            //   - .connect_timeout() for the initial TCP+TLS handshake
+            //   - TCP keepalive + Tor's own timeouts for detecting dead
+            //     connections during streaming
+            //   - The cancel token mechanism for graceful connection
+            //     handoff when souphttpsrc reconnects
             .connect_timeout(std::time::Duration::from_secs(15))
             // Don't auto-decompress — we send Accept-Encoding: identity
             // for video (already compressed). Also, souphttpsrc needs
@@ -123,7 +136,14 @@ impl MediaProxy {
             "media proxy: local streaming HTTP server started (reqwest→CDN via Tor, souphttpsrc→localhost)"
         );
 
-        let active_connection = Arc::new(AtomicBool::new(false));
+        // Cancel token for the currently active connection.
+        // When souphttpsrc reconnects (e.g., after a CDN disconnect or for
+        // seeking), we cancel the old connection and accept the new one.
+        // This is critical: previously, a 429 rejection was sent to the
+        // new connection, which souphttpsrc treated as a fatal error,
+        // causing the pipeline to die entirely.
+        let active_cancel: Arc<Mutex<Option<Arc<AtomicBool>>>> =
+            Arc::new(Mutex::new(None));
 
         // Spawn the server task.
         tokio::spawn(async move {
@@ -139,19 +159,30 @@ impl MediaProxy {
                                 let cdn_url = cdn_url.clone();
                                 let source_url = source_url.clone();
                                 let cookies = cookies.clone();
-                                let active = active_connection.clone();
+                                let active_cancel = active_cancel.clone();
 
-                                // Only one active connection at a time.
-                                // souphttpsrc may close and reconnect for seeking.
-                                if active.swap(true, Ordering::Relaxed) {
-                                    tracing::warn!(
-                                        peer = %peer,
-                                        "media proxy: rejecting connection — another connection is already active"
-                                    );
-                                    let _ = stream.write_all(
-                                        b"HTTP/1.1 429 Too Many Requests\r\nContent-Length: 0\r\nConnection: close\r\n\r\n"
-                                    ).await;
-                                    continue;
+                                // Cancel any previous connection to make room
+                                // for this new one. souphttpsrc reconnects when
+                                // the CDN stream dies or when seeking. We must
+                                // accept the new connection — rejecting with 429
+                                // causes a fatal GStreamer error that kills the
+                                // entire pipeline.
+                                {
+                                    let mut guard = active_cancel.lock().unwrap();
+                                    if let Some(old_cancel) = guard.take() {
+                                        tracing::info!(
+                                            peer = %peer,
+                                            "media proxy: cancelling previous connection — souphttpsrc reconnected"
+                                        );
+                                        old_cancel.store(true, Ordering::Relaxed);
+                                    }
+                                }
+
+                                // Create a new cancel token for this connection.
+                                let cancel = Arc::new(AtomicBool::new(false));
+                                {
+                                    let mut guard = active_cancel.lock().unwrap();
+                                    *guard = Some(cancel.clone());
                                 }
 
                                 tokio::spawn(async move {
@@ -161,6 +192,7 @@ impl MediaProxy {
                                         &cdn_url,
                                         &source_url,
                                         &cookies,
+                                        &cancel,
                                     )
                                     .await
                                     {
@@ -169,7 +201,19 @@ impl MediaProxy {
                                             "media proxy: connection handler error"
                                         );
                                     }
-                                    active.store(false, Ordering::Relaxed);
+
+                                    // Clean up: if we're still the active connection,
+                                    // clear the cancel token.
+                                    {
+                                        let mut guard = active_cancel.lock().unwrap();
+                                        let is_current = guard
+                                            .as_ref()
+                                            .map(|c| Arc::ptr_eq(c, &cancel))
+                                            .unwrap_or(false);
+                                        if is_current {
+                                            *guard = None;
+                                        }
+                                    }
                                 });
                             }
                             Err(e) => {
@@ -217,13 +261,16 @@ impl Drop for MediaProxy {
 /// Handle a single HTTP/1.1 connection from souphttpsrc.
 ///
 /// Reads the request, forwards it to the CDN via reqwest, and streams
-/// the response body back.
+/// the response body back. The `cancel` token is checked between chunks;
+/// if a new souphttpsrc connection arrives, the old one is cancelled
+/// gracefully.
 async fn handle_connection(
     mut stream: TcpStream,
     client: &reqwest::Client,
     cdn_url: &str,
     source_url: &str,
     cookies: &[String],
+    cancel: &AtomicBool,
 ) -> Result<(), String> {
     // Read HTTP request from souphttpsrc.
     let mut buf = vec![0u8; 4096];
@@ -361,8 +408,21 @@ async fn handle_connection(
     // Stream the response body to souphttpsrc.
     let mut body_stream = response.bytes_stream();
     let mut total_bytes: u64 = 0;
+    let start = std::time::Instant::now();
 
     while let Some(chunk_result) = body_stream.next().await {
+        // Check if this connection has been cancelled by a newer
+        // souphttpsrc reconnection request.
+        if cancel.load(Ordering::Relaxed) {
+            tracing::info!(
+                total_bytes = total_bytes,
+                "media proxy: connection cancelled — souphttpsrc opened a new connection"
+            );
+            // Drop the response body (which cancels the CDN download)
+            // and close the stream gracefully.
+            return Ok(());
+        }
+
         match chunk_result {
             Ok(chunk) => {
                 if chunk.is_empty() {
@@ -412,8 +472,16 @@ async fn handle_connection(
 
                 // Periodic progress logging (every ~10 MB)
                 if total_bytes % (10 * 1024 * 1024) < chunk.len() as u64 {
-                    tracing::debug!(
+                    let elapsed = start.elapsed();
+                    let throughput_kbps = if elapsed.as_secs() > 0 {
+                        (total_bytes / 1024) / elapsed.as_secs()
+                    } else {
+                        0
+                    };
+                    tracing::info!(
                         total_bytes = total_bytes,
+                        throughput_kbps = throughput_kbps,
+                        elapsed_s = elapsed.as_secs(),
                         "media proxy: streaming progress"
                     );
                 }
@@ -422,6 +490,7 @@ async fn handle_connection(
                 tracing::warn!(
                     error = %e,
                     total_bytes = total_bytes,
+                    elapsed_s = start.elapsed().as_secs(),
                     "media proxy: error reading from CDN stream"
                 );
                 break;
@@ -436,6 +505,7 @@ async fn handle_connection(
 
     tracing::info!(
         total_bytes = total_bytes,
+        elapsed_s = start.elapsed().as_secs(),
         "media proxy: stream completed"
     );
 
