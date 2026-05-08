@@ -42,7 +42,7 @@ use crate::socks_forwarder::SocksForwarder;
 use gstreamer::prelude::*;
 use gstreamer::{Element, ElementFactory, Pipeline, State};
 #[cfg(feature = "hevc")]
-use picast_v3d::{V3dComputeEngine, SandParams};
+use picast_v3d::V3dComputeEngine;
 
 /// Ensure GStreamer is initialised exactly once.
 static GST_INIT: std::sync::OnceLock<Result<(), String>> = std::sync::OnceLock::new();
@@ -1015,7 +1015,7 @@ impl GstPipeline {
         // The v4l2convert path is simpler but requires CPU involvement for
         // buffer management. The V3D path is near-zero-copy.
 
-        let kmssink = build_kmssink(config)?;
+        let kmssink = Self::build_kmssink(config)?;
 
         let bin = gstreamer::Bin::new();
 
