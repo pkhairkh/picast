@@ -32,14 +32,11 @@
 #[cfg(feature = "hw")]
 pub mod events;
 #[cfg(feature = "hw")]
-#[allow(dead_code)] // Retained as fallback; superseded by stream_source
-mod media_proxy;
-#[cfg(feature = "hw")]
 pub mod pipeline;
 #[cfg(feature = "hw")]
 mod socks_forwarder;
 #[cfg(feature = "hw")]
-mod stream_source;
+pub mod stream_source;
 
 #[cfg(feature = "hw")]
 use events::PlaybackEvent;
@@ -67,6 +64,42 @@ pub enum PlaybackState {
     Stopped,
     Playing,
     Paused,
+}
+
+// ── Download Progress ────────────────────────────────────────────────
+
+/// Progress report from the StreamSource download task.
+///
+/// Shared between the hw feature path (real CDN downloads) and the
+/// mock mode (returns zeroed values). The session layer can poll
+/// this to report download throughput and buffering to clients.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct DownloadProgress {
+    /// Total bytes downloaded so far.
+    pub downloaded_bytes: u64,
+    /// Total bytes in the file (from Content-Length header).
+    pub total_bytes: Option<u64>,
+    /// Measured throughput in kbps over the last measurement window.
+    pub throughput_kbps: u64,
+    /// Elapsed time since download started.
+    pub elapsed_secs: f64,
+    /// CDN HTTP status code.
+    pub http_status: u16,
+    /// Content-Type header from CDN.
+    pub content_type: Option<String>,
+}
+
+impl Default for DownloadProgress {
+    fn default() -> Self {
+        Self {
+            downloaded_bytes: 0,
+            total_bytes: None,
+            throughput_kbps: 0,
+            elapsed_secs: 0.0,
+            http_status: 0,
+            content_type: None,
+        }
+    }
 }
 
 // ── Errors ───────────────────────────────────────────────────────────
@@ -2065,6 +2098,47 @@ impl PlaybackEngine {
     /// Whether the engine is currently playing.
     pub fn is_playing(&self) -> bool {
         self.is_playing.load(Ordering::Relaxed)
+    }
+
+    /// Get the current download progress from the StreamSource.
+    ///
+    /// Returns download metrics (bytes downloaded, throughput, etc.)
+    /// if a pipeline is active. Returns a zeroed `DownloadProgress`
+    /// if no pipeline is running.
+    #[cfg(feature = "hw")]
+    pub fn download_progress(&self) -> DownloadProgress {
+        match self.gst_pipeline.try_lock() {
+            Ok(guard) => match *guard {
+                Some(ref pipeline) => pipeline.download_progress(),
+                None => DownloadProgress::default(),
+            },
+            Err(_) => DownloadProgress::default(),
+        }
+    }
+
+    /// Get the current download progress (mock mode — always returns zeroed).
+    #[cfg(not(feature = "hw"))]
+    pub fn download_progress(&self) -> DownloadProgress {
+        DownloadProgress::default()
+    }
+
+    /// Cancel the active CDN download.
+    ///
+    /// Signals the StreamSource's download task and the appsrc push
+    /// task to stop. The pipeline itself is not affected — call
+    /// `stop()` to tear down the pipeline.
+    #[cfg(feature = "hw")]
+    pub async fn cancel_download(&self) {
+        let mut guard = self.gst_pipeline.lock().await;
+        if let Some(ref mut pipeline) = *guard {
+            pipeline.cancel_download();
+        }
+    }
+
+    /// Cancel the active download (mock mode — no-op).
+    #[cfg(not(feature = "hw"))]
+    pub async fn cancel_download(&self) {
+        // No download task in mock mode.
     }
 
     /// Get the current audio device string.

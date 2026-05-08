@@ -2,19 +2,14 @@
 //!
 //! ## Problem
 //!
-//! The previous architecture piped CDN data through a real-time proxy chain:
-//!
-//! ```text
-//! CDN → Tor → SOCKS Forwarder → reqwest → MediaProxy HTTP server → souphttpsrc → queue2
-//! ```
-//!
-//! This requires `download_speed ≥ video_bitrate` at all times — an assumption
+//! The previous architecture piped CDN data through a real-time proxy chain
+//! that required `download_speed ≥ video_bitrate` at all times — an assumption
 //! that fails through Tor where throughput is variable (1-5 Mbps) and CDNs may
 //! rate-limit (the `sp=380` URL parameter matches the observed 379 kbps).
 //!
 //! ## Solution
 //!
-//! Replace the MediaProxy + souphttpsrc chain with a progressive download
+//! Replace the real-time proxy chain with a progressive download
 //! architecture that feeds data into GStreamer via `appsrc`:
 //!
 //! ```text
@@ -22,7 +17,7 @@
 //! ```
 //!
 //! Benefits:
-//! - Eliminates the MediaProxy HTTP server hop (one fewer user-space relay)
+//! - Eliminates the HTTP server relay hop (one fewer user-space relay)
 //! - Eliminates souphttpsrc (no more HTTP/1.1 client overhead)
 //! - Measures throughput BEFORE starting playback
 //! - Pre-buffers data aggressively when throughput < video bitrate
@@ -37,6 +32,7 @@
 //! without dropping data.
 
 use crate::socks_forwarder::SocksForwarder;
+use crate::DownloadProgress;
 use futures_util::StreamExt;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::Arc;
@@ -56,26 +52,7 @@ const CHANNEL_CAPACITY: usize = 128;
 #[derive(Debug)]
 pub struct DataChunk {
     pub data: bytes::Bytes,
-    #[allow(dead_code)] // Used for seek/offset tracking
     pub offset: u64,
-}
-
-/// Progress report from the download task.
-#[derive(Debug, Clone)]
-#[allow(dead_code)] // Public API for future progress reporting
-pub struct DownloadProgress {
-    /// Total bytes downloaded so far.
-    pub downloaded_bytes: u64,
-    /// Total bytes in the file (from Content-Length header).
-    pub total_bytes: Option<u64>,
-    /// Measured throughput in kbps over the last measurement window.
-    pub throughput_kbps: u64,
-    /// Elapsed time since download started.
-    pub elapsed_secs: f64,
-    /// CDN HTTP status code.
-    pub http_status: u16,
-    /// Content-Type header from CDN.
-    pub content_type: Option<String>,
 }
 
 /// A progressive download source that streams CDN data into a bounded channel.
@@ -109,14 +86,48 @@ pub struct StreamSource {
 }
 
 /// Shared progress state, updated by the download task and read by
-/// the playback engine for throughput-aware decisions.
-struct ProgressState {
-    downloaded_bytes: AtomicU64,
-    total_bytes: std::sync::Mutex<Option<u64>>,
-    throughput_kbps: AtomicU64,
-    start_time: std::sync::Mutex<Option<Instant>>,
-    http_status: std::sync::Mutex<Option<u16>>,
-    content_type: std::sync::Mutex<Option<String>>,
+/// the pipeline for download metrics reporting.
+pub struct ProgressState {
+    pub downloaded_bytes: AtomicU64,
+    pub total_bytes: std::sync::Mutex<Option<u64>>,
+    pub throughput_kbps: AtomicU64,
+    pub start_time: std::sync::Mutex<Option<Instant>>,
+    pub http_status: std::sync::Mutex<Option<u16>>,
+    pub content_type: std::sync::Mutex<Option<String>>,
+}
+
+impl ProgressState {
+    /// Create a new progress state with all fields zeroed/empty.
+    pub fn new() -> Self {
+        Self {
+            downloaded_bytes: AtomicU64::new(0),
+            total_bytes: std::sync::Mutex::new(None),
+            throughput_kbps: AtomicU64::new(0),
+            start_time: std::sync::Mutex::new(None),
+            http_status: std::sync::Mutex::new(None),
+            content_type: std::sync::Mutex::new(None),
+        }
+    }
+
+    /// Take a snapshot of the current download progress.
+    pub fn snapshot(&self) -> DownloadProgress {
+        let downloaded_bytes = self.downloaded_bytes.load(Ordering::Relaxed);
+        let throughput_kbps = self.throughput_kbps.load(Ordering::Relaxed);
+        let total_bytes = *self.total_bytes.lock().unwrap();
+        let http_status = *self.http_status.lock().unwrap();
+        let content_type = self.content_type.lock().unwrap().clone();
+        let elapsed_secs =
+            self.start_time.lock().unwrap().map(|t| t.elapsed().as_secs_f64()).unwrap_or(0.0);
+
+        DownloadProgress {
+            downloaded_bytes,
+            total_bytes,
+            throughput_kbps,
+            elapsed_secs,
+            http_status: http_status.unwrap_or(0),
+            content_type,
+        }
+    }
 }
 
 impl StreamSource {
@@ -131,6 +142,7 @@ impl StreamSource {
         socks_addr: String,
         isolation_username: String,
         cookies: Vec<String>,
+        progress: Arc<ProgressState>,
     ) -> Result<Self, String> {
         // Start SOCKS forwarder for reqwest's Tor routing.
         let socks_forwarder =
@@ -154,15 +166,6 @@ impl StreamSource {
             .map_err(|e| format!("stream source: failed to build reqwest client: {}", e))?;
 
         let (data_tx, data_rx) = mpsc::channel(CHANNEL_CAPACITY);
-
-        let progress = Arc::new(ProgressState {
-            downloaded_bytes: AtomicU64::new(0),
-            total_bytes: std::sync::Mutex::new(None),
-            throughput_kbps: AtomicU64::new(0),
-            start_time: std::sync::Mutex::new(None),
-            http_status: std::sync::Mutex::new(None),
-            content_type: std::sync::Mutex::new(None),
-        });
 
         let cancel = Arc::new(AtomicBool::new(false));
 
@@ -445,29 +448,8 @@ impl StreamSource {
     }
 
     /// Get the current download progress.
-    #[allow(dead_code)] // Public API for future progress reporting
     pub fn progress(&self) -> DownloadProgress {
-        let downloaded_bytes = self.progress.downloaded_bytes.load(Ordering::Relaxed);
-        let throughput_kbps = self.progress.throughput_kbps.load(Ordering::Relaxed);
-        let total_bytes = *self.progress.total_bytes.lock().unwrap();
-        let http_status = *self.progress.http_status.lock().unwrap();
-        let content_type = self.progress.content_type.lock().unwrap().clone();
-        let elapsed_secs = self
-            .progress
-            .start_time
-            .lock()
-            .unwrap()
-            .map(|t| t.elapsed().as_secs_f64())
-            .unwrap_or(0.0);
-
-        DownloadProgress {
-            downloaded_bytes,
-            total_bytes,
-            throughput_kbps,
-            elapsed_secs,
-            http_status: http_status.unwrap_or(0),
-            content_type,
-        }
+        self.progress.snapshot()
     }
 
     /// Cancel the download task.
@@ -476,7 +458,6 @@ impl StreamSource {
     }
 
     /// Check if the download has been cancelled.
-    #[allow(dead_code)] // Public API for future cancel status
     pub fn is_cancelled(&self) -> bool {
         self.cancel.load(Ordering::Relaxed)
     }

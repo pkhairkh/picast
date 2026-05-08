@@ -408,8 +408,16 @@ level = "debug"
         assert_eq!(parsed.logging.level, original.logging.level);
     }
 
+    /// Mutex to serialize env-var tests that would otherwise race when
+    /// run in parallel (cargo test uses threads by default).
+    static ENV_TEST_MUTEX: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
     #[test]
     fn merge_env_overrides_config() {
+        let _guard = ENV_TEST_MUTEX.lock().unwrap();
+        // Ensure a clean state before we start.
+        std::env::remove_var("PICAST_HTTP_ADDR");
+
         let mut config = AppConfig::default();
         assert_eq!(config.server.http_addr, "0.0.0.0:8585");
 
@@ -424,6 +432,7 @@ level = "debug"
 
     #[test]
     fn merge_env_applies_defaults_for_unset() {
+        let _guard = ENV_TEST_MUTEX.lock().unwrap();
         // Clear any PICAST env vars from other tests.
         std::env::remove_var("PICAST_HTTP_ADDR");
         std::env::remove_var("PICAST_WS_ADDR");

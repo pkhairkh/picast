@@ -59,6 +59,18 @@ pub enum PlaybackEvent {
         /// Pipeline latency in milliseconds.
         latency_ms: u64,
     },
+
+    /// Download progress update from StreamSource.
+    DownloadProgress {
+        /// Total bytes downloaded so far.
+        downloaded_bytes: u64,
+        /// Total bytes in the file (from Content-Length header).
+        total_bytes: Option<u64>,
+        /// Measured throughput in kbps over the last measurement window.
+        throughput_kbps: u64,
+        /// Elapsed time since download started.
+        elapsed_secs: f64,
+    },
 }
 
 #[cfg(test)]
@@ -80,6 +92,12 @@ mod tests {
             PlaybackEvent::Buffering { percent: 50 },
             PlaybackEvent::PositionUpdate { position_ms: 5000, duration_ms: Some(300000) },
             PlaybackEvent::Latency { latency_ms: 42 },
+            PlaybackEvent::DownloadProgress {
+                downloaded_bytes: 1024,
+                total_bytes: Some(1048576),
+                throughput_kbps: 5000,
+                elapsed_secs: 1.5,
+            },
         ];
 
         for event in events {

@@ -53,9 +53,8 @@
 //! Most streams already report bt709 in their H.264 VUI parameters, and
 //! v4l2h264dec passes this through to kmssink correctly without intervention.
 
-use crate::media_proxy::MediaProxy;
-use crate::stream_source::StreamSource;
-use crate::{BufferHealth, PipelineConfig, PlaybackError};
+use crate::stream_source::{ProgressState, StreamSource};
+use crate::{BufferHealth, DownloadProgress, PipelineConfig, PlaybackError};
 use gstreamer::prelude::*;
 use gstreamer::{Element, ElementFactory, Pipeline, State};
 #[cfg(feature = "hevc")]
@@ -100,14 +99,13 @@ pub struct GstPipeline {
     state: PipelineState,
     /// Keeps the GStreamer bus watch alive for this pipeline.
     bus_watch: Option<gstreamer::bus::BusWatchGuard>,
-    /// Streaming HTTP media proxy. Used for the legacy souphttpsrc path
-    /// (loopback URLs only). For CDN URLs, StreamSource + appsrc is used.
-    _media_proxy: Option<MediaProxy>,
     /// Cancel token for the appsrc push task. Set to true when the
-    /// pipeline is destroyed to stop the background data push.
-    /// The StreamSource is owned by the push task (not stored here)
-    /// because it needs to be moved into the async task for recv_chunk().
-    _push_cancel: Option<Arc<AtomicBool>>,
+    /// pipeline is stopped to signal the background download+push task
+    /// to terminate.
+    push_cancel: Option<Arc<AtomicBool>>,
+    /// Shared download progress state, updated by the StreamSource
+    /// download task and read via `download_progress()`.
+    download_progress: Arc<ProgressState>,
     /// V3D compute shader engine for SAND→NV12 conversion.
     /// Only present when HEVC decode is enabled and V3D is available.
     #[cfg(feature = "hevc")]
@@ -225,9 +223,9 @@ impl GstPipeline {
         //
         // Loopback URLs use souphttpsrc directly (no Tor/proxy needed).
 
-        let media_proxy = None;
         let mut stream_source = None;
         let mut push_cancel = None;
+        let download_progress = Arc::new(ProgressState::new());
 
         let src = if use_stream_source {
             // ── CDN URL: appsrc + StreamSource (progressive download) ──
@@ -242,11 +240,12 @@ impl GstPipeline {
                 socks_addr.to_string(),
                 isolation_username.to_string(),
                 cookies.to_vec(),
+                download_progress.clone(),
             )
             .await
             .map_err(|e| PlaybackError::PipelineCreation(e))?;
 
-            // Preflight CDN check — same as MediaProxy's preflight.
+            // Preflight CDN check — verify the CDN accepts this Tor circuit.
             if let Err(e) = source.preflight_check().await {
                 tracing::warn!(
                     error = %e,
@@ -1000,7 +999,7 @@ impl GstPipeline {
             tokio::spawn(async move {
                 while let Some(chunk) = source.recv_chunk().await {
                     if cancel_clone.load(Ordering::Relaxed) {
-                        tracing::info!("appsrc push task: cancelled");
+                        tracing::info!(offset = chunk.offset, "appsrc push task: cancelled");
                         return;
                     }
 
@@ -1012,15 +1011,22 @@ impl GstPipeline {
                         match result {
                             gstreamer::FlowReturn::Ok => {},
                             gstreamer::FlowReturn::Flushing => {
-                                tracing::debug!("appsrc is flushing — stopping push task");
+                                tracing::debug!(
+                                    offset = chunk.offset,
+                                    "appsrc is flushing — stopping push task"
+                                );
                                 return;
                             },
                             gstreamer::FlowReturn::Eos => {
-                                tracing::debug!("appsrc at EOS — stopping push task");
+                                tracing::debug!(
+                                    offset = chunk.offset,
+                                    "appsrc at EOS — stopping push task"
+                                );
                                 return;
                             },
                             other => {
                                 tracing::warn!(
+                                    offset = chunk.offset,
                                     result = ?other,
                                     "appsrc push-buffer returned unexpected result — stopping push task"
                                 );
@@ -1028,7 +1034,10 @@ impl GstPipeline {
                             },
                         }
                     } else {
-                        tracing::debug!("appsrc element dropped — stopping push task");
+                        tracing::debug!(
+                            offset = chunk.offset,
+                            "appsrc element dropped — stopping push task"
+                        );
                         return;
                     }
                 }
@@ -1049,8 +1058,8 @@ impl GstPipeline {
             volume,
             state: PipelineState::Ready,
             bus_watch: None,
-            _media_proxy: media_proxy,
-            _push_cancel: push_cancel,
+            push_cancel,
+            download_progress,
             #[cfg(feature = "hevc")]
             _v3d_engine: None, // V3D compute disabled — EGL context creation not yet implemented
         })
@@ -1706,6 +1715,12 @@ impl GstPipeline {
 
     /// Stop the pipeline and release resources.
     pub fn stop(&mut self) -> Result<(), PlaybackError> {
+        // Signal the appsrc push task to stop downloading.
+        if let Some(cancel) = self.push_cancel.take() {
+            cancel.store(true, Ordering::Relaxed);
+            tracing::debug!("signalled appsrc push task to cancel");
+        }
+
         // Send EOS to allow elements to flush.
         let _ = self.pipeline.send_event(gstreamer::event::Eos::new());
 
@@ -1715,6 +1730,19 @@ impl GstPipeline {
         self.state = PipelineState::Null;
         tracing::debug!("pipeline stopped and set to Null");
         Ok(())
+    }
+
+    /// Get the current download progress from the StreamSource.
+    pub fn download_progress(&self) -> DownloadProgress {
+        self.download_progress.snapshot()
+    }
+
+    /// Cancel the active CDN download and appsrc push task.
+    pub fn cancel_download(&mut self) {
+        if let Some(cancel) = self.push_cancel.take() {
+            cancel.store(true, Ordering::Relaxed);
+            tracing::info!("download cancelled via cancel_download()");
+        }
     }
 
     /// Perform a flushing seek to an absolute position.
