@@ -1856,7 +1856,7 @@ impl Drop for GstPipeline {
         // when a failed pipeline is dropped.
 
         // Signal the appsrc push task to stop (if running).
-        if let Some(cancel) = &self._push_cancel {
+        if let Some(cancel) = &self.push_cancel {
             cancel.store(true, Ordering::Relaxed);
         }
 
