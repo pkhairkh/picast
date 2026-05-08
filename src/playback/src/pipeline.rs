@@ -1,10 +1,10 @@
 #![cfg(feature = "hw")]
 //! PiCast GStreamer Pipeline Construction
 //!
-//! Builds and manages the GStreamer pipeline for H.264 video playback
+//! Builds and manages the GStreamer pipeline for H.264/HEVC video playback
 //! with V4L2 hardware decode and direct DRM/KMS output on Raspberry Pi 4B+.
 //!
-//! ## Pipeline Topology
+//! ## Pipeline Topology (H.264)
 //!
 //! ```text
 //! ┌──────────┐    ┌────────┐    ┌──────────┐    ┌───────┐    ┌──────────┐    ┌────────────────────┐    ┌──────────────┐
@@ -17,6 +17,21 @@
 //!                                                 │       │    │              │    │              │    │        │    │(device=plughw:C,D)  │
 //!                                                 └───────┘    └──────────────┘    └──────────────┘    └────────┘    └─────────────────────┘
 //! ```
+//!
+//! ## Pipeline Topology (HEVC/H.265 — ISP fallback)
+//!
+//! ```text
+//! ┌──────────┐    ┌────────┐    ┌──────────┐    ┌───────┐    ┌──────────┐    ┌────────────────────┐    ┌────────────┐    ┌──────────┐
+//! │souphttpsrc│───►│queue2  │───►│parsebin  │──┬►│queue  │───►│h265parse │───►│v4l2slh265dec      │───►│v4l2convert │───►│kmssink  │
+//! │(SOCKS5h) │    │(buffer)│    │(demux)   │  │ │       │    │          │    │(stateless HEVC)   │    │(ISP:       │    │(DRM/KMS)│
+//! └──────────┘    └────────┘    └──────────┘  │ └───────┘    └──────────┘    └────────────────────┘    │SAND→NV12)  │    └──────────┘
+//!                                               │                                                                 └────────────┘
+//!                                               │  (audio branch same as H.264)
+//! ```
+//!
+//! NOTE: The `v4l2slh265dec` stateless decoder does NOT have `output-io-mode` or
+//! `capture-io-mode` properties (those belong to the stateful `v4l2h264dec`/`v4l2h265dec`).
+//! DMA-BUF I/O mode is auto-negotiated by the `GstV4l2Decoder` base class.
 //!
 //! ## Fallback
 //!
@@ -989,21 +1004,35 @@ impl GstPipeline {
         // This element uses the V4L2 Request API (stateless decode), where
         // the application must provide per-slice control parameters alongside
         // the compressed data. GStreamer's v4l2slh265dec handles this
-        // internally — we just need to set the DMA-BUF io mode.
+        // internally.
+        //
+        // IMPORTANT: Unlike the stateful decoder (v4l2h264dec), the stateless
+        // decoder does NOT have `output-io-mode` or `capture-io-mode` properties.
+        // The stateless decoder (GstV4l2Decoder base class) manages DMA-BUF
+        // allocation internally via the V4L2 Request API. It automatically
+        // negotiates the best I/O mode (typically dmabuf when the downstream
+        // element supports it). Setting those properties would panic at runtime
+        // with "property 'output-io-mode' of type 'v4l2slh265dec' not found".
+        //
+        // The stateless decoder's available properties are:
+        //   - `device` (string): V4L2 device path (auto-detected if not set)
+        //   - `extra-controls` (GstStructure): Extra V4L2 controls per request
+        //   - `min-queued` (uint): Minimum buffers to queue before decode starts
         //
         // Output format: NV12_COL128 (SAND128) — Broadcom's column-tiled
         // format that is INCOMPATIBLE with the HVS for direct scanout.
-        // The V3D compute shader will convert SAND128→NV12.
+        // The V3D compute shader (or bcm2835-ISP) will convert SAND128→NV12.
         let v4l2h265dec = ElementFactory::make("v4l2slh265dec")
             .build()
             .map_err(|e| {
                 PlaybackError::PipelineCreation(format!("v4l2slh265dec: {}", e))
             })?;
 
-        // Set DMA-BUF io modes (same approach as H.264 decoder)
-        v4l2h265dec.set_property_from_str("output-io-mode", "dmabuf");
-        v4l2h265dec.set_property_from_str("capture-io-mode", "dmabuf");
-        tracing::info!("v4l2slh265dec: output-io-mode=dmabuf, capture-io-mode=dmabuf (SAND128 output for V3D conversion)");
+        // The stateless decoder auto-negotiates DMA-BUF I/O mode internally.
+        // No explicit output-io-mode / capture-io-mode setting needed
+        // (and attempting to set them would panic — they don't exist on
+        // GstV4l2Decoder-based elements).
+        tracing::info!("v4l2slh265dec: stateless decoder created (DMA-BUF auto-negotiated by GstV4l2Decoder)");
 
         // ── V3D Compute Shader Engine ──────────────────────────────
         //
@@ -1056,11 +1085,20 @@ impl GstPipeline {
             //                                              ↓ (NV12 DMA-BUF)
             //                                        appsrc → kmssink
 
+            // appsink caps: accept SAND128 (NV12_64Z32) output from the
+            // stateless HEVC decoder. The format NV12_64Z32 is the DRM/GStreamer
+            // fourcc for Broadcom's SAND128 column-tiled NV12. We do NOT set
+            // an explicit width/height — the decoder will negotiate these during
+            // the PAUSED→PLAYING state transition.
+            //
+            // NOTE: Do NOT add non-standard fields like "interop=sand128" to the
+            // caps — they are not recognized by GStreamer's caps negotiation and
+            // will cause "not-negotiated" errors.
             let appsink = ElementFactory::make("appsink")
                 .property("emit-signals", true)
                 .property("max-buffers", 2u32)
                 .property("drop", false)  // Never drop buffers — causes visual artifacts
-                .property_from_str("caps", "video/x-raw,format=NV12_64Z32,interop=sand128")
+                .property_from_str("caps", "video/x-raw,format=NV12_64Z32")
                 .build()
                 .map_err(|e| {
                     PlaybackError::PipelineCreation(format!("hevc appsink: {}", e))
