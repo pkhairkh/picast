@@ -30,7 +30,7 @@ echo ""
 
 # ── Build ──────────────────────────────────────────────────────────────
 if [[ "$SKIP_BUILD" == false ]]; then
-    echo "[1/4] Building release binary with hw feature..."
+    echo "[1/4] Building release binary with hw + hevc features..."
 
     # Ensure rustc meets the MSRV (1.88).  Several transitive dependencies
     # (time 0.3.46+, cookie_store 0.22+, idna 1.x / ICU4X 2.x) require
@@ -59,7 +59,28 @@ if [[ "$SKIP_BUILD" == false ]]; then
         fi
     fi
 
-    (cd "$REPO_DIR" && cargo build --release --features hw)
+    # Verify V3D GPU is available on the target (MANDATORY for HEVC decode).
+    # The V3D GPU is present on Raspberry Pi 4B+ and is required for the
+    # hevc feature (HEVC/H.265 hardware decode with V3D SAND→NV12 conversion).
+    # HEVC with GPU is mandatory — deployment will abort if V3D is not found.
+    V3D_FOUND=false
+    if [[ -e /dev/dri/by-path/platform-v3d ]]; then
+        echo "      V3D GPU device found."
+        V3D_FOUND=true
+    elif [[ -d /sys/class/misc/v3d ]]; then
+        echo "      V3D kernel module loaded."
+        V3D_FOUND=true
+    fi
+
+    if [[ "$V3D_FOUND" == false ]]; then
+        echo "      ERROR: V3D GPU not detected. HEVC/H.265 hardware decode is MANDATORY"
+        echo "      and requires the V3D GPU found on Raspberry Pi 4B+."
+        echo "      If this is a Pi 4, ensure 'v3d' is in /etc/modules-load.d/"
+        echo "      Deployment aborted."
+        exit 1
+    fi
+
+    (cd "$REPO_DIR" && cargo build --release --features hw,hevc)
     echo "      Build complete."
 else
     echo "[1/4] Skipping build (--no-build)."

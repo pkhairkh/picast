@@ -493,26 +493,6 @@ impl SessionManager {
         Ok(())
     }
 
-    /// Update specific fields of a session in the database.
-    ///
-    /// Helper for updating resolved_url, position_ms, etc.
-    #[allow(dead_code)]
-    fn update_session_field(
-        &self,
-        session_id: Uuid,
-        field: &str,
-        value: &dyn rusqlite::types::ToSql,
-    ) -> Result<(), SessionError> {
-        let db = self
-            .db
-            .lock()
-            .map_err(|e| SessionError::Subsystem(format!("db lock poisoned: {}", e)))?;
-        let now = Utc::now().to_rfc3339();
-        let sql = format!("UPDATE sessions SET {} = ?, updated_at = ? WHERE id = ?", field);
-        db.execute(&sql, rusqlite::params![value, now, session_id.to_string()])?;
-        Ok(())
-    }
-
     /// Load a session from the database by ID.
     pub fn load_session(&self, id: Uuid) -> Result<MediaSession, SessionError> {
         let db = self
@@ -1347,6 +1327,10 @@ mod tests {
                 duration_ms: Some(300000),
             })
         }
+
+        async fn invalidate_cache(&self, _url: &str) {
+            // No-op for mock resolver.
+        }
     }
 
     /// Mock playback that tracks state transitions.
@@ -1367,10 +1351,6 @@ mod tests {
                 last_seek_ms: std::sync::Mutex::new(0),
                 call_count: std::sync::Mutex::new(std::collections::HashMap::new()),
             }
-        }
-
-        fn call_count(&self, method: &str) -> u32 {
-            self.call_count.lock().unwrap().get(method).copied().unwrap_or(0)
         }
 
         fn inc_call(&self, method: &str) {
@@ -1433,6 +1413,24 @@ mod tests {
             &self,
         ) -> Result<Option<u64>, Box<dyn std::error::Error + Send + Sync>> {
             Ok(Some(300000))
+        }
+
+        async fn set_audio_device(
+            &self,
+            _device: String,
+        ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+            Ok(())
+        }
+
+        async fn set_audio_sink(
+            &self,
+            _sink: String,
+        ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+            Ok(())
+        }
+
+        async fn audio_device(&self) -> Result<String, Box<dyn std::error::Error + Send + Sync>> {
+            Ok("default".to_string())
         }
     }
 

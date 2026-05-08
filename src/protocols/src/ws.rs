@@ -26,7 +26,6 @@
 //! {"type": "RESUME"}
 //! {"type": "SEEK", "position_ms": 30000}
 //! {"type": "VOLUME", "volume": 75}
-//! {"type": "SUBTITLE", "lang": "en"}
 //! ```
 //!
 //! ## Ping/Pong
@@ -65,8 +64,6 @@ enum ClientCommand {
     Resume,
     Seek { position_ms: u64 },
     Volume { volume: u8 },
-    #[allow(dead_code)] // lang is needed for deserialization; command is not yet supported
-    Subtitle { lang: String },
     /// Application-level keep-alive. The client sends PING and the
     /// server responds with a PONG event. This is distinct from
     /// the WebSocket protocol-level ping/pong frames — some clients
@@ -423,9 +420,6 @@ async fn handle_command(session: &SessionManager, cmd: ClientCommand) -> Result<
         ClientCommand::Volume { volume } => {
             let clamped = volume.min(100);
             session.set_volume(clamped).await.map_err(|e| anyhow!("volume failed: {}", e))?;
-        },
-        ClientCommand::Subtitle { lang: _ } => {
-            return Err(anyhow!("subtitle selection not yet supported"));
         },
         ClientCommand::Ping => {
             // Handled in handle_client directly (sends Pong event).

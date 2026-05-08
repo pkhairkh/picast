@@ -26,6 +26,10 @@ impl ResolverTrait for MockResolver {
             duration_ms: Some(300000),
         })
     }
+
+    async fn invalidate_cache(&self, _url: &str) {
+        // No-op for mock resolver.
+    }
 }
 
 struct MockPlayback {

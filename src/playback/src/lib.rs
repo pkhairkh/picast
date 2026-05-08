@@ -171,7 +171,7 @@ impl Default for PipelineConfig {
             // 3.5mm headphone jack, not HDMI.  On Pi 4, HDMI audio is usually
             // card 1 (vc4hdmi0).  If the detection fails, we fall back to
             // "plughw:1,0" which is the most common HDMI device on Pi 4.
-            audio_device: detect_hdmi_audio_device(),
+            audio_device: detect_audio_device(),
             buffer_duration_ms: 3000,
             hw_accel: true,
             volume: 1.0,
@@ -180,19 +180,6 @@ impl Default for PipelineConfig {
             drm_fd: None,
         }
     }
-}
-
-/// Auto-detect the HDMI audio device on Raspberry Pi by parsing
-/// `/proc/asound/cards` and `/proc/asound/pcm`.  Returns the ALSA
-/// device string (e.g. `"plughw:1,0"`) for the first HDMI card found,
-/// or `"plughw:1,0"` as a fallback if detection fails.
-///
-/// On Pi 4, the typical ALSA card layout is:
-/// - Card 0: Headphones (bcm2835, 3.5mm jack)
-/// - Card 1: vc4hdmi0 (HDMI 0 audio)
-/// - Card 2: vc4hdmi1 (HDMI 1 audio, if dual HDMI)
-fn detect_hdmi_audio_device() -> String {
-    detect_audio_device()
 }
 
 /// Auto-detect the best audio output device on Raspberry Pi.
@@ -276,13 +263,50 @@ fn detect_audio_device() -> String {
     }
 
     // Priority 1: Bluetooth device (from /proc/asound — BlueALSA plugin cards)
+    //
+    // BlueALSA devices that appear in /proc/asound/cards are NOT real
+    // ALSA hardware devices — they're PCM plugin devices. Using plughw:<idx>,0
+    // won't work because BlueALSA doesn't register a real ALSA hardware driver.
+    // Instead, we must use the BlueALSA plugin device string:
+    //   bluealsa:DEV=XX:XX:XX:XX:XX:XX,PROFILE=a2dp
+    //
+    // To construct this string, we need the BT MAC address, which we get
+    // via bluetoothctl.
     if let Some((card_idx, name)) = bt_cards.first() {
-        tracing::info!(
+        // Try to find the BT MAC address via bluetoothctl so we can
+        // construct the proper BlueALSA device string.
+        if let Ok(output) = std::process::Command::new("bluetoothctl")
+            .args(["devices", "Connected"])
+            .output()
+        {
+            if let Ok(stdout) = String::from_utf8(output.stdout) {
+                for line in stdout.lines() {
+                    // Format: "Device XX:XX:XX:XX:XX:XX Device Name"
+                    if let Some(rest) = line.strip_prefix("Device ") {
+                        let parts: Vec<&str> = rest.splitn(2, ' ').collect();
+                        if parts.len() >= 2 {
+                            let bt_addr = parts[0];
+                            tracing::info!(
+                                card_index = card_idx,
+                                card_name = %name,
+                                bt_address = %bt_addr,
+                                "audio auto-detect: found Bluetooth audio card — using BlueALSA plugin device"
+                            );
+                            return format!("bluealsa:DEV={},PROFILE=a2dp", bt_addr);
+                        }
+                    }
+                }
+            }
+        }
+        // Fallback: if we can't find the BT address, log a warning and
+        // fall through to other detection methods. Using plughw:<idx>,0
+        // for a BlueALSA card will NOT work.
+        tracing::warn!(
             card_index = card_idx,
             card_name = %name,
-            "audio auto-detect: found Bluetooth audio card — using as default"
+            "audio auto-detect: found Bluetooth card but couldn't determine BT address via bluetoothctl — \
+             skipping (plughw won't work for BlueALSA)"
         );
-        return format!("plughw:{},0", card_idx);
     }
 
     // Priority 1b: BlueALSA plugin (not visible in /proc/asound)
@@ -612,51 +636,7 @@ impl PlaybackEngine {
         })
     }
 
-    /// Create a new engine with a custom event channel size.
-    pub fn with_channel_size(
-        config: PipelineConfig,
-        _channel_size: usize,
-    ) -> Result<Self, PlaybackError> {
-        #[cfg(feature = "hw")]
-        let event_tx = tokio::sync::broadcast::channel(_channel_size).0;
-        #[cfg(not(feature = "hw"))]
-        let initial_volume = config.volume;
-        #[cfg(not(feature = "hw"))]
-        let decode_mode = if config.hw_accel { DecodeMode::Hardware } else { DecodeMode::Software };
-        #[cfg(not(feature = "hw"))]
-        let (mock_event_tx, _) = tokio::sync::broadcast::channel(_channel_size);
 
-        Ok(Self {
-            config,
-            #[cfg(feature = "hw")]
-            gst_pipeline: Arc::new(Mutex::new(None)),
-            #[cfg(feature = "hw")]
-            event_tx,
-            is_playing: Arc::new(AtomicBool::new(false)),
-            #[cfg(feature = "hw")]
-            sw_fallback_active: Arc::new(AtomicBool::new(false)),
-            #[cfg(not(feature = "hw"))]
-            mock_loaded: AtomicBool::new(false),
-            #[cfg(not(feature = "hw"))]
-            mock_playing: AtomicBool::new(false),
-            #[cfg(not(feature = "hw"))]
-            mock_paused: AtomicBool::new(false),
-            #[cfg(not(feature = "hw"))]
-            mock_position_ms: AtomicU64::new(0),
-            #[cfg(not(feature = "hw"))]
-            mock_duration_ms: AtomicU64::new(300_000),
-            #[cfg(not(feature = "hw"))]
-            mock_volume: std::sync::Mutex::new(initial_volume),
-            #[cfg(not(feature = "hw"))]
-            mock_buffer_health: std::sync::Mutex::new(BufferHealth::default()),
-            #[cfg(not(feature = "hw"))]
-            mock_url: std::sync::Mutex::new(None),
-            #[cfg(not(feature = "hw"))]
-            mock_decode_mode: std::sync::Mutex::new(decode_mode),
-            #[cfg(not(feature = "hw"))]
-            mock_event_tx,
-        })
-    }
 
     /// Load a URL and transition to the Playing state.
     ///
@@ -693,15 +673,6 @@ impl PlaybackEngine {
         // Reset SW fallback flag for the new playback attempt.
         self.sw_fallback_active.store(false, Ordering::Relaxed);
 
-        tracing::info!(
-            url = url,
-            socks = socks_addr,
-            hw_accel = self.config.hw_accel,
-            "constructing playback pipeline"
-        );
-
-        let mut pipeline = GstPipeline::new(url, source_url, socks_addr, isolation_username, &self.config).await?;
-
         // ── Proactive Tor exit IP vs CDN URL IP-token check ───────────
         //
         // CDN URLs from resolvers like Voe contain IP-bound tokens (e.g.
@@ -710,14 +681,15 @@ impl PlaybackEngine {
         // fetcher's exit IP will differ from the URL's bound IP, and the
         // CDN will return 403 Forbidden.
         //
-        // We proactively check for this mismatch BEFORE starting playback.
+        // We proactively check for this mismatch BEFORE constructing the
+        // pipeline. This avoids creating a SOCKS forwarder and pipeline
+        // that we'd immediately tear down on mismatch. The check uses
+        // SocksForwarder::check_exit_ip() directly without starting a
+        // forwarder.
+        //
         // If the IPs don't match, we return an error with "CDN IP mismatch"
         // in the message so the session layer's retry loop can invalidate
         // the cache and re-resolve the URL through the current circuit.
-        //
-        // This is much more reliable than waiting for the asynchronous 403
-        // from GStreamer (which arrives AFTER play() has already returned
-        // Ok and is not easily bridged back to the session retry loop).
         if !socks_addr.is_empty() && !isolation_username.is_empty() {
             if let Some(exit_ip) = crate::socks_forwarder::SocksForwarder::check_exit_ip(socks_addr, isolation_username).await {
                 // Extract the &i= parameter from the CDN URL (first 2 IP octets)
@@ -732,12 +704,10 @@ impl PlaybackEngine {
                             "CDN IP mismatch detected — URL bound to different exit IP than current Tor circuit. \
                              Returning error so session layer can re-resolve."
                         );
-                        // Stop the pipeline we just created (it hasn't started yet)
-                        let _ = pipeline.stop();
-                        return Err(PlaybackError::Gstreamer(
-                            format!("CDN IP mismatch: URL bound to {}.* but current Tor exit is {} — re-resolve needed",
-                                    cdn_ip_prefix, exit_ip)
-                        ));
+                        return Err(PlaybackError::CdnIpMismatch {
+                            url_ip_prefix: cdn_ip_prefix,
+                            exit_ip,
+                        });
                     } else {
                         tracing::info!(
                             cdn_ip_prefix = %cdn_ip_prefix,
@@ -750,6 +720,15 @@ impl PlaybackEngine {
                 tracing::warn!("could not determine Tor exit IP — skipping proactive CDN IP check");
             }
         }
+
+        tracing::info!(
+            url = url,
+            socks = socks_addr,
+            hw_accel = self.config.hw_accel,
+            "constructing playback pipeline"
+        );
+
+        let mut pipeline = GstPipeline::new(url, source_url, socks_addr, isolation_username, &self.config).await?;
 
         // Set up bus watch to forward GStreamer messages as events.
         let event_tx = self.event_tx.clone();
@@ -1836,12 +1815,6 @@ mod tests {
         assert!(engine.is_ok(), "PlaybackEngine::new should succeed with default config");
         let engine = engine.unwrap();
         assert!(!engine.is_playing());
-    }
-
-    #[test]
-    fn playback_engine_custom_channel_size() {
-        let engine = PlaybackEngine::with_channel_size(PipelineConfig::default(), 128);
-        assert!(engine.is_ok());
     }
 
     // ── Mock-mode tests ───────────────────────────────────────────

@@ -856,6 +856,16 @@ impl DisplayManager {
         tracing::debug!("clear_screen called in mock mode — no-op");
         Ok(())
     }
+
+    /// Return the connector ID of the first connected display (mock data).
+    ///
+    /// Returns the mock connector ID (89) to simulate the hw implementation.
+    pub fn active_connector_id(&self) -> Option<u32> {
+        self.connectors
+            .iter()
+            .find(|c| c.connected)
+            .map(|c| c.connector_id)
+    }
 }
 
 impl Drop for DisplayManager {

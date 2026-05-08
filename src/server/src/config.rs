@@ -324,16 +324,6 @@ impl AppConfig {
         }
     }
 
-    /// Create config purely from environment variables (no file).
-    ///
-    /// This is the legacy behaviour — kept for backward compatibility
-    /// and for integration tests that don't have a config file.
-    #[allow(dead_code)]
-    pub fn from_env() -> Self {
-        let mut config = Self::default();
-        config.merge_env();
-        config
-    }
 }
 
 #[cfg(test)]
@@ -440,7 +430,7 @@ level = "debug"
     }
 
     #[test]
-    fn from_env_uses_defaults_for_unset() {
+    fn merge_env_applies_defaults_for_unset() {
         // Clear any PICAST env vars from other tests.
         std::env::remove_var("PICAST_HTTP_ADDR");
         std::env::remove_var("PICAST_WS_ADDR");
@@ -452,7 +442,8 @@ level = "debug"
         std::env::remove_var("PICAST_DB_PATH");
         std::env::remove_var("PICAST_LOG_LEVEL");
 
-        let config = AppConfig::from_env();
+        let mut config = AppConfig::default();
+        config.merge_env();
         assert_eq!(config.server.http_addr, "0.0.0.0:8585");
         assert_eq!(config.tor.socks_addr, "127.0.0.1:9050");
     }

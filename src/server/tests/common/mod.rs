@@ -5,6 +5,8 @@
 
 use std::time::{Duration, Instant};
 
+#[allow(dead_code)]
+
 /// Return the Tor SOCKS proxy address used for tests.
 ///
 /// Defaults to `127.0.0.1:9050` but can be overridden with the
@@ -17,6 +19,7 @@ pub fn test_tor_socks_addr() -> String {
 ///
 /// Defaults to `127.0.0.1:8585` but can be overridden with the
 /// `PICAST_TEST_HTTP_ADDR` environment variable.
+#[allow(dead_code)]
 pub fn test_http_addr() -> String {
     std::env::var("PICAST_TEST_HTTP_ADDR").unwrap_or_else(|_| "127.0.0.1:8585".into())
 }
@@ -25,6 +28,7 @@ pub fn test_http_addr() -> String {
 ///
 /// Panics if the server does not become reachable within `timeout_ms`
 /// milliseconds.
+#[allow(dead_code)]
 pub fn wait_for_server(addr: &str, timeout_ms: u64) {
     let deadline = Instant::now() + Duration::from_millis(timeout_ms);
     loop {

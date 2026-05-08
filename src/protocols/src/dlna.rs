@@ -84,16 +84,32 @@ impl DlnaRenderer {
         // Build the GStreamer pipeline string for gmediarender.
         // %s is replaced by gmediarender with the URI set by the DLNA controller.
         //
-        // Pipeline: souphttpsrc → queue2 → parsebin → h264parse → capssetter(bt709)
+        // Pipeline: souphttpsrc → queue2 → parsebin → h264parse
         //           → v4l2h264dec(mmap) → kmssink(vc4)
         //
-        // The capssetter forces bt709 colorimetry to prevent "not-negotiated"
-        // errors between v4l2h264dec and kmssink caused by unusual VUI
-        // colorimetry values in some H.264 streams.
+        // No capssetter is used. Previous versions used capssetter with
+        // replace=true to force bt709 colorimetry, but this caused caps
+        // negotiation failures (see pipeline.rs Colorimetry section for
+        // details). Most streams already report bt709 in their H.264 VUI
+        // parameters, and v4l2h264dec passes this through correctly.
         // Using mmap instead of dmabuf avoids memory:DMABuf caps features
         // that kmssink may not negotiate correctly.
+        //
+        // KNOWN LIMITATION: When a SOCKS5 proxy is configured, the DLNA
+        // pipeline uses souphttpsrc's built-in socks5-proxy-ip/port
+        // properties. Unlike the main playback pipeline (which uses our
+        // HTTP CONNECT→SOCKS5 forwarder for Tor circuit isolation),
+        // souphttpsrc's built-in SOCKS5 support does NOT guarantee the
+        // same Tor circuit as the resolver. This means the DLNA stream
+        // may use a different Tor circuit with a different exit IP,
+        // potentially causing CDN IP-mismatches (403 Forbidden) for
+        // IP-bound CDN URLs. The gmediarender subprocess architecture
+        // prevents us from using our forwarder, which requires in-process
+        // TCP listener setup. For DLNA playback of non-IP-bound URLs,
+        // this works fine. For IP-bound CDN URLs, use the browser
+        // extension or HTTP API instead of DLNA.
         let pipeline = if self.socks_addr.is_empty() {
-            "souphttpsrc location=%s ! queue2 max-size-bytes=52428800 use-buffering=true ! parsebin ! h264parse ! capssetter caps=\"video/x-h264,colorimetry=bt709\" join=false replace=true ! v4l2h264dec capture-io-mode=mmap ! kmssink driver-name=vc4 can-scale=true".to_owned()
+            "souphttpsrc location=%s ! queue2 max-size-bytes=52428800 use-buffering=true ! parsebin ! h264parse ! v4l2h264dec capture-io-mode=mmap ! kmssink driver-name=vc4 can-scale=true".to_owned()
         } else {
             // Safely extract the port number from socks_addr, validating it's numeric.
             let port_str = self.socks_addr.split(':').next_back().unwrap_or("9050");
@@ -102,7 +118,7 @@ impl DlnaRenderer {
                 9050
             });
             format!(
-                "souphttpsrc location=%s socks5-proxy-ip=127.0.0.1 socks5-proxy-port={} ! queue2 max-size-bytes=52428800 use-buffering=true ! parsebin ! h264parse ! capssetter caps=\"video/x-h264,colorimetry=bt709\" join=false replace=true ! v4l2h264dec capture-io-mode=mmap ! kmssink driver-name=vc4 can-scale=true",
+                "souphttpsrc location=%s socks5-proxy-ip=127.0.0.1 socks5-proxy-port={} ! queue2 max-size-bytes=52428800 use-buffering=true ! parsebin ! h264parse ! v4l2h264dec capture-io-mode=mmap ! kmssink driver-name=vc4 can-scale=true",
                 port
             )
         };

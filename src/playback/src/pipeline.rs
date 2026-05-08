@@ -154,16 +154,17 @@ impl GstPipeline {
             .property("location", url)
             .property("timeout", 30u32)
             .property("user-agent", BROWSER_UA)
-            // Increase the read blocksize from the default 4 KB to 64 KB.
+            // Increase the read blocksize from the default 4 KB to 256 KB.
             // souphttpsrc reads data from the HTTP connection in chunks of
             // `blocksize` bytes. With the default 4 KB, streaming a 5 Mbps
             // video requires ~150 read() calls per second, each one going
             // through the SOCKS5 forwarder → Tor → CDN round-trip. Larger
             // blocks reduce syscall frequency and allow souphttpsrc to
             // accumulate more data per read, improving throughput on high-
-            // latency Tor tunnels. 64 KB matches the buffer size that
-            // browsers use for media downloads.
-            .property("blocksize", 65_536u32)
+            // latency Tor tunnels. 256 KB matches the SOCKS forwarder's
+            // buffer size and reduces syscall overhead significantly
+            // compared to the previous 64 KB setting.
+            .property("blocksize", 262_144u32)
             .build()
             .map_err(|e| PlaybackError::PipelineCreation(format!("souphttpsrc: {}", e)))?;
 
@@ -281,27 +282,6 @@ impl GstPipeline {
                         );
                     }
 
-                    // Proactive IP-mismatch check: verify that the Tor exit IP
-                    // matches the 'i=' parameter in the CDN URL. If the circuit
-                    // has rotated since resolution, the CDN will return 403.
-                    // Checking now lets us fail fast and trigger a re-resolve
-                    // instead of waiting for the inevitable 403.
-                    let exit_ip = SocksForwarder::check_exit_ip(socks_addr, isolation_username).await;
-                    if let Some(ref ip) = exit_ip {
-                        if let Some(mismatch) = check_cdn_ip_mismatch(url, ip) {
-                            tracing::error!(
-                                url_ip_prefix = %mismatch.url_ip_prefix,
-                                exit_ip = %ip,
-                                "CDN IP mismatch detected — Tor circuit has rotated since URL resolution. \
-                                 The CDN token is bound to a different IP. Re-resolve needed."
-                            );
-                            return Err(PlaybackError::CdnIpMismatch {
-                                url_ip_prefix: mismatch.url_ip_prefix,
-                                exit_ip: ip.clone(),
-                            });
-                        }
-                    }
-
                     socks_forwarder = Some(forwarder);
                 }
                 Err(e) => {
@@ -334,28 +314,31 @@ impl GstPipeline {
         // low effective FPS.
         //
         // The bus watch handles BUFFERING messages:
-        // - Buffer < low-percent (10%): pause the pipeline
-        // - Buffer >= high-percent (80%): resume/allow playing
+        // - Buffer < low-percent (5%): pause the pipeline
+        // - Buffer >= high-percent (60%): resume/allow playing
         //
         // During initial preroll, we suppress auto-play until buffering
         // reaches high-percent, ensuring enough data is buffered before
         // playback starts. This prevents the "buffer underrun → low FPS"
         // cycle.
         //
-        // max-size-time is set to 30 seconds of media data — this gives
+        // max-size-time is set to 60 seconds of media data — this gives
         // queue2 a time-based buffer limit in addition to the byte limit.
         // Without max-size-time, queue2 may not buffer enough seconds of
         // media data even with 100 MB of bytes (the actual duration depends
         // on the video bitrate, which varies from ~1 Mbps for 360p to
         // ~10 Mbps for 1080p). Setting both limits ensures the buffer
-        // holds at least 30 seconds of playback, giving Tor enough time
-        // to recover from throughput dips.
+        // holds at least 60 seconds of playback, giving Tor enough time
+        // to recover from throughput dips. The 60s headroom (up from 30s)
+        // provides more buffering capacity on slow Tor links to reduce
+        // the "buffer underrun → long refill → play briefly → underrun again"
+        // cycle that causes choppy playback.
         let queue2 = ElementFactory::make("queue2")
             .property("max-size-bytes", 100_000_000u32) // 100 MB — large byte buffer for Tor
-            .property("max-size-time", 30_000_000_000u64) // 30 seconds of media data
+            .property("max-size-time", 60_000_000_000u64) // 60 seconds of media data
             .property("use-buffering", true)
-            .property("high-percent", 80i32)  // start playing when 80% full
-            .property("low-percent", 5i32)    // pause when buffer drops to 5% (was 10% — lower threshold avoids excessive pause/resume cycling on slow Tor links)
+            .property("high-percent", 60i32)  // start playing when 60% full (reduced from 80% to shorten refill wait on slow Tor links)
+            .property("low-percent", 5i32)    // pause when buffer drops to 5%
             .build()
             .map_err(|e| PlaybackError::PipelineCreation(format!("queue2: {}", e)))?;
 
@@ -1409,63 +1392,6 @@ impl GstPipeline {
         self.preroll()?;
 
         Ok(())
-    }
-}
-
-/// Result of an IP mismatch check between the CDN URL's `&i=` parameter
-/// and the actual Tor exit IP.
-struct CdnIpMismatch {
-    /// The first two octets from the CDN URL's `&i=` parameter (e.g. "192.42").
-    url_ip_prefix: String,
-}
-
-/// Check if the CDN URL's `&i=` parameter matches the actual Tor exit IP.
-///
-/// Many CDNs (Voe, DoodStream) bind their download tokens to the client's
-/// IP address. The `&i=` parameter in the URL contains the first two octets
-/// of the IP that was used during URL resolution. If the Tor circuit has
-/// rotated since resolution, the fetcher's exit IP will differ, and the
-/// CDN will return 403 Forbidden.
-///
-/// Returns `Some(CdnIpMismatch)` if there's a mismatch, `None` if the IPs
-/// match or the URL doesn't contain an `&i=` parameter.
-fn check_cdn_ip_mismatch(url: &str, exit_ip: &str) -> Option<CdnIpMismatch> {
-    // Extract the `&i=` or `?i=` parameter from the URL.
-    // Example URL: ...&i=192.42&sp=380&asn=215125...
-    // Also handle ?i= if it's the first query parameter.
-    let url_ip_prefix = url
-        .split("?i=").nth(1)
-        .or_else(|| url.split("&i=").nth(1))
-        .and_then(|rest| rest.split('&').next())
-        .and_then(|val| {
-            // The `&i=` value should be the first two octets (e.g. "192.42").
-            // Validate it looks like an IP prefix (digits.digits).
-            let parts: Vec<&str> = val.split('.').collect();
-            if parts.len() == 2 && parts[0].parse::<u8>().is_ok() && parts[1].parse::<u8>().is_ok() {
-                Some(val.to_string())
-            } else {
-                None
-            }
-        });
-
-    let url_prefix = url_ip_prefix?;
-
-    // Extract the first two octets of the actual Tor exit IP.
-    let exit_prefix = exit_ip
-        .split('.')
-        .take(2)
-        .collect::<Vec<_>>()
-        .join(".");
-
-    if url_prefix == exit_prefix {
-        tracing::info!(
-            url_ip_prefix = %url_prefix,
-            exit_ip = %exit_ip,
-            "CDN IP check passed — Tor exit IP matches URL's &i= parameter"
-        );
-        None
-    } else {
-        Some(CdnIpMismatch { url_ip_prefix: url_prefix })
     }
 }
 
