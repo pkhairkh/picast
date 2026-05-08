@@ -94,6 +94,12 @@ pub struct ProgressState {
     pub start_time: std::sync::Mutex<Option<Instant>>,
     pub http_status: std::sync::Mutex<Option<u16>>,
     pub content_type: std::sync::Mutex<Option<String>>,
+    /// CDN rate limit extracted from the URL's `sp=` query parameter.
+    /// When `Some(380)`, the CDN caps throughput at ~380 kbps.
+    /// When `None`, the CDN has no explicit rate limit.
+    /// Used by the pipeline to log bitrate mismatch warnings and adjust
+    /// buffering strategy.
+    pub cdn_rate_limit_kbps: std::sync::Mutex<Option<u64>>,
 }
 
 impl ProgressState {
@@ -106,6 +112,7 @@ impl ProgressState {
             start_time: std::sync::Mutex::new(None),
             http_status: std::sync::Mutex::new(None),
             content_type: std::sync::Mutex::new(None),
+            cdn_rate_limit_kbps: std::sync::Mutex::new(None),
         }
     }
 
@@ -165,6 +172,29 @@ impl StreamSource {
             .build()
             .map_err(|e| format!("stream source: failed to build reqwest client: {}", e))?;
 
+        // Extract CDN rate limit from URL's sp= parameter for diagnostics.
+        // The sp= parameter caps CDN download speed (e.g. sp=380 = 380 kbps).
+        // This information is used by the pipeline to log bitrate mismatch
+        // warnings and adjust buffering strategy.
+        let cdn_rate_limit = extract_cdn_speed_param(&cdn_url);
+        if let Some(speed) = cdn_rate_limit {
+            tracing::warn!(
+                sp_kbps = speed,
+                cdn_url = %cdn_url,
+                "stream source: CDN URL contains speed-limit parameter (sp=). \
+                 Throughput will be capped at ~{} kbps — may cause stuttering if video bitrate exceeds this",
+                speed
+            );
+        } else {
+            tracing::info!(
+                cdn_url = %cdn_url,
+                "stream source: CDN URL has no speed-limit parameter (sp=) — no explicit rate limit"
+            );
+        }
+
+        // Store CDN rate limit in shared progress state for the pipeline
+        *progress.cdn_rate_limit_kbps.lock().unwrap() = cdn_rate_limit;
+
         let (data_tx, data_rx) = mpsc::channel(CHANNEL_CAPACITY);
 
         let cancel = Arc::new(AtomicBool::new(false));
@@ -180,6 +210,15 @@ impl StreamSource {
             progress,
             cancel,
         })
+    }
+
+    /// Get the CDN rate limit extracted from the URL's `sp=` parameter.
+    ///
+    /// Returns `Some(kbps)` if the CDN URL has an `sp=` parameter,
+    /// indicating the CDN rate-limits downloads. Returns `None` if
+    /// there's no explicit rate limit.
+    pub fn cdn_rate_limit_kbps(&self) -> Option<u64> {
+        *self.progress.cdn_rate_limit_kbps.lock().unwrap()
     }
 
     /// Preflight check: verify the CDN accepts requests from this
@@ -467,4 +506,25 @@ impl Drop for StreamSource {
     fn drop(&mut self) {
         self.cancel();
     }
+}
+
+/// Extract the CDN speed-limit parameter (`sp=`) from a URL's query string.
+///
+/// Many video CDNs (e.g. Voe) embed a rate-limit token as `&sp=NNN` where
+/// NNN is the maximum download speed in kbps. When `sp=380`, the CDN caps
+/// throughput at ~380 kbps.
+///
+/// Returns `None` if the URL has no `sp=` parameter (no rate limit — best case)
+/// or if the value cannot be parsed as a number.
+fn extract_cdn_speed_param(url: &str) -> Option<u64> {
+    for prefix in &["&sp=", "?sp="] {
+        if let Some(pos) = url.find(prefix) {
+            let after = &url[pos + prefix.len()..];
+            let value = after.split('&').next().unwrap_or("");
+            if let Ok(speed) = value.parse::<u64>() {
+                return Some(speed);
+            }
+        }
+    }
+    None
 }

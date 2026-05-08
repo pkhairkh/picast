@@ -256,12 +256,56 @@ impl GstPipeline {
                 ));
             }
 
+            // Log CDN rate limit and check for bitrate mismatch.
+            // The sp= parameter in CDN URLs caps download speed (e.g. sp=380
+            // = 380 kbps). If the rate limit is below typical video bitrates,
+            // playback will stutter — the download can never keep up with
+            // the decode rate regardless of buffer size.
+            let cdn_rate_limit = *download_progress.cdn_rate_limit_kbps.lock().unwrap();
+            if let Some(rate_limit) = cdn_rate_limit {
+                // Estimate video bitrate from Content-Length / assumed duration.
+                // Typical CDN videos are 20-60 minutes. A conservative estimate
+                // uses 30 minutes (1800 seconds) as the denominator.
+                let content_length = download_progress.total_bytes.lock().unwrap();
+                if let Some(total_bytes) = *content_length {
+                    let estimated_bitrate_kbps = (total_bytes * 8) / (1800 * 1000);
+                    if rate_limit < estimated_bitrate_kbps {
+                        tracing::warn!(
+                            cdn_rate_limit_kbps = rate_limit,
+                            estimated_video_bitrate_kbps = estimated_bitrate_kbps,
+                            content_length_bytes = total_bytes,
+                            "⚠ CDN rate limit (sp={}) is BELOW estimated video bitrate ({} kbps). \
+                             Playback WILL stutter — download speed cannot sustain decode rate. \
+                             Consider selecting a lower quality stream.",
+                            rate_limit,
+                            estimated_bitrate_kbps
+                        );
+                    } else {
+                        tracing::info!(
+                            cdn_rate_limit_kbps = rate_limit,
+                            estimated_video_bitrate_kbps = estimated_bitrate_kbps,
+                            "CDN rate limit is above estimated video bitrate — smooth playback expected"
+                        );
+                    }
+                } else {
+                    tracing::warn!(
+                        cdn_rate_limit_kbps = rate_limit,
+                        "CDN URL has rate limit (sp={}) but no Content-Length — \
+                         cannot estimate bitrate mismatch. Playback may stutter if \
+                         video bitrate exceeds {} kbps.",
+                        rate_limit,
+                        rate_limit
+                    );
+                }
+            }
+
             // Start downloading from the CDN immediately. Data flows
             // into the StreamSource's internal channel.
             source.start_download(None);
 
             tracing::info!(
                 cdn_url = url,
+                cdn_rate_limit_kbps = ?download_progress.cdn_rate_limit_kbps.lock().unwrap(),
                 "stream source started — appsrc will receive downloaded data via channel (no MediaProxy HTTP hop)"
             );
 
@@ -319,21 +363,33 @@ impl GstPipeline {
         // For the appsrc path (CDN URLs): queue2 provides the primary
         // buffering mechanism. appsrc pushes data from the StreamSource
         // channel at the CDN's download rate. queue2 accumulates this
-        // data and controls when playback starts (high-percent=80%).
+        // data and controls when playback starts (high-percent=95%).
         //
-        // max-size-bytes=200 MB (increased from 100 MB): With the appsrc
+        // max-size-bytes=400 MB (increased from 200 MB): With the appsrc
         // path, there's no souphttpsrc doing its own buffering, so queue2
-        // is the sole buffer. 200 MB at 1.4 Mbps gives ~190 seconds of
-        // playback cushion. On a 379 kbps Tor link with a 1.4 Mbps video,
-        // starting with a full 200 MB buffer gives:
-        //   200 MB / (1.4 Mbps - 0.379 Mbps) ≈ 156 seconds of play
+        // is the sole buffer. 400 MB provides maximum cushion for
+        // CDN-rate-limited streams where sp= caps throughput below the
+        // video bitrate. On a 379 kbps Tor link with a 1.4 Mbps video,
+        // starting with a full 400 MB buffer gives:
+        //   400 MB / (1.4 Mbps - 0.379 Mbps) ≈ 312 seconds of play
         // before rebuffering is needed.
+        //
+        // high-percent=95 (increased from 80): Wait for 95% buffer fill
+        // before starting playback. This maximises the initial buffer
+        // cushion for CDN-rate-limited streams. At 95% of 400 MB = 380 MB,
+        // a 1.4 Mbps video on a 379 kbps link plays for ~297 seconds
+        // before rebuffering.
+        //
+        // The previous 80% threshold started playback too early for
+        // rate-limited streams, causing the buffer to drain below the
+        // low-percent threshold within minutes, triggering frequent
+        // rebuffer pauses.
         let queue2 = ElementFactory::make("queue2")
-            .property("max-size-bytes", 200_000_000u32) // 200 MB — larger buffer for appsrc path (no souphttpsrc buffering)
-            .property("max-size-time", 120_000_000_000u64) // 120 seconds of media data — more headroom for slow Tor links
+            .property("max-size-bytes", 400_000_000u32) // 400 MB — larger buffer for CDN-rate-limited streams
+            .property("max-size-time", 300_000_000_000u64) // 300 seconds of media data — more headroom for slow Tor links
             .property("use-buffering", true)
-            .property("high-percent", 80i32) // start playing when 80% full
-            .property("low-percent", 15i32) // pause when buffer drops to 15% — pause early to avoid complete depletion
+            .property("high-percent", 95i32) // start playing when 95% full — maximise initial buffer for rate-limited streams
+            .property("low-percent", 10i32) // pause when buffer drops to 10% — give more play time before pausing
             .build()
             .map_err(|e| PlaybackError::PipelineCreation(format!("queue2: {}", e)))?;
 

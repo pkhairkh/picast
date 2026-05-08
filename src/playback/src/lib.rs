@@ -1259,11 +1259,18 @@ impl PlaybackEngine {
                     if let Some(pipe) = pipeline_weak_bus.upgrade() {
                         if percent >= 80 {
                             // Buffer is sufficiently full — start/resume playing.
+                            // The queue2 high-percent is set to 95%, but we
+                            // transition at 80% to avoid waiting too long on
+                            // fast streams. The 95% high-percent ensures queue2
+                            // doesn't signal "buffering complete" until 95%,
+                            // giving us maximum initial cushion for rate-limited
+                            // streams. Once it reaches 80%, playback is viable.
                             if initial_buffering_bus.load(Ordering::Relaxed) {
                                 tracing::info!(
                                     percent = percent,
-                                    "buffering reached 80% — \
-                                     clearing initial_buffering flag and starting playback"
+                                    "buffering reached {}% — \
+                                     clearing initial_buffering flag and starting playback",
+                                    percent
                                 );
                                 initial_buffering_bus.store(false, Ordering::Relaxed);
                             }
@@ -1300,19 +1307,21 @@ impl PlaybackEngine {
                                      will auto-play when preroll completes"
                                 );
                             }
-                        } else if percent < 15 && !initial_buffering_bus.load(Ordering::Relaxed) {
+                        } else if percent < 10 && !initial_buffering_bus.load(Ordering::Relaxed) {
                             // Buffer low during playback — pause to refill.
                             // Only pause if we're NOT in initial buffering
                             // (we're already paused then).
-                            // Pause at 15% instead of 2% — this gives the
-                            // buffer more time to refill before it's completely
-                            // empty, and avoids the rapid cycling that occurs
-                            // when the buffer hits 0%.
+                            // Pause at 10% — with the 400 MB buffer, this
+                            // still represents ~40 MB of data, enough to
+                            // keep playing while the download catches up.
+                            // Lower than the previous 15% because the larger
+                            // buffer (400 MB) takes longer to refill, and
+                            // pausing too early causes unnecessary interruptions.
                             let (_, current, _) = pipe.state(gstreamer::ClockTime::from_mseconds(0));
                             if current == State::Playing {
                                 tracing::warn!(
                                     percent = percent,
-                                    "buffer low (<15%) — pausing to refill"
+                                    "buffer low (<10%) — pausing to refill"
                                 );
                                 let _ = pipe.set_state(State::Paused);
                             }

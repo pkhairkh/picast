@@ -194,6 +194,48 @@ fn is_hls_url(url: &str) -> bool {
     lower.contains(".m3u8")
 }
 
+/// Extract the CDN speed-limit parameter (`sp=`) from a URL's query string.
+///
+/// Many video CDNs (e.g. Voe) embed a rate-limit token as `&sp=NNN` where
+/// NNN is the maximum download speed in kbps. When `sp=380`, the CDN caps
+/// throughput at ~380 kbps — far below what any 720p video needs (~2500 kbps).
+/// Even 480p needs ~1200 kbps, so a low `sp=` value guarantees stuttering.
+///
+/// Returns `None` if the URL has no `sp=` parameter (no rate limit — best case)
+/// or if the value cannot be parsed as a number.
+fn extract_cdn_speed_param(url: &str) -> Option<u64> {
+    for prefix in &["&sp=", "?sp="] {
+        if let Some(pos) = url.find(prefix) {
+            let after = &url[pos + prefix.len()..];
+            let value = after.split('&').next().unwrap_or("");
+            if let Ok(speed) = value.parse::<u64>() {
+                return Some(speed);
+            }
+        }
+    }
+    None
+}
+
+/// Typical video bitrates by quality level (in kbps).
+///
+/// These are conservative estimates for H.264-encoded MP4 content from video
+/// CDNs. Used to determine whether a CDN rate limit (`sp=` parameter) can
+/// sustain a given quality level.
+///
+/// If the CDN rate limit is below the typical bitrate, playback will
+/// stutter regardless of buffer size — the download can never keep up
+/// with the decode rate.
+fn typical_bitrate_kbps(quality: &str) -> Option<u64> {
+    match quality {
+        "240" => Some(400),
+        "360" => Some(800),
+        "480" => Some(1500),
+        "720" => Some(3000),
+        "1080" => Some(6000),
+        _ => None,
+    }
+}
+
 /// Extract a media URL from a JSON value, handling both simple strings
 /// and objects with multiple quality levels.
 ///
@@ -201,11 +243,24 @@ fn is_hls_url(url: &str) -> bool {
 /// - A simple string: `"mp4": "https://cdn.example.com/video.mp4"`
 /// - An object with quality levels: `"mp4": {"720": "url1", "1080": "url2"}`
 ///
-/// When it's an object, we select the best quality for the Raspberry Pi 4's
-/// V4L2 hardware decoder:
-/// - Prefer 720p (optimal for Pi 4's H.264 HW decode)
-/// - Fall back to 480p, 360p (lower quality, but works)
-/// - Use 1080p only as last resort (may lag on some Pi 4 configs)
+/// When it's an object, we select the best quality based on CDN rate limits:
+///
+/// 1. Parse the `sp=` (speed limit) parameter from each quality URL.
+///    - `sp=380` means the CDN rate-limits to ~380 kbps
+///    - No `sp=` means no rate limit (best case)
+///
+/// 2. Select the **highest quality whose CDN rate limit can sustain playback**:
+///    - If `sp=` ≥ typical bitrate for that quality → sustainable
+///    - If `sp=` < typical bitrate → will stutter (download can't keep up)
+///    - No `sp=` → treat as unlimited (always sustainable)
+///
+/// 3. Among sustainable qualities, prefer: 720 → 480 → 360 → 240 → 1080
+///    (720p is optimal for Pi 4 HW decode; 1080p is last resort)
+///
+/// 4. If NO quality is sustainable (all rate-limited below their bitrate),
+///    select the quality with the **highest `sp=` value** — it will still
+///    stutter, but a higher rate limit means more data per second and
+///    longer play periods between rebuffer pauses.
 ///
 /// Returns `None` if the value is neither a string nor a quality-level object,
 /// or if all extracted URLs are HLS playlists.
@@ -213,6 +268,14 @@ fn extract_media_from_json_value(value: &serde_json::Value) -> Option<String> {
     // Case 1: Simple string URL
     if let Some(url) = value.as_str() {
         if !url.is_empty() && !is_hls_url(url) {
+            let sp = extract_cdn_speed_param(url);
+            if let Some(speed) = sp {
+                tracing::info!(
+                    sp_kbps = speed,
+                    url = %url,
+                    "Voe: single MP4 URL with CDN rate limit (sp= parameter)"
+                );
+            }
             return Some(url.to_owned());
         }
         if is_hls_url(url) {
@@ -223,53 +286,126 @@ fn extract_media_from_json_value(value: &serde_json::Value) -> Option<String> {
 
     // Case 2: Object with quality levels (e.g., {"720": "url", "1080": "url"})
     if let Some(obj) = value.as_object() {
+        // Collect all non-HLS quality URLs with their CDN rate limits
+        let mut candidates: Vec<(&str, &str, Option<u64>)> = Vec::new(); // (quality, url, sp_value)
+
+        for (key, url_val) in obj.iter() {
+            if let Some(url) = url_val.as_str() {
+                if !url.is_empty() && !is_hls_url(url) {
+                    let sp = extract_cdn_speed_param(url);
+                    candidates.push((key, url, sp));
+                } else if is_hls_url(url) {
+                    tracing::debug!(
+                        quality = %key,
+                        "skipping HLS URL at quality level"
+                    );
+                }
+            }
+        }
+
+        if candidates.is_empty() {
+            tracing::warn!(
+                keys = ?obj.keys().collect::<Vec<_>>(),
+                "Voe: mp4 object contained no usable non-HLS URLs"
+            );
+            return None;
+        }
+
+        // If only one candidate, return it (no choice to make)
+        if candidates.len() == 1 {
+            let (quality, url, sp) = &candidates[0];
+            tracing::info!(
+                quality = %quality,
+                sp_kbps = ?sp,
+                url = %url,
+                "Voe: only one quality available"
+            );
+            return Some((*url).to_owned());
+        }
+
+        // Log all available quality levels with their CDN rate limits
+        for (q, _u, sp) in &candidates {
+            let sustainable = match (sp, typical_bitrate_kbps(q)) {
+                (Some(speed), Some(bitrate)) => *speed >= bitrate,
+                (None, _) => true, // No rate limit = always sustainable
+                (Some(_), None) => true, // Unknown quality = assume sustainable
+            };
+            tracing::info!(
+                quality = %q,
+                sp_kbps = ?sp,
+                typical_bitrate_kbps = ?typical_bitrate_kbps(q),
+                sustainable = sustainable,
+                "Voe: available quality level"
+            );
+        }
+
         // Quality preference order for Pi 4 V4L2 HW decode:
         // 720p is the sweet spot — full hardware decode support, reasonable bitrate
         // 1080p may work but pushes the V4L2 decoder's limits
         // Lower qualities are fine but lower visual quality
-        let quality_order = ["720", "480", "360", "240", "1080"];
-
-        for quality in &quality_order {
-            if let Some(url_val) = obj.get(*quality) {
-                if let Some(url) = url_val.as_str() {
-                    if !url.is_empty() && !is_hls_url(url) {
-                        tracing::info!(
-                            quality = %quality,
-                            url = %url,
-                            "Voe: selected MP4 quality level from multi-quality object"
-                        );
-                        return Some(url.to_owned());
-                    }
-                    if is_hls_url(url) {
-                        tracing::debug!(
-                            quality = %quality,
-                            url = %url,
-                            "skipping HLS URL at quality level"
-                        );
-                    }
-                }
+        let quality_rank = |q: &str| -> i32 {
+            match q {
+                "720" => 0,
+                "480" => 1,
+                "360" => 2,
+                "240" => 3,
+                "1080" => 4,
+                _ => 5,
             }
+        };
+
+        // Strategy 1: Select the highest sustainable quality
+        // A quality is "sustainable" if its CDN rate limit (sp=) is >= the
+        // typical bitrate for that quality, OR if there's no sp= (unlimited).
+        let mut sustainable: Vec<_> = candidates
+            .iter()
+            .filter(|(q, _, sp)| {
+                match (sp, typical_bitrate_kbps(q)) {
+                    (Some(speed), Some(bitrate)) => *speed >= bitrate,
+                    (None, _) => true,
+                    (Some(_), None) => true,
+                }
+            })
+            .collect();
+
+        if !sustainable.is_empty() {
+            // Sort by quality preference (lowest rank = preferred)
+            sustainable.sort_by_key(|(q, _, _)| quality_rank(q));
+            let (quality, url, sp) = sustainable[0];
+            tracing::info!(
+                quality = %quality,
+                sp_kbps = ?sp,
+                url = %url,
+                "Voe: selected SUSTAINABLE quality (CDN rate limit >= typical bitrate)"
+            );
+            return Some((*url).to_owned());
         }
 
-        // No preferred quality level found — try any key in the object
-        for (key, url_val) in obj {
-            if let Some(url) = url_val.as_str() {
-                if !url.is_empty() && !is_hls_url(url) {
-                    tracing::info!(
-                        quality = %key,
-                        url = %url,
-                        "Voe: selected MP4 from object (non-standard quality key)"
-                    );
-                    return Some(url.to_owned());
-                }
-            }
-        }
-
+        // Strategy 2: No quality is sustainable — pick the one with the
+        // highest sp= value (most data per second, longest play between
+        // rebuffer pauses). Among equal sp=, prefer lower quality
+        // (lower bitrate = less data needed per second = slower drain).
         tracing::warn!(
-            keys = ?obj.keys().collect::<Vec<_>>(),
-            "Voe: mp4 object contained no usable non-HLS URLs"
+            "Voe: NO quality level is sustainable through CDN rate limit — \
+             selecting highest sp= value (will still stutter)"
         );
-        return None;
+        candidates.sort_by(|a, b| {
+            let sp_a = a.2.unwrap_or(0);
+            let sp_b = b.2.unwrap_or(0);
+            // Higher sp= first; on tie, lower quality (lower bitrate) first
+            match sp_b.cmp(&sp_a) {
+                std::cmp::Ordering::Equal => quality_rank(a.0).cmp(&quality_rank(b.0)),
+                other => other,
+            }
+        });
+        let (quality, url, sp) = &candidates[0];
+        tracing::info!(
+            quality = %quality,
+            sp_kbps = ?sp,
+            url = %url,
+            "Voe: selected best-available quality (highest CDN rate limit)"
+        );
+        return Some((*url).to_owned());
     }
 
     None
