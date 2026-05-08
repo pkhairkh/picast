@@ -159,11 +159,39 @@ pub struct PipelineConfig {
     /// runtime from the DisplayManager.
     #[serde(skip)]
     pub drm_fd: Option<i32>,
+    /// Audio timestamp offset in nanoseconds for A/V synchronisation.
+    ///
+    /// A positive value delays audio rendering relative to the pipeline
+    /// clock. This compensates for video decode pipeline latency that
+    /// GStreamer's latency query may not fully account for.
+    ///
+    /// On Raspberry Pi 4 with V4L2 hardware decode (v4l2h264dec +
+    /// v4l2convert ISP), the video pipeline introduces ~100-160ms of
+    /// latency from the hardware decoder's internal buffering (2-4
+    /// capture buffers) and the ISP format conversion (1 frame).
+    /// GStreamer's latency query often under-reports this because the
+    /// V4L2 stateful decoder's actual latency depends on the codec's
+    /// reordering window and B-frame depth, which aren't known until
+    /// the first few frames are decoded — well after the initial
+    /// latency query.
+    ///
+    /// Without compensation, audio (which has near-zero decode latency
+    /// via avdec_aac) plays ahead of video, causing noticeable lip-sync
+    /// desync. A positive `ts-offset` on the audio sink tells GStreamer
+    /// to wait that many nanoseconds longer before rendering each audio
+    /// buffer, effectively shifting audio later to align with video.
+    ///
+    /// Default: 100_000_000 (100ms) when `hw_accel` is true, 0 otherwise.
+    /// The 100ms value covers the typical V4L2 decode + ISP pipeline
+    /// latency at 25-30fps. Can be tuned per-device if needed.
+    #[serde(default)]
+    pub audio_ts_offset_ns: i64,
 }
 
 impl Default for PipelineConfig {
     fn default() -> Self {
         let (audio_sink, audio_device) = detect_audio_output();
+        let hw_accel = true;
         Self {
             video_sink: "kmssink".into(),
             audio_sink,
@@ -175,11 +203,16 @@ impl Default for PipelineConfig {
             //   Fallback  → alsasink with plughw:1,0
             audio_device,
             buffer_duration_ms: 3000,
-            hw_accel: true,
+            hw_accel,
             volume: 1.0,
             plane_id: 0,
             connector_id: None,
             drm_fd: None,
+            // V4L2 hardware decode (v4l2h264dec + v4l2convert ISP) introduces
+            // ~100-160ms of pipeline latency that GStreamer's latency query
+            // may not fully account for. 100ms compensation aligns audio
+            // with video for typical 25-30fps streams on Pi 4.
+            audio_ts_offset_ns: if hw_accel { 100_000_000 } else { 0 },
         }
     }
 }
@@ -1527,6 +1560,10 @@ impl PlaybackEngine {
 
         let mut sw_config = self.config.clone();
         sw_config.hw_accel = false;
+        // SW decode doesn't have V4L2 pipeline latency, so ts-offset
+        // compensation is not needed (and would cause A/V desync in
+        // the opposite direction — audio delayed behind video).
+        sw_config.audio_ts_offset_ns = 0;
 
         tracing::info!(
             url = url,

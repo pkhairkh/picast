@@ -14,7 +14,8 @@
 //!                                               │                                                   └────────────┘    └──────────────┘
 //!                                               │ ┌───────┐    ┌──────────────┐    ┌──────────────┐    ┌────────┐    ┌─────────────────────┐
 //!                                               └►│queue  │───►│audioconvert  │───►│audioresample │───►│volume │───►│alsasink             │
-//!                                                 │       │    │              │    │              │    │        │    │(device=plughw:C,D)  │
+//!                                                 │(50buf │    │              │    │              │    │        │    │(ts-offset=+100ms,   │
+//!                                                 │2s max)│    │              │    │              │    │        │    │ device=plughw:C,D) │
 //!                                                 └───────┘    └──────────────┘    └──────────────┘    └────────┘    └─────────────────────┘
 //! ```
 //!
@@ -390,8 +391,23 @@ impl GstPipeline {
         // from video CDNs).  If the Pi doesn't have gst-libav installed,
         // fdkaacdec is tried as a fallback.  If neither is available,
         // audio playback is skipped (video still works).
+        // Audio queue: sits between parsebin's audio output and the
+        // audio decoder. Limits how much audio data can be buffered.
+        //
+        // max-size-buffers=50 (down from 200): Each audio buffer is
+        // typically 20-25ms. 50 buffers = ~1 second, which is plenty for
+        // smoothing jitter without introducing excessive latency. 200
+        // buffers could buffer ~4 seconds of audio, which adds
+        // unnecessary latency and can exacerbate A/V desync.
+        //
+        // max-size-time=2_000_000_000 (2 seconds): Time-based limit
+        // prevents the queue from buffering more than 2 seconds of audio
+        // data regardless of buffer count. Without this, the queue could
+        // hold many seconds of audio in low-bitrate streams, causing
+        // variable and unpredictable audio latency.
         let audio_queue = ElementFactory::make("queue")
-            .property("max-size-buffers", 200u32)
+            .property("max-size-buffers", 50u32)
+            .property("max-size-time", 2_000_000_000u64)
             .build()
             .map_err(|e| PlaybackError::PipelineCreation(format!("audio_queue: {}", e)))?;
 
@@ -430,7 +446,26 @@ impl GstPipeline {
             .build()
             .map_err(|e| PlaybackError::PipelineCreation(format!("volume: {}", e)))?;
 
-        // audio sink (alsasink) — with configurable ALSA device.
+        // audio sink (alsasink/pulsesink) — with configurable device and
+        // A/V sync compensation.
+        //
+        // ts-offset: A positive value delays audio rendering by that many
+        // nanoseconds. This compensates for video decode pipeline latency
+        // that GStreamer's latency query may not fully account for.
+        //
+        // On Pi 4 with V4L2 hardware decode (v4l2h264dec + v4l2convert ISP),
+        // the video pipeline has ~100-160ms of latency from:
+        //   - v4l2h264dec: 2-4 capture buffers at 25fps = 80-160ms
+        //   - v4l2convert (ISP): 1 frame = ~40ms
+        // GStreamer's latency query often under-reports this because the
+        // V4L2 stateful decoder's actual latency depends on the codec's
+        // reordering window and B-frame depth, which aren't known until
+        // after the first few frames are decoded.
+        //
+        // Without ts-offset compensation, audio plays ahead of video
+        // (lip-sync desync). The default 100ms offset (configurable via
+        // PipelineConfig::audio_ts_offset_ns) shifts audio later to
+        // align with the video output.
         //
         // Previous versions used async=false to prevent alsasink from
         // blocking preroll, but this caused clock/sync issues: audio
@@ -474,6 +509,18 @@ impl GstPipeline {
                 tracing::info!("alsasink: using ALSA default device (no device property set)");
             }
         }
+
+        // Apply A/V sync compensation: ts-offset delays audio rendering
+        // to compensate for V4L2 hardware decode latency.
+        if config.audio_ts_offset_ns != 0 {
+            audiosink_builder = audiosink_builder.property("ts-offset", config.audio_ts_offset_ns);
+            tracing::info!(
+                ts_offset_ms = config.audio_ts_offset_ns as f64 / 1_000_000.0,
+                sink = %config.audio_sink,
+                "A/V sync: audio ts-offset applied (compensating for V4L2 decode latency)"
+            );
+        }
+
         let audiosink = audiosink_builder
             .build()
             .map_err(|e| {
@@ -1664,6 +1711,10 @@ impl GstPipeline {
         // Build a new pipeline with HW accel disabled.
         let mut sw_config = config.clone();
         sw_config.hw_accel = false;
+        // SW decode doesn't have V4L2 pipeline latency, so ts-offset
+        // compensation is not needed (and would cause A/V desync in
+        // the opposite direction — audio delayed behind video).
+        sw_config.audio_ts_offset_ns = 0;
         let new = Self::new(url, source_url, _socks_addr, _isolation_username, &sw_config).await?;
 
         // Replace self with the new pipeline.
