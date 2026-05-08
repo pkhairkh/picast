@@ -262,59 +262,25 @@ async fn handle_connect(
         "SOCKS5 forwarder: connecting through Tor (same circuit as resolver)"
     );
 
-    let remote_raw = socks5_connect(socks_addr, target, isolation_username).await?;
+    let remote = socks5_connect(socks_addr, target, isolation_username).await?;
 
-    // Optimize TCP settings for media streaming throughput.
-    // tokio::net::TcpStream doesn't expose set_recv_buffer_size /
-    // set_send_buffer_size, so we convert to std::net::TcpStream,
-    // set socket options, then convert back to tokio.
-    let mut remote = {
-        let std_remote = remote_raw.into_std()
-            .map_err(|e| format!("converting remote to std: {}", e))?;
+    // TCP_NODELAY: disable Nagle's algorithm on the Tor side. Nagle
+    // buffers small writes for up to 200ms before sending, which adds
+    // latency to the Tor tunnel. With 256 KB BufWriter buffering, we
+    // already batch writes efficiently — Nagle just adds unnecessary
+    // delay for the final partial buffer.
+    if let Err(e) = remote.set_nodelay(true) {
+        tracing::debug!(error = %e, "could not set TCP_NODELAY on remote stream");
+    }
 
-        // TCP_NODELAY: disable Nagle's algorithm on the Tor side. Nagle
-        // buffers small writes for up to 200ms before sending, which adds
-        // latency to the Tor tunnel. With 256 KB BufWriter buffering, we
-        // already batch writes efficiently — Nagle just adds unnecessary
-        // delay for the final partial buffer.
-        if let Err(e) = std_remote.set_nodelay(true) {
-            tracing::debug!(error = %e, "could not set TCP_NODELAY on remote stream");
-        }
-
-        // SO_RCVBUF: increase the kernel receive buffer from the default
-        // (~128 KB) to 512 KB. A larger receive buffer prevents flow-control
-        // stalls: when the forwarder is busy writing a chunk to souphttpsrc,
-        // the kernel can still buffer incoming data from Tor without the TCP
-        // window shrinking and throttling the Tor relay. On a 5 Mbps Tor
-        // stream with 256 KB BufWriter, a 512 KB SO_RCVBUF gives ~1 second
-        // of read-ahead even if the forwarder thread is momentarily delayed.
-        if let Err(e) = std_remote.set_recv_buffer_size(512 * 1024) {
-            tracing::debug!(error = %e, "could not set SO_RCVBUF on remote stream");
-        }
-
-        // Must restore non-blocking mode before converting back to tokio.
-        let _ = std_remote.set_nonblocking(true);
-
-        TcpStream::from_std(std_remote)
-            .map_err(|e| format!("converting remote back to tokio: {}", e))?
-    };
-
-    // Also increase SO_SNDBUF on the client side (souphttpsrc side) to
-    // 512 KB. This allows larger write bursts when forwarding data from
-    // Tor to souphttpsrc, reducing the number of write syscalls.
-    let mut client = {
-        let std_client = client.into_std()
-            .map_err(|e| format!("converting client to std: {}", e))?;
-
-        if let Err(e) = std_client.set_send_buffer_size(512 * 1024) {
-            tracing::debug!(error = %e, "could not set SO_SNDBUF on client stream");
-        }
-
-        let _ = std_client.set_nonblocking(true);
-
-        TcpStream::from_std(std_client)
-            .map_err(|e| format!("converting client back to tokio: {}", e))?
-    };
+    // NOTE: SO_RCVBUF / SO_SNDBUF kernel buffer tuning is intentionally
+    // skipped here. tokio::net::TcpStream doesn't expose these, and
+    // std::net::TcpStream only gained set_recv_buffer_size /
+    // set_send_buffer_size in Rust 1.88+ (not yet on all Pi toolchains).
+    // The 256 KB BufReader/BufWriter application-level buffers below
+    // already provide the batching we need — they reduce syscall
+    // frequency by 32× compared to the default 8 KB io::copy buffer,
+    // which is the dominant factor in preventing throughput bottlenecks.
 
     tracing::info!(
         target = %target,
