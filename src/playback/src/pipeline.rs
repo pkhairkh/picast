@@ -250,9 +250,9 @@ impl GstPipeline {
             .map_err(|e| PlaybackError::PipelineCreation(e))?;
 
             // Preflight CDN check — verify the CDN accepts this Tor circuit.
-            // The preflight_check method now handles automatic fallback from
-            // speed-unlimited URL to rate-limited URL if the CDN rejects the
-            // modified URL (sp= stripped) with 403.
+            // The preflight_check method tries sp= bypass URLs first, then
+            // falls back to the original rate-limited URL. Only if the
+            // original URL also returns 403 does it return an error (IP block).
             if let Err(e) = source.preflight_check().await {
                 tracing::warn!(
                     error = %e,
