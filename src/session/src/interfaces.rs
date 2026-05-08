@@ -30,6 +30,8 @@ pub struct ResolveInfo {
     pub title: Option<String>,
     /// Duration in milliseconds, if known.
     pub duration_ms: Option<u64>,
+    /// Cookies to send with the media request (from resolver).
+    pub cookies: Vec<String>,
 }
 
 /// Resolves a user-supplied URL into a direct, playable media URL.
@@ -79,6 +81,7 @@ pub trait PlaybackTrait: Send + Sync {
         source_url: &str,
         socks_addr: &str,
         isolation_username: &str,
+        cookies: Vec<String>,
     ) -> Result<(), Box<dyn std::error::Error + Send + Sync>>;
 
     /// Pause the running pipeline.

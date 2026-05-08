@@ -719,6 +719,7 @@ impl SessionManager {
                 direct_url: url.to_owned(),
                 title: None,
                 duration_ms: None,
+                cookies: vec![],
             }
         };
 
@@ -805,7 +806,7 @@ impl SessionManager {
 
             if let Some(ref playback) = self.playback {
                 let play_result = playback
-                    .play(&current_resolve.direct_url, url, &socks_addr, &isolation_username)
+                    .play(&current_resolve.direct_url, url, &socks_addr, &isolation_username, current_resolve.cookies.clone())
                     .await;
 
                 match play_result {
@@ -1366,6 +1367,7 @@ mod tests {
             _source_url: &str,
             _socks_addr: &str,
             _isolation_username: &str,
+            _cookies: Vec<String>,
         ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
             self.inc_call("play");
             self.is_playing.store(true, AtomicOrdering::Relaxed);

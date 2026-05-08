@@ -341,6 +341,7 @@ pub async fn resolve_with_ytdlp_and_subs(
         width: ytdlp.width.map(|w| w as u32),
         height: ytdlp.height.map(|h| h as u32),
         subtitle_tracks: ytdlp.subtitles.keys().cloned().collect(),
+        cookies: vec![],
     })
 }
 

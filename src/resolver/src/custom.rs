@@ -16,6 +16,7 @@
 //!   media URL from DoodStream's pass/dl API endpoint.
 
 use crate::{ResolveError, ResolveResult, UrlCategory};
+use crate::resolver_socks::ResolverSocksForwarder;
 use base64::Engine;
 use scraper::{Html, Selector};
 use std::time::Duration;
@@ -26,13 +27,21 @@ const UA: &str = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (
 
 /// Build a reqwest client with cookie jar and browser-like defaults.
 ///
-/// When `socks5_proxy` is provided, all requests route through the given
-/// SOCKS5h proxy (e.g. `socks5h://picast-hash@127.0.0.1:9050`).
-/// This is CRITICAL for CDN token validity: the CDN binds its download
-/// tokens to the requesting IP. If the resolver fetches the page through
-/// clearnet but the playback fetches through Tor, the IPs won't match
-/// and the CDN returns 403 Forbidden. Both MUST use the same Tor circuit.
-fn build_client(socks5_proxy: Option<&str>) -> Result<reqwest::Client, ResolveError> {
+/// When `socks5_proxy` is provided, we start a LOCAL HTTP CONNECT→SOCKS5
+/// forwarder that ONLY offers username/password auth (0x02) in its SOCKS5
+/// greeting. This is CRITICAL: reqwest's built-in SOCKS5 support offers
+/// BOTH no-auth (0x00) and username/password (0x02), which allows Tor to
+/// choose no-auth. When Tor chooses no-auth, the isolation username is
+/// never sent, and the stream gets assigned to a DIFFERENT circuit than
+/// the playback path (which uses our SocksForwarder with only 0x02).
+/// Different circuits → different exit IPs → CDN 403.
+///
+/// By using our own forwarder that only offers 0x02, we guarantee the
+/// same Tor circuit as the playback path.
+///
+/// The `socks5_proxy` parameter should be a full SOCKS5h proxy URL with
+/// isolation username, e.g. `socks5h://picast-hash@127.0.0.1:9050`.
+async fn build_client(socks5_proxy: Option<&str>) -> Result<(reqwest::Client, Option<ResolverSocksForwarder>), ResolveError> {
     let mut builder = reqwest::Client::builder()
         .timeout(Duration::from_secs(CUSTOM_RESOLVER_TIMEOUT_SECS))
         .user_agent(UA)
@@ -43,16 +52,78 @@ fn build_client(socks5_proxy: Option<&str>) -> Result<reqwest::Client, ResolveEr
         .gzip(true)
         .brotli(true);
 
+    let mut forwarder = None;
+
     if let Some(proxy_url) = socks5_proxy {
-        let proxy = reqwest::Proxy::all(proxy_url)
-            .map_err(|e| ResolveError::Network(format!("failed to configure SOCKS5 proxy: {}", e)))?;
-        builder = builder.proxy(proxy);
-        tracing::info!(proxy = %proxy_url, "custom resolver: routing through Tor SOCKS5h proxy (same circuit as playback)");
+        // Parse the SOCKS5h URL to extract the isolation username and
+        // Tor SOCKS address, then start a local HTTP CONNECT→SOCKS5
+        // forwarder that only offers username/password auth (0x02).
+        //
+        // URL format: socks5h://picast-HASH@127.0.0.1:9050/
+        if let Some((username, socks_addr)) = parse_socks5_url(proxy_url) {
+            match ResolverSocksForwarder::start(socks_addr, username).await {
+                Ok(fwd) => {
+                    let http_proxy_url = fwd.proxy_url();
+                    let proxy = reqwest::Proxy::all(&http_proxy_url)
+                        .map_err(|e| ResolveError::Network(format!("failed to configure HTTP proxy: {}", e)))?;
+                    builder = builder.proxy(proxy);
+                    tracing::info!(
+                        http_proxy = %http_proxy_url,
+                        socks5_proxy = %proxy_url,
+                        "custom resolver: routing through local SOCKS5 forwarder (auth=0x02 only, same circuit as playback)"
+                    );
+                    forwarder = Some(fwd);
+                }
+                Err(e) => {
+                    // Fallback: if the forwarder fails to start, fall back
+                    // to reqwest's built-in SOCKS5 (suboptimal but better
+                    // than no proxy at all).
+                    tracing::warn!(
+                        error = %e,
+                        "failed to start resolver SOCKS5 forwarder — falling back to reqwest built-in SOCKS5 (may cause circuit mismatch)"
+                    );
+                    let proxy = reqwest::Proxy::all(proxy_url)
+                        .map_err(|e| ResolveError::Network(format!("failed to configure SOCKS5 proxy: {}", e)))?;
+                    builder = builder.proxy(proxy);
+                }
+            }
+        } else {
+            // Could not parse the SOCKS5h URL — use it as-is.
+            tracing::warn!(proxy = %proxy_url, "could not parse SOCKS5h URL — using as-is (may cause circuit mismatch)");
+            let proxy = reqwest::Proxy::all(proxy_url)
+                .map_err(|e| ResolveError::Network(format!("failed to configure SOCKS5 proxy: {}", e)))?;
+            builder = builder.proxy(proxy);
+        }
     }
 
-    builder
+    let client = builder
         .build()
-        .map_err(|e| ResolveError::Network(format!("failed to build HTTP client: {}", e)))
+        .map_err(|e| ResolveError::Network(format!("failed to build HTTP client: {}", e)))?;
+
+    Ok((client, forwarder))
+}
+
+/// Parse a SOCKS5h proxy URL to extract the isolation username and address.
+///
+/// Input: `socks5h://picast-HASH@127.0.0.1:9050/`
+/// Returns: `Some(("picast-HASH", "127.0.0.1:9050"))`
+fn parse_socks5_url(url: &str) -> Option<(String, String)> {
+    // Strip the scheme prefix
+    let rest = url.strip_prefix("socks5h://")
+        .or_else(|| url.strip_prefix("socks5://"))?;
+
+    // Split on '@' to separate username from host
+    let (username, host_part) = if let Some(at_pos) = rest.find('@') {
+        (rest[..at_pos].to_string(), &rest[at_pos + 1..])
+    } else {
+        // No username — can't do circuit isolation
+        return None;
+    };
+
+    // Strip trailing slash
+    let host_part = host_part.strip_suffix('/').unwrap_or(host_part);
+
+    Some((username, host_part.to_string()))
 }
 
 /// HTTP request timeout for custom resolvers (15 seconds).
@@ -211,15 +282,22 @@ pub fn is_doodstream_domain(host: &str) -> bool {
 /// the page fetch goes through the same Tor circuit as the media fetch,
 /// so the CDN's IP-bound token matches.
 pub async fn resolve_voe(url: &str, socks5_proxy: Option<&str>) -> Result<ResolveResult, ResolveError> {
-    let client = build_client(socks5_proxy)?;
+    let (client, _forwarder) = build_client(socks5_proxy).await?;
+    // _forwarder keeps the local HTTP→SOCKS5 proxy alive for the
+    // duration of the resolve. It's dropped (and shut down) when
+    // this function returns.
+
+    let mut all_cookies: Vec<String> = Vec::new();
 
     // Follow the initial URL, then check for JS redirects.
-    let html_text = fetch_page(&client, url, None).await?;
+    let (html_text, cookies) = fetch_page(&client, url, None).await?;
+    all_cookies.extend(cookies);
     let resolved_url = follow_js_redirect(&html_text, url);
 
     // If we got redirected, fetch the new page.
     let (final_url, page_html) = if resolved_url != url {
-        let new_html = fetch_page(&client, &resolved_url, Some(url)).await?;
+        let (new_html, cookies) = fetch_page(&client, &resolved_url, Some(url)).await?;
+        all_cookies.extend(cookies);
         (resolved_url, new_html)
     } else {
         (url.to_owned(), html_text)
@@ -238,25 +316,33 @@ pub async fn resolve_voe(url: &str, socks5_proxy: Option<&str>) -> Result<Resolv
     // Try Method 8: obfuscated JSON in <script type="application/json">
     if let Some(media_url) = try_method8(&page_html) {
         tracing::info!(url = %media_url, method = "method8", "Voe: resolved media URL");
-        return Ok(build_result(&final_url, &media_url, &title, &thumbnail));
+        let mut result = build_result(&final_url, &media_url, &title, &thumbnail);
+        result.cookies = all_cookies;
+        return Ok(result);
     }
 
     // Try Method 7: MKGMa-encoded source
     if let Some(media_url) = try_method7(&page_html) {
         tracing::info!(url = %media_url, method = "method7", "Voe: resolved media URL");
-        return Ok(build_result(&final_url, &media_url, &title, &thumbnail));
+        let mut result = build_result(&final_url, &media_url, &title, &thumbnail);
+        result.cookies = all_cookies;
+        return Ok(result);
     }
 
     // Try Method 6: a168c Base64-encoded source
     if let Some(media_url) = try_method6(&page_html) {
         tracing::info!(url = %media_url, method = "method6", "Voe: resolved media URL");
-        return Ok(build_result(&final_url, &media_url, &title, &thumbnail));
+        let mut result = build_result(&final_url, &media_url, &title, &thumbnail);
+        result.cookies = all_cookies;
+        return Ok(result);
     }
 
     // Fallback: look for var source = '...' and direct URLs
     if let Some(media_url) = try_fallback_urls(&page_html) {
         tracing::info!(url = %media_url, method = "fallback", "Voe: resolved media URL");
-        return Ok(build_result(&final_url, &media_url, &title, &thumbnail));
+        let mut result = build_result(&final_url, &media_url, &title, &thumbnail);
+        result.cookies = all_cookies;
+        return Ok(result);
     }
 
     Err(ResolveError::NoMediaFound(format!(
@@ -276,7 +362,12 @@ pub async fn resolve_voe(url: &str, socks5_proxy: Option<&str>) -> Result<Resolv
 /// the page fetch goes through the same Tor circuit as the media fetch,
 /// so the CDN's IP-bound token matches.
 pub async fn resolve_doodstream(url: &str, socks5_proxy: Option<&str>) -> Result<ResolveResult, ResolveError> {
-    let client = build_client(socks5_proxy)?;
+    let (client, _forwarder) = build_client(socks5_proxy).await?;
+    // _forwarder keeps the local HTTP→SOCKS5 proxy alive for the
+    // duration of the resolve. It's dropped (and shut down) when
+    // this function returns.
+
+    let mut all_cookies: Vec<String> = Vec::new();
 
     // DoodStream pages often sit behind Cloudflare.  The main /d/ page may
     // return 403, but the /e/ (embed) page is usually less protected because
@@ -289,7 +380,8 @@ pub async fn resolve_doodstream(url: &str, socks5_proxy: Option<&str>) -> Result
     let mut embed_href: Option<String> = None;
 
     match fetch_page(&client, url, None).await {
-        Ok(html_text) => {
+        Ok((html_text, cookies)) => {
+            all_cookies.extend(cookies);
             // Extract all data from the Html document up-front, then drop it.
             // scraper::Html is !Send (contains Cell<usize>), so it must not
             // survive across an .await point.
@@ -310,7 +402,9 @@ pub async fn resolve_doodstream(url: &str, socks5_proxy: Option<&str>) -> Result
             // If we already have a direct URL on the main page, return it.
             if let Some(media_url) = try_fallback_urls(&html_text) {
                 tracing::info!(url = %media_url, method = "main-page-fallback", "DoodStream: resolved media URL");
-                return Ok(build_result(url, &media_url, &title, &thumbnail));
+                let mut result = build_result(url, &media_url, &title, &thumbnail);
+                result.cookies = all_cookies;
+                return Ok(result);
             }
         }
         Err(e) => {
@@ -345,16 +439,21 @@ pub async fn resolve_doodstream(url: &str, socks5_proxy: Option<&str>) -> Result
 
         // Fetch the embed page (send Referer to appear browser-like)
         match fetch_page(&client, &full_embed, Some(url)).await {
-            Ok(embed_html) => {
+            Ok((embed_html, cookies)) => {
+                all_cookies.extend(cookies);
                 // Try to find the direct media URL in the embed page
                 if let Some(media_url) = extract_doodstream_media(&embed_html, &full_embed) {
                     tracing::info!(url = %media_url, "DoodStream: resolved media URL via embed");
-                    return Ok(build_result(url, &media_url, &title, &thumbnail));
+                    let mut result = build_result(url, &media_url, &title, &thumbnail);
+                    result.cookies = all_cookies;
+                    return Ok(result);
                 }
                 // Fallback: search the embed HTML for direct URLs
                 if let Some(media_url) = try_fallback_urls(&embed_html) {
                     tracing::info!(url = %media_url, method = "embed-fallback", "DoodStream: resolved media URL");
-                    return Ok(build_result(url, &media_url, &title, &thumbnail));
+                    let mut result = build_result(url, &media_url, &title, &thumbnail);
+                    result.cookies = all_cookies;
+                    return Ok(result);
                 }
             }
             Err(e) => {
@@ -758,11 +857,13 @@ fn extract_media_url_from_text(text: &str) -> Option<String> {
 ///
 /// `referer` is sent as the Referer header when provided (helps bypass
 /// hotlink-protection on embed pages).
+///
+/// Returns a tuple of (HTML content, cookies from Set-Cookie headers).
 async fn fetch_page(
     client: &reqwest::Client,
     url: &str,
     referer: Option<&str>,
-) -> Result<String, ResolveError> {
+) -> Result<(String, Vec<String>), ResolveError> {
     let mut req = client
         .get(url)
         .header("Accept", "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,*/*;q=0.8")
@@ -799,10 +900,31 @@ async fn fetch_page(
         )));
     }
 
-    result
+    // Capture Set-Cookie headers for CDN session cookies
+    let cookies: Vec<String> = result.headers()
+        .iter()
+        .filter(|(name, _)| *name == "set-cookie")
+        .filter_map(|(_, value)| value.to_str().ok())
+        .map(|v| {
+            // Extract just the cookie name=value part (before the first ;)
+            v.split(';').next().unwrap_or(v).trim().to_string()
+        })
+        .collect();
+
+    if !cookies.is_empty() {
+        tracing::info!(
+            cookie_count = cookies.len(),
+            url = url,
+            "custom resolver: captured cookies from HTTP response"
+        );
+    }
+
+    let html = result
         .text()
         .await
-        .map_err(|e| ResolveError::Network(format!("custom resolver: failed to read response: {}", e)))
+        .map_err(|e| ResolveError::Network(format!("custom resolver: failed to read response: {}", e)))?;
+
+    Ok((html, cookies))
 }
 
 /// Follow JavaScript `window.location.href = '...'` redirects in the HTML.
@@ -896,6 +1018,7 @@ fn build_result(
         width: None,
         height: None,
         subtitle_tracks: vec![],
+        cookies: vec![],
     }
 }
 

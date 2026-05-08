@@ -56,6 +56,7 @@ impl PlaybackTrait for MockPlayback {
         _source_url: &str,
         _socks_addr: &str,
         _isolation_username: &str,
+        _cookies: Vec<String>,
     ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
         self.is_playing.store(true, Ordering::Relaxed);
         Ok(())

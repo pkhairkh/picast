@@ -151,6 +151,7 @@ impl GstPipeline {
         socks_addr: &str,
         isolation_username: &str,
         config: &PipelineConfig,
+        cookies: &[String],
     ) -> Result<Self, PlaybackError> {
         ensure_gst_init()?;
 
@@ -236,6 +237,20 @@ impl GstPipeline {
 
             headers.set("Accept-Language", "en-US,en;q=0.5");
 
+            // Accept-Encoding: Chrome sends "identity;q=1, *;q=0" for <video>
+            // elements (video is already compressed; no point in gzip/deflate).
+            // Some CDNs flag requests that ask for compressed video as bot-like.
+            headers.set("Accept-Encoding", "identity;q=1, *;q=0");
+
+            // Chrome Client Hints: Chrome 89+ sends these for ALL requests.
+            // CDN anti-bot systems (Cloudflare, Voe) check for these headers
+            // to verify the request comes from a real Chrome browser. Without
+            // them, the CDN sees a non-browser client and may return 403.
+            // Values match the User-Agent string (Chrome/131.0.0.0).
+            headers.set("sec-ch-ua", r#""Chromium";v="131", "Not_A Brand";v="24""#);
+            headers.set("sec-ch-ua-mobile", "?0");
+            headers.set("sec-ch-ua-platform", "\"Windows\"");
+
             // Sec-Fetch-* headers: Many CDN anti-bot systems (Cloudflare,
             // Voe, DoodStream) check these headers to verify the request
             // comes from a real browser. A <video> element loading a media
@@ -279,6 +294,19 @@ impl GstPipeline {
                     );
                 }
             }
+
+            // Cookie header: Some CDNs require session cookies that were set
+            // during the page fetch (resolution phase). The resolver captures
+            // Set-Cookie headers and passes them through the session layer.
+            if !cookies.is_empty() {
+                let cookie_header = cookies.join("; ");
+                headers.set("Cookie", cookie_header.as_str());
+                tracing::info!(
+                    cookie_count = cookies.len(),
+                    "souphttpsrc: Cookie header added from resolver session"
+                );
+            }
+
             src.set_property("extra-headers", &headers);
         }
 

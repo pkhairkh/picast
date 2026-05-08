@@ -23,6 +23,7 @@
 pub mod cache;
 pub mod classifier;
 pub mod custom;
+pub mod resolver_socks;
 pub mod ytdlp;
 
 pub use classifier::UrlCategory;
@@ -99,6 +100,11 @@ pub struct ResolveResult {
     pub height: Option<u32>,
     /// Available subtitle track language codes.
     pub subtitle_tracks: Vec<String>,
+    /// Cookies to send with the media request (from Set-Cookie headers
+    /// received during URL resolution). Some CDNs require cookies that
+    /// were set during the page fetch to validate the media download.
+    #[serde(default)]
+    pub cookies: Vec<String>,
 }
 
 // ── MIME type helper ─────────────────────────────────────────────────
@@ -232,6 +238,7 @@ impl Resolver {
                 width: None,
                 height: None,
                 subtitle_tracks: vec![],
+                cookies: vec![],
             },
             UrlCategory::HlsManifest => ResolveResult {
                 source_url: url.to_owned(),
@@ -249,6 +256,7 @@ impl Resolver {
                 width: None,
                 height: None,
                 subtitle_tracks: vec![],
+                cookies: vec![],
             },
             UrlCategory::DashManifest => ResolveResult {
                 source_url: url.to_owned(),
@@ -266,6 +274,7 @@ impl Resolver {
                 width: None,
                 height: None,
                 subtitle_tracks: vec![],
+                cookies: vec![],
             },
             UrlCategory::Onion => {
                 // Onion URLs are always resolved through Tor via yt-dlp.
@@ -425,6 +434,7 @@ impl Resolver {
             width: None,
             height: None,
             subtitle_tracks: vec![],
+            cookies: vec![],
         };
 
         // Cache the result.
@@ -496,6 +506,7 @@ impl ResolverTrait for Resolver {
             direct_url: result.direct_url,
             title: result.title,
             duration_ms: result.duration,
+            cookies: result.cookies,
         })
     }
 
@@ -713,6 +724,7 @@ mod tests {
             width: None,
             height: None,
             subtitle_tracks: vec![],
+            cookies: vec![],
         };
         let json = serde_json::to_string(&result).unwrap();
         let parsed: ResolveResult = serde_json::from_str(&json).unwrap();

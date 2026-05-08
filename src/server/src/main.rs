@@ -93,8 +93,9 @@ impl picast_session::interfaces::PlaybackTrait for PlaybackAdapter {
         source_url: &str,
         socks_addr: &str,
         isolation_username: &str,
+        cookies: Vec<String>,
     ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
-        self.0.play(url, source_url, socks_addr, isolation_username).await?;
+        self.0.play(url, source_url, socks_addr, isolation_username, cookies).await?;
         Ok(())
     }
 
@@ -170,6 +171,7 @@ impl picast_session::interfaces::ResolverTrait for ResolverAdapter {
             direct_url: result.direct_url,
             title: result.title,
             duration_ms: result.duration,
+            cookies: result.cookies,
         })
     }
 

@@ -338,6 +338,7 @@ fn row_to_resolve_result(row: &rusqlite::Row<'_>) -> ResolveResult {
         width,
         height,
         subtitle_tracks,
+        cookies: vec![],
     }
 }
 
@@ -369,6 +370,7 @@ mod tests {
             width: Some(1920),
             height: Some(1080),
             subtitle_tracks: vec!["en".into(), "es".into()],
+            cookies: vec![],
         }
     }
 
@@ -632,6 +634,7 @@ mod tests {
             width: None,
             height: None,
             subtitle_tracks: vec![],
+            cookies: vec![],
         };
         cache.insert(url, result);
 

@@ -375,9 +375,11 @@ async fn socks5_connect(
     // circuit as the resolver. Same circuit = same exit IP = CDN token
     // matches = no 403.
     //
-    // This matches reqwest's behavior: when a SOCKS5 URL includes a
-    // username (socks5h://picast-HASH@...), reqwest also only offers
-    // username/password auth.
+    // NOTE: reqwest's built-in SOCKS5 (via tokio-socks) offers BOTH 0x00
+    // and 0x02, which can cause Tor to pick 0x00 and assign a different
+    // circuit. The resolver now uses its own ResolverSocksForwarder
+    // (resolver_socks.rs) that also only offers 0x02, ensuring both
+    // paths use the same auth method and thus the same Tor circuit.
     stream
         .write_all(&[0x05, 0x01, 0x02]) // VER=5, NMETHODS=1, METHOD=0x02
         .await
