@@ -772,17 +772,41 @@ impl V3dComputeEngine {
     /// - The V3D render node (`/dev/dri/renderD128`) exists
     /// - EGL can be initialized with GLES 3.1 support
     /// - The compute shader compiles successfully
+    ///
+    /// Currently returns `false` because the EGL context creation is not yet
+    /// fully implemented — `EglLoader::get_display()` and `create_context()`
+    /// are stubs that return null pointers. Attempting to initialize the V3D
+    /// engine with stubbed EGL will cause `glow` to panic when querying
+    /// `GL_VERSION` ("Reading GL_VERSION failed. Make sure there is a valid
+    /// GL context currently active.").
+    ///
+    /// The HEVC pipeline falls back to the bcm2835-ISP hardware converter
+    /// (`v4l2convert`) for SAND128→NV12 conversion, which works without
+    /// V3D compute. When the EGL context is properly implemented, this
+    /// method should be updated to perform a real EGL initialization check.
     pub fn is_available() -> bool {
-        // Check for V3D render node
+        // Check for V3D render node — this is a necessary but NOT sufficient
+        // condition for V3D compute. The EGL context creation must also work.
         if !std::path::Path::new("/dev/dri/renderD128").exists() {
             tracing::debug!("V3D render node not found at /dev/dri/renderD128");
             return false;
         }
 
-        // Try to initialize EGL and check GLES version
-        // For now, just check the device node existence
-        // Full EGL check would require loading the libraries
-        true
+        // TODO: The EGL context creation in EglLoader is stubbed out —
+        // get_display(), create_context(), and make_current() all return
+        // null/empty results. Attempting to use the V3D engine with these
+        // stubs causes glow to panic when querying GL_VERSION. Until the
+        // EGL loader is properly implemented (using real eglGetPlatformDisplay,
+        // eglInitialize, eglCreateContext, eglMakeCurrent via GBM), we must
+        // return false here to prevent the panic.
+        //
+        // The HEVC pipeline will use v4l2convert (bcm2835-ISP hardware) for
+        // SAND128→NV12 conversion instead, which is well-tested on Pi 4.
+        tracing::info!(
+            "V3D compute engine: EGL context creation not yet implemented — \
+             using bcm2835-ISP hardware for SAND→NV12 conversion"
+        );
+        false
     }
 }
 
