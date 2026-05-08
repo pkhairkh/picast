@@ -69,9 +69,15 @@ const CUSTOM_RESOLVER_TIMEOUT_SECS: u64 = 15;
 /// Voe front-ends due to their obfuscation).
 const VOE_DOMAINS: &[&str] = &[
     "voe.sx",
-    // Active front-end domains (rotated frequently by Voe)
+    // Active front-end domains (rotated frequently by Voe).
+    // These are obfuscated redirector domains that serve Voe video content.
+    // Voe rotates them constantly to evade adblockers and download managers.
+    // When a new Voe front-end domain is discovered (e.g. a URL that should
+    // work but yt-dlp returns "Unsupported URL"), add it here.
     "charlessheimprove.com",
     "brittanyaheadnew.com",
+    "maryspecialwatch.com",
+    "maxfinishseveral.com",
     "cactusheadroomscaling.com",
     "chaliceguzzlerlandlord.com",
     "reedunpack.com",
@@ -84,12 +90,17 @@ const VOE_DOMAINS: &[&str] = &[
     "fanaticallyten.com",
     "fringeoutcast.com",
     "ballisticdisease.com",
+    "housecardsummer.com",
+    "definitelynotrecord.com",
+    "fastcupcake.com",
+    "smartfityoga.com",
     // Unblock proxies
     "voe-unblock.com",
     "voeunblock.com",
     "voeunbl0ck.com",
     "voe-unblk.com",
     "voeunblk.com",
+    "voeunblock2.com",
 ];
 
 /// Known DoodStream front-end domains.
@@ -881,6 +892,8 @@ mod tests {
         assert!(is_voe_domain("voe.sx"));
         assert!(is_voe_domain("charlessheimprove.com"));
         assert!(is_voe_domain("brittanyaheadnew.com"));
+        assert!(is_voe_domain("maryspecialwatch.com"));
+        assert!(is_voe_domain("maxfinishseveral.com"));
         assert!(is_voe_domain("sub.charlessheimprove.com"));
         assert!(!is_voe_domain("youtube.com"));
     }

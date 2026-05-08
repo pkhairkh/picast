@@ -96,6 +96,9 @@ const WEB_PAGE_DOMAINS: &[&str] = &[
     // Voe CDN front-end domains (handled by custom resolver)
     "voe.sx",
     "charlessheimprove.com",
+    "brittanyaheadnew.com",
+    "maryspecialwatch.com",
+    "maxfinishseveral.com",
     // DoodStream front-end domains (handled by custom resolver)
     "playmogo.com",
     "doodstream.com",

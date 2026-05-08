@@ -315,9 +315,74 @@ impl Resolver {
                     }
                 }
                 // Fall back to yt-dlp for all other web page URLs.
-                let mut result = self.resolve_webpage(url).await?;
-                result.category = UrlCategory::WebPage;
-                result
+                let ytdlp_result = self.resolve_webpage(url).await;
+
+                match ytdlp_result {
+                    Ok(mut result) => {
+                        result.category = UrlCategory::WebPage;
+                        result
+                    },
+                    Err(ytdlp_err) => {
+                        // yt-dlp failed. Before giving up, try the Voe custom
+                        // resolver as a heuristic fallback. Voe rotates its
+                        // front-end domains constantly (every few weeks), and
+                        // new domains often appear before they're added to
+                        // VOE_DOMAINS. If yt-dlp returns "Unsupported URL" or
+                        // any other error for an unknown domain, the Voe
+                        // resolver might still succeed because it doesn't rely
+                        // on domain recognition — it fetches the page and tries
+                        // to decode Voe's obfuscated JSON directly.
+                        //
+                        // This heuristic is safe: if the page isn't actually a
+                        // Voe front-end, the Voe resolver will simply fail to
+                        // find any of its expected data patterns and return an
+                        // error, which we then replace with the original
+                        // yt-dlp error.
+                        if let Some(host) = parsed.host_str() {
+                            let socks_addr = self.tor.socks_addr();
+                            let isolation = picast_tor::TorManager::isolation_username(host);
+                            let socks5_proxy = if !socks_addr.is_empty() {
+                                Some(format!("socks5h://{}@{}", isolation, socks_addr))
+                            } else {
+                                None
+                            };
+
+                            tracing::info!(
+                                url = url,
+                                ytdlp_error = %ytdlp_err,
+                                "yt-dlp failed for WebPage URL — trying Voe custom resolver as heuristic fallback"
+                            );
+
+                            match custom::resolve_voe(url, socks5_proxy.as_deref()).await {
+                                Ok(mut voe_result) => {
+                                    tracing::info!(
+                                        url = url,
+                                        "Voe heuristic fallback succeeded — this domain is likely a new Voe front-end"
+                                    );
+                                    voe_result.category = UrlCategory::WebPage;
+                                    // Cache before returning so subsequent requests hit the cache.
+                                    {
+                                        let cache = self.cache.lock().await;
+                                        cache.insert(url, voe_result.clone());
+                                    }
+                                    return Ok(voe_result);
+                                },
+                                Err(voe_err) => {
+                                    tracing::debug!(
+                                        url = url,
+                                        voe_error = %voe_err,
+                                        "Voe heuristic fallback also failed — returning original yt-dlp error"
+                                    );
+                                    // Voe fallback failed too; return the
+                                    // original yt-dlp error (more informative
+                                    // since it's the primary resolver).
+                                },
+                            }
+                        }
+
+                        return Err(ytdlp_err);
+                    },
+                }
             },
             UrlCategory::Magnet => {
                 return Err(ResolveError::NoMediaFound(url.to_owned()));
