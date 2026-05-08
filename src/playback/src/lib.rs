@@ -1205,29 +1205,38 @@ impl PlaybackEngine {
                                 );
                                 initial_buffering_bus.store(false, Ordering::Relaxed);
                             }
-                            // Resume if currently Paused or if stuck at Ready
-                            // (async-handling=true means the pipeline may have
-                            // reached Ready/Paused before sinks prerolled).
-                            let (_, current, pending) = pipe.state(gstreamer::ClockTime::from_mseconds(0));
+                            // Only transition to Playing if the pipeline has
+                            // reached Paused (preroll complete). With kmssink
+                            // async=false, the pipeline should reach Paused
+                            // quickly, so this is the normal path.
+                            //
+                            // DO NOT try to force Playing from Ready state —
+                            // that creates an impossible transition where the
+                            // pipeline can't reach Playing because it hasn't
+                            // even reached Paused yet. Instead, let the bus
+                            // watch's state-change handler auto-transition to
+                            // Playing once the pipeline reaches Paused.
+                            let (_, current, _pending) = pipe.state(gstreamer::ClockTime::from_mseconds(0));
                             if current == State::Paused {
                                 tracing::info!(
                                     percent = percent,
                                     "buffer sufficiently full — resuming playback"
                                 );
                                 let _ = pipe.set_state(State::Playing);
-                            } else if current == State::Ready && pending == State::Paused {
-                                // Pipeline is stuck at Ready→Paused because async
-                                // sinks haven't prerolled yet (even with async-
-                                // handling, this can happen during the initial
-                                // startup). Override the pending state to Playing
-                                // so the pipeline transitions to Playing once the
-                                // async elements catch up.
+                            } else if current == State::Playing {
+                                // Already playing — nothing to do
+                            } else {
+                                // Pipeline hasn't reached Paused yet (still
+                                // transitioning). The bus watch's state-change
+                                // handler will auto-transition to Playing once
+                                // preroll completes and initial_buffering is
+                                // cleared (which we just did above).
                                 tracing::info!(
                                     percent = percent,
-                                    "buffer full but pipeline stuck at Ready→Paused — \
-                                     forcing transition to Playing"
+                                    ?current,
+                                    "buffer full but pipeline not yet at Paused — \
+                                     will auto-play when preroll completes"
                                 );
-                                let _ = pipe.set_state(State::Playing);
                             }
                         } else if percent < 15 && !initial_buffering_bus.load(Ordering::Relaxed) {
                             // Buffer low during playback — pause to refill.
@@ -1307,14 +1316,44 @@ impl PlaybackEngine {
                         );
 
                         // If still not Playing and auto-play hasn't triggered yet,
-                        // force a transition.  This handles edge cases where the
-                        // bus watch didn't fire (e.g. GStreamer bug, timing issue).
+                        // try a state transition.  Only set Playing if we're at
+                        // Paused — setting Playing from Ready creates an impossible
+                        // transition that blocks the pipeline forever.
                         if current != State::Playing && pending_auto_play_diag.load(Ordering::Relaxed) {
-                            tracing::warn!(
-                                current = ?current,
-                                "pipeline NOT playing after 10s — forcing transition to Playing"
-                            );
-                            let _ = pipe.set_state(State::Playing);
+                            if current == State::Paused {
+                                tracing::warn!(
+                                    current = ?current,
+                                    "pipeline at Paused but not Playing after 10s — \
+                                     forcing transition to Playing"
+                                );
+                                let _ = pipe.set_state(State::Playing);
+                            } else {
+                                // Pipeline is stuck (e.g. at Ready). Forcing
+                                // Playing from Ready doesn't work. Try setting
+                                // Paused first, then Playing after a brief delay.
+                                tracing::warn!(
+                                    current = ?current,
+                                    pending = ?pending,
+                                    "pipeline stuck after 10s — attempting recovery: \
+                                     Paused → Playing"
+                                );
+                                let _ = pipe.set_state(State::Paused);
+                                // Give GStreamer time to complete the Paused
+                                // transition, then try Playing
+                                let pipe_weak = pipe.downgrade();
+                                tokio::spawn(async move {
+                                    tokio::time::sleep(std::time::Duration::from_secs(2)).await;
+                                    if let Some(p) = pipe_weak.upgrade() {
+                                        let (_, cur, _) = p.state(gstreamer::ClockTime::from_mseconds(0));
+                                        if cur == State::Paused {
+                                            tracing::info!("recovery: pipeline reached Paused — transitioning to Playing");
+                                            let _ = p.set_state(State::Playing);
+                                        } else {
+                                            tracing::warn!(current = ?cur, "recovery: pipeline still not at Paused after 12s");
+                                        }
+                                    }
+                                });
+                            }
                         }
 
                         // Check whether parsebin's video/audio pads are linked.

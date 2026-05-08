@@ -69,6 +69,13 @@ impl UrlCategory {
 }
 
 /// Known video hosting domains that require yt-dlp for resolution.
+///
+/// Voe front-end domains are NOT listed here — they're detected dynamically
+/// by the Voe heuristic in `custom::is_voe_domain()`. Voe rotates domains
+/// constantly, so a static list is futile. The default classification rule
+/// (Rule 7: unknown URLs → WebPage) catches any Voe domain not matched by
+/// earlier rules, and the Voe resolver tries content-based detection for
+/// ALL WebPage URLs regardless of domain.
 const WEB_PAGE_DOMAINS: &[&str] = &[
     "youtube.com",
     "www.youtube.com",
@@ -93,12 +100,8 @@ const WEB_PAGE_DOMAINS: &[&str] = &[
     "reddit.com",
     "www.reddit.com",
     "streamable.com",
-    // Voe CDN front-end domains (handled by custom resolver)
+    // Voe canonical domain (front-end domains detected by heuristic)
     "voe.sx",
-    "charlessheimprove.com",
-    "brittanyaheadnew.com",
-    "maryspecialwatch.com",
-    "maxfinishseveral.com",
     // DoodStream front-end domains (handled by custom resolver)
     "playmogo.com",
     "doodstream.com",

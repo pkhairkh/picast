@@ -488,12 +488,11 @@ impl GstPipeline {
         // PipelineConfig::audio_ts_offset_ns) shifts audio later to
         // align with the video output.
         //
-        // Previous versions used async=false to prevent alsasink from
-        // blocking preroll, but this caused clock/sync issues: audio
-        // buffers could be scheduled incorrectly relative to the pipeline
-        // clock.  Now both kmssink and alsasink use the default async=true,
-        // so the pipeline waits for both sinks to preroll before starting
-        // the clock, ensuring audio and video are properly synchronised.
+        // alsasink keeps async=true (the default) so the pipeline clock
+        // starts only after alsasink prerolls (receives its first audio
+        // buffer). This ensures the pipeline clock is correctly synchronised
+        // with the audio stream. kmssink uses async=false to avoid the
+        // preroll deadlock (see kmssink comments in build_kmssink).
         //
         // The `device` property routes audio to a specific ALSA output
         // (e.g. "plughw:1,0" for HDMI).  When empty, ALSA's default
@@ -1050,7 +1049,31 @@ impl GstPipeline {
             // allows the decoder (v4l2h264dec/v4l2slh265dec) to adapt its
             // output rate, reducing unnecessary decode work when the display
             // can't keep up (e.g. during 4K@30Hz bandwidth starvation).
-            .property("qos", true);
+            .property("qos", true)
+            // async=false: kmssink completes its Ready→Paused transition
+            // immediately WITHOUT waiting for the first video buffer. This is
+            // CRITICAL on Raspberry Pi 4 because the video decode chain is
+            // built dynamically in parsebin's pad-added callback, which fires
+            // AFTER the pipeline is already transitioning to Paused.
+            //
+            // With async=true (the GStreamer default), a deadlock occurs:
+            //   1. Pipeline set_state(Paused) → kmssink returns ASYNC (waiting
+            //      for a buffer to preroll)
+            //   2. Pipeline can't reach Paused because kmssink hasn't prerolled
+            //   3. Data doesn't flow through the pipeline at Ready state
+            //   4. kmssink never receives a buffer → never prerolls → deadlock
+            //
+            // With async=false, kmssink completes Ready→Paused immediately,
+            // allowing the pipeline to reach Paused. Once in Paused, data flows
+            // through the pipeline, caps negotiation completes, and kmssink
+            // receives and displays frames normally.
+            //
+            // A/V sync is NOT affected: alsasink keeps async=true, so the
+            // pipeline clock only starts when alsasink prerolls (receives its
+            // first audio buffer). By that time, the video chain is already
+            // flowing and kmssink is ready to render. The ts-offset on alsasink
+            // compensates for V4L2 decode latency as before.
+            .property("async", false);
 
         // The fd and driver-name properties are mutually exclusive in kmssink.
         // If we have a valid DRM fd from the DisplayManager, use it;

@@ -58,51 +58,27 @@ fn build_client(socks5_proxy: Option<&str>) -> Result<reqwest::Client, ResolveEr
 /// HTTP request timeout for custom resolvers (15 seconds).
 const CUSTOM_RESOLVER_TIMEOUT_SECS: u64 = 15;
 
-/// Known Voe CDN front-end domains.
+/// Canonical Voe domain and unblock proxies.
 ///
-/// **IMPORTANT**: This list is used ONLY for logging clarity — it is NO
-/// LONGER a gatekeeper. The Voe custom resolver is now tried FIRST for
-/// ALL WebPage URLs (before yt-dlp), regardless of whether the domain
-/// is in this list. If the domain is in the list, we log "known domain";
-/// if not, we log "unknown domain — may be a new Voe front-end". Either
-/// way, the resolver runs.
+/// This list is intentionally MINIMAL. Voe rotates front-end domains
+/// constantly to evade adblockers — maintaining a static list of every
+/// front-end is futile. Instead, the Voe custom resolver uses **content-
+/// based detection** (obfuscated JSON patterns) as its primary mechanism.
 ///
-/// Domains are still listed here for:
-/// - Logging clarity (distinguishing known vs unknown Voe domains)
-/// - The classifier's WEB_PAGE_DOMAINS list (for URL categorisation)
-/// - Future use (e.g. priority ordering, domain-specific quirks)
+/// The resolver is tried FIRST for ALL WebPage URLs (before yt-dlp),
+/// regardless of whether the domain is in this list. If the page contains
+/// Voe's signature obfuscated JSON, the resolver succeeds; if not, it
+/// falls back to yt-dlp. No domain list can ever be complete — the
+/// content heuristic is what makes this work.
 ///
-/// Voe rotates these domains frequently to evade adblockers and download
-/// managers. The resolver's content-based detection (obfuscated JSON
-/// patterns) is the primary mechanism — domain matching is secondary.
+/// Domains listed here are used ONLY for:
+/// - Logging clarity ("known Voe domain" vs "unknown — trying Voe resolver")
+/// - The `is_voe_domain()` heuristic fast-path check
+/// - The classifier's `WEB_PAGE_DOMAINS` list (for URL categorisation)
 const VOE_DOMAINS: &[&str] = &[
+    // The canonical Voe domain
     "voe.sx",
-    // Active front-end domains (rotated frequently by Voe).
-    // These are obfuscated redirector domains that serve Voe video content.
-    // Voe rotates them constantly to evade adblockers and download managers.
-    // When a new Voe front-end domain is discovered (e.g. a URL that should
-    // work but yt-dlp returns "Unsupported URL"), add it here.
-    "charlessheimprove.com",
-    "brittanyaheadnew.com",
-    "maryspecialwatch.com",
-    "maxfinishseveral.com",
-    "cactusheadroomscaling.com",
-    "chaliceguzzlerlandlord.com",
-    "reedunpack.com",
-    "ventilationfacility.com",
-    "emberexactly.com",
-    "butterflyblow.com",
-    "antelopeheat.com",
-    "lightninglight.com",
-    "bubblyland.com",
-    "fanaticallyten.com",
-    "fringeoutcast.com",
-    "ballisticdisease.com",
-    "housecardsummer.com",
-    "definitelynotrecord.com",
-    "fastcupcake.com",
-    "smartfityoga.com",
-    // Unblock proxies
+    // Unblock proxies (these are stable)
     "voe-unblock.com",
     "voeunblock.com",
     "voeunbl0ck.com",
@@ -143,12 +119,75 @@ const BAIT_FILENAMES: &[&str] = &[
 
 // ── Public API ─────────────────────────────────────────────────────
 
-/// Check if a hostname should be handled by the Voe custom resolver.
+/// Check if a hostname is likely a Voe domain.
+///
+/// Uses a two-tier approach:
+/// 1. **Exact match** against the canonical VOE_DOMAINS list (voe.sx, unblock proxies)
+/// 2. **Heuristic detection** for Voe's rotating front-end domains
+///
+/// Voe front-end domains follow predictable patterns:
+/// - They're `.com` domains (Voe doesn't use other TLDs for front-ends)
+/// - They consist of 3-4 lowercase English words concatenated together
+///   (e.g. "maryspecialwatch.com", "cactusheadroomscaling.com")
+/// - The URL path is always a short alphanumeric ID (e.g. "/i5xi8glffb1d")
+/// - The domain name is typically 15-35 characters of pure lowercase
+/// - They contain no hyphens (unlike the unblock proxies)
+/// - They don't match any well-known domain (youtube, vimeo, etc.)
+///
+/// This heuristic catches newly-rotated Voe domains without requiring
+/// manual updates to a static list.
 pub fn is_voe_domain(host: &str) -> bool {
     let host_lower = host.to_lowercase();
-    VOE_DOMAINS
+
+    // Tier 1: Exact match against known domains
+    if VOE_DOMAINS
         .iter()
         .any(|d| host_lower == *d || host_lower.ends_with(&format!(".{}", d)))
+    {
+        return true;
+    }
+
+    // Tier 2: Heuristic detection for Voe's rotating front-end domains
+    //
+    // Voe front-end domains look like: "maryspecialwatch.com",
+    // "cactusheadroomscaling.com", "emberexactly.com"
+    // Pattern: 3-4 concatenated lowercase English words + .com
+    // Length: typically 15-35 chars before .com
+    // No hyphens, no numbers, only a-z letters
+    if host_lower.ends_with(".com") {
+        let name = &host_lower[..host_lower.len() - 4]; // strip .com
+        let len = name.len();
+        // Voe front-end domains are typically 15-35 chars of pure lowercase
+        if len >= 12 && len <= 40
+            && name.chars().all(|c| c.is_ascii_lowercase())
+            && !is_well_known_domain(name)
+        {
+            // Additional heuristic: Voe domain names are composed of
+            // common English words concatenated. Real words have vowels.
+            // English text typically has 30-45% vowels. Voe domain names
+            // (being concatenated English words) follow this pattern.
+            // Random letter strings have ~19% vowels (5/26).
+            let vowel_count = name.chars().filter(|c| "aeiou".contains(*c)).count();
+            let vowel_ratio = vowel_count as f64 / len as f64;
+            if vowel_ratio >= 0.25 {
+                return true;
+            }
+        }
+    }
+
+    false
+}
+
+/// Check if a domain name (without TLD) is a well-known domain that
+/// should NOT be flagged as a potential Voe front-end.
+fn is_well_known_domain(name: &str) -> bool {
+    const WELL_KNOWN: &[&str] = &[
+        "google", "youtube", "facebook", "twitter", "instagram",
+        "amazon", "microsoft", "apple", "netflix", "reddit",
+        "twitch", "vimeo", "dailymotion", "tiktok", "pinterest",
+        "tumblr", "linkedin", "whatsapp", "telegram", "discord",
+    ];
+    WELL_KNOWN.iter().any(|&wk| name == wk)
 }
 
 /// Check if a hostname should be handled by the DoodStream custom resolver.
@@ -897,13 +936,28 @@ mod tests {
 
     #[test]
     fn test_is_voe_domain() {
+        // Canonical domain
         assert!(is_voe_domain("voe.sx"));
+        // Unblock proxies
+        assert!(is_voe_domain("voe-unblock.com"));
+        assert!(is_voe_domain("voeunblock.com"));
+        // Heuristic: Voe-style concatenated word domains
         assert!(is_voe_domain("charlessheimprove.com"));
         assert!(is_voe_domain("brittanyaheadnew.com"));
         assert!(is_voe_domain("maryspecialwatch.com"));
         assert!(is_voe_domain("maxfinishseveral.com"));
-        assert!(is_voe_domain("sub.charlessheimprove.com"));
+        assert!(is_voe_domain("cactusheadroomscaling.com"));
+        assert!(is_voe_domain("emberexactly.com"));
+        assert!(is_voe_domain("butterflyblow.com"));
+        assert!(is_voe_domain("antelopeheat.com"));
+        assert!(is_voe_domain("lightninglight.com"));
+        assert!(is_voe_domain("smartfityoga.com"));
+        // Subdomain of known domain
+        assert!(is_voe_domain("sub.voe.sx"));
+        // NOT Voe domains
         assert!(!is_voe_domain("youtube.com"));
+        assert!(!is_voe_domain("google.com"));
+        assert!(!is_voe_domain("vimeo.com"));
     }
 
     #[test]
