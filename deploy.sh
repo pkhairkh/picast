@@ -63,19 +63,85 @@ if [[ "$SKIP_BUILD" == false ]]; then
     # The V3D GPU is present on Raspberry Pi 4B+ and is required for the
     # hevc feature (HEVC/H.265 hardware decode with V3D SAND→NV12 conversion).
     # HEVC with GPU is mandatory — deployment will abort if V3D is not found.
+    #
+    # Detection checks (in order of reliability):
+    # 1. /dev/dri/by-path/platform-v3d — udev symlink (may not exist if udev rules missing)
+    # 2. /sys/class/misc/v3d — misc device class (older kernels, pre-6.x)
+    # 3. /dev/dri/renderD128 — V3D render node (used by picast-v3d crate internally)
+    # 4. lsmod v3d — kernel module loaded but no device node yet
+    # 5. /sys/class/drm/card*/device/driver → v3d — DRI card backed by v3d driver
     V3D_FOUND=false
+
+    # Check 1: udev by-path symlink
     if [[ -e /dev/dri/by-path/platform-v3d ]]; then
-        echo "      V3D GPU device found."
+        echo "      V3D GPU: udev by-path device found (/dev/dri/by-path/platform-v3d)"
         V3D_FOUND=true
+    # Check 2: misc device class (older kernels)
     elif [[ -d /sys/class/misc/v3d ]]; then
-        echo "      V3D kernel module loaded."
+        echo "      V3D GPU: misc device class found (/sys/class/misc/v3d)"
+        V3D_FOUND=true
+    # Check 3: render node (used by V3D compute engine via EGL)
+    elif [[ -c /dev/dri/renderD128 ]]; then
+        # Verify it's actually V3D and not some other GPU
+        if [[ -e /sys/class/drm/renderD128/device/driver ]]; then
+            driver_link=$(readlink /sys/class/drm/renderD128/device/driver 2>/dev/null || true)
+            if [[ "$driver_link" == *"/v3d" ]]; then
+                echo "      V3D GPU: render node found (/dev/dri/renderD128, driver=v3d)"
+                V3D_FOUND=true
+            fi
+        fi
+        if [[ "$V3D_FOUND" == false ]]; then
+            # renderD128 exists but might not be v3d — check other render nodes
+            for render_node in /dev/dri/renderD*; do
+                [[ -c "$render_node" ]] || continue
+                base=$(basename "$render_node")
+                if [[ -e "/sys/class/drm/${base}/device/driver" ]]; then
+                    driver_link=$(readlink "/sys/class/drm/${base}/device/driver" 2>/dev/null || true)
+                    if [[ "$driver_link" == *"/v3d" ]]; then
+                        echo "      V3D GPU: render node found ($render_node, driver=v3d)"
+                        V3D_FOUND=true
+                        break
+                    fi
+                fi
+            done
+        fi
+    fi
+
+    # Check 4: kernel module loaded (even if no device node yet)
+    if [[ "$V3D_FOUND" == false ]] && lsmod 2>/dev/null | grep -q '^v3d'; then
+        echo "      V3D GPU: kernel module loaded (lsmod)"
+        V3D_FOUND=true
+    fi
+
+    # Check 5: any DRI card backed by v3d driver
+    if [[ "$V3D_FOUND" == false ]]; then
+        for card in /sys/class/drm/card*/device/driver; do
+            [[ -e "$card" ]] || continue
+            driver_link=$(readlink "$card" 2>/dev/null || true)
+            if [[ "$driver_link" == *"/v3d" ]]; then
+                echo "      V3D GPU: DRI card found with v3d driver ($card)"
+                V3D_FOUND=true
+                break
+            fi
+        done
+    fi
+
+    # Check 6: device tree (vc4-kms-v3d overlay enabled)
+    if [[ "$V3D_FOUND" == false ]] && [[ -d /proc/device-tree/v3d ]]; then
+        echo "      V3D GPU: device tree node found (/proc/device-tree/v3d)"
         V3D_FOUND=true
     fi
 
     if [[ "$V3D_FOUND" == false ]]; then
         echo "      ERROR: V3D GPU not detected. HEVC/H.265 hardware decode is MANDATORY"
         echo "      and requires the V3D GPU found on Raspberry Pi 4B+."
-        echo "      If this is a Pi 4, ensure 'v3d' is in /etc/modules-load.d/"
+        echo ""
+        echo "      Troubleshooting:"
+        echo "        1. Ensure 'dtoverlay=vc4-kms-v3d' is in /boot/config.txt (or /boot/firmware/config.txt)"
+        echo "        2. Run 'lsmod | grep v3d' to check if the kernel module is loaded"
+        echo "        3. Run 'dmesg | grep -i v3d' to check for V3D initialization messages"
+        echo "        4. Reboot after adding the dtoverlay"
+        echo ""
         echo "      Deployment aborted."
         exit 1
     fi
