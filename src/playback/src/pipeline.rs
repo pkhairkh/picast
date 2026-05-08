@@ -658,6 +658,10 @@ impl GstPipeline {
                             return;
                         }
                     };
+                    // Set DMA-BUF io modes on v4l2convert for zero-copy ISP
+                    // conversion (SAND128→NV12). Same as H.264 path.
+                    converter.set_property_from_str("output-io-mode", "dmabuf");
+                    converter.set_property_from_str("capture-io-mode", "dmabuf");
 
                     // Add elements to pipeline
                     if let Err(e) = pipe.add_many([&video_queue, &decoder, &converter]) {
@@ -711,6 +715,12 @@ impl GstPipeline {
                             return;
                         }
                     };
+                    // Set DMA-BUF io modes on v4l2convert for zero-copy ISP
+                    // conversion (SAND128→NV12). Without dmabuf, v4l2convert
+                    // copies buffers through system memory, which is slow and
+                    // wastes memory bandwidth on the Pi 4's shared bus.
+                    converter.set_property_from_str("output-io-mode", "dmabuf");
+                    converter.set_property_from_str("capture-io-mode", "dmabuf");
 
                     // Add elements to pipeline
                     if let Err(e) = pipe.add_many([&video_queue, &decoder, &converter]) {
@@ -957,7 +967,22 @@ impl GstPipeline {
             // which is preferable to stuttering — the human eye perceives a
             // dropped frame as a brief flicker, but late frames as choppy
             // motion. The pipeline clock continues advancing correctly.
-            .property("max-lateness", 20_000_000i64);
+            .property("max-lateness", 20_000_000i64)
+            // skip-vsync: when enabled, kmssink does NOT wait internally for
+            // vsync when using atomic DRM drivers (like vc4 on Pi 4). Without
+            // this, kmssink calls drmModeAtomicCommit with DRM_MODE_ATOMIC_ALLOW_MODESET
+            // and then waits for the vblank event before returning, which adds
+            // an extra vsync of latency (up to 16.7ms at 60Hz, 33.3ms at 30Hz).
+            // For the vc4 atomic driver, this double-vsync is unnecessary — the
+            // kernel's atomic commit already handles page-flip synchronization.
+            // Enabling skip-vsync reduces display latency by one full frame.
+            .property("skip-vsync", true)
+            // qos (Quality of Service): when enabled, kmssink generates QoS
+            // events upstream when frames are dropped or displayed late. This
+            // allows the decoder (v4l2h264dec/v4l2slh265dec) to adapt its
+            // output rate, reducing unnecessary decode work when the display
+            // can't keep up (e.g. during 4K@30Hz bandwidth starvation).
+            .property("qos", true);
 
         // The fd and driver-name properties are mutually exclusive in kmssink.
         // If we have a valid DRM fd from the DisplayManager, use it;
@@ -1321,6 +1346,8 @@ impl GstPipeline {
             // without CPU pixel processing.
 
             let v4l2convert = ElementFactory::make("v4l2convert")
+                .property_from_str("output-io-mode", "dmabuf")
+                .property_from_str("capture-io-mode", "dmabuf")
                 .build()
                 .map_err(|e| {
                     PlaybackError::PipelineCreation(format!("v4l2convert (ISP): {}", e))

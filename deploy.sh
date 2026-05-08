@@ -256,6 +256,86 @@ if [[ -f /sys/devices/system/cpu/cpu0/cpufreq/scaling_governor ]]; then
     fi
 fi
 
+# ── GPU memory & display optimization ─────────────────────────────────
+# The Pi 4 defaults to gpu_mem=76MB when not explicitly set in config.txt.
+# This is far too low for hardware video decode: V4L2 M2M decode buffers,
+# DMA buffers, DRM scanout buffers, and the HVS (Hardware Video Scaler)
+# all compete for GPU memory. With only 76MB, there isn't enough space
+# for all the buffers needed for smooth 720p+ video decode + display.
+#
+# gpu_mem=256 gives the VideoCore GPU 256MB of dedicated memory, which
+# is sufficient for 1080p decode buffers, ISP conversion buffers, and
+# DRM/KMS scanout. The remaining 3840MB is available for Linux (ARM).
+#
+# Additionally, 4K monitors connected to the Pi 4 run at 30Hz by default
+# because the vc4 HVS core clock (500 MHz) cannot sustain the pixel rate
+# for 4K@60Hz. The kernel explicitly warns:
+#   "The core clock cannot reach frequencies high enough to support 4k @ 60Hz."
+#   "Please change your config.txt file to add hdmi_enable_4kp60."
+#
+# Without hdmi_enable_4kp60, 25fps content on a 4K@30Hz display suffers
+# from cadence judder: the 25fps→30Hz mismatch causes a 2-1-2-1 pulldown
+# pattern where some frames display for 33ms and others for 66ms, creating
+# visible stuttering/lag. Enabling 4K@60Hz allows 25fps content to display
+# at even multiples (2 vsyncs per frame = 33.3ms, very close to 40ms),
+# and more importantly, the HVS core clock is raised to handle the pixel
+# rate, eliminating the bandwidth bottleneck that causes frame delivery
+# stalls even at 30Hz.
+#
+# Both settings require a reboot to take effect. We only add them if
+# they're not already present in config.txt to avoid appending duplicates.
+CONFIG_FILE=""
+if [[ -f /boot/firmware/config.txt ]]; then
+    CONFIG_FILE=/boot/firmware/config.txt
+elif [[ -f /boot/config.txt ]]; then
+    CONFIG_FILE=/boot/config.txt
+fi
+
+if [[ -n "$CONFIG_FILE" ]]; then
+    NEED_REBOOT=false
+
+    # Check and add gpu_mem=256
+    if ! grep -qE '^\s*gpu_mem\s*=' "$CONFIG_FILE" 2>/dev/null; then
+        echo ""
+        echo "      Adding gpu_mem=256 to $CONFIG_FILE for video decode buffer space..."
+        echo "      (Default 76MB is too low — 256MB provides sufficient GPU memory for"
+        echo "       V4L2 decode buffers, ISP conversion, and DRM scanout)"
+        echo "" | sudo tee -a "$CONFIG_FILE" > /dev/null
+        echo "# PiCast: GPU memory for hardware video decode (default 76MB is too low)" | sudo tee -a "$CONFIG_FILE" > /dev/null
+        echo "gpu_mem=256" | sudo tee -a "$CONFIG_FILE" > /dev/null
+        NEED_REBOOT=true
+    else
+        current_gpu_mem=$(grep -E '^\s*gpu_mem\s*=' "$CONFIG_FILE" | head -1 | sed 's/.*=\s*//')
+        echo "      GPU memory already configured: gpu_mem=${current_gpu_mem}MB"
+    fi
+
+    # Check and add hdmi_enable_4kp60
+    if ! grep -qE '^\s*hdmi_enable_4kp60\s*=' "$CONFIG_FILE" 2>/dev/null && \
+       ! grep -qE '^\s*hdmi_enable_4kp60\s*$' "$CONFIG_FILE" 2>/dev/null; then
+        echo ""
+        echo "      Adding hdmi_enable_4kp60 to $CONFIG_FILE for 4K@60Hz display support..."
+        echo "      (Without this, 4K monitors run at 30Hz, causing cadence judder on 25fps content"
+        echo "       and HVS bandwidth starvation. The kernel warns about this on every boot.)"
+        echo "" | sudo tee -a "$CONFIG_FILE" > /dev/null
+        echo "# PiCast: enable 4K@60Hz HDMI output (raises HVS core clock for 4K pixel rate)" | sudo tee -a "$CONFIG_FILE" > /dev/null
+        echo "hdmi_enable_4kp60" | sudo tee -a "$CONFIG_FILE" > /dev/null
+        NEED_REBOOT=true
+    else
+        echo "      4K@60Hz already enabled in config.txt ✓"
+    fi
+
+    if [[ "$NEED_REBOOT" == true ]]; then
+        echo ""
+        echo "      ⚠️  REBOOT REQUIRED: GPU memory and/or 4K@60Hz settings were added."
+        echo "      Run 'sudo reboot' for the changes to take effect."
+    fi
+else
+    echo "      WARNING: Could not find config.txt — GPU memory and 4K settings not applied."
+    echo "      For best video performance, add these to /boot/firmware/config.txt:"
+    echo "        gpu_mem=256"
+    echo "        hdmi_enable_4kp60"
+fi
+
 echo ""
 echo "=== Deploy complete ==="
 echo "  Binary:  $INSTALL_DIR/$INSTALL_AS"
