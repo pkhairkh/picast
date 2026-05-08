@@ -182,17 +182,19 @@ if [[ "$SKIP_BUILD" == false ]]; then
     fi
 
     # ── PulseAudio for Bluetooth audio ─────────────────────────────
-    # PiCast uses pulsesink for Bluetooth audio. PulseAudio's BlueZ
-    # module automatically routes audio to connected Bluetooth devices.
-    # Without PulseAudio, Bluetooth audio falls back to the BlueALSA
-    # ALSA plugin (which requires libasound_module_pcm_bluealsa.so and
-    # rarely works). This check ensures PulseAudio is installed.
+    # PiCast supports two Bluetooth audio paths:
+    #   1. PulseAudio (pulsesink): if PA is running, it handles BT routing
+    #   2. BlueALSA + alsasink: if PA is NOT running, uses the BlueALSA
+    #      ALSA plugin (bluealsa:DEV=...,PROFILE=a2dp). This is the default
+    #      path on Pi systems where PA is not started automatically.
+    # Install PulseAudio as an option, but don't require it — BlueALSA
+    # works without PA if the ALSA plugin library is installed.
     if command -v pactl &>/dev/null; then
-        echo "      PulseAudio: pactl found (Bluetooth audio supported)"
+        echo "      PulseAudio: pactl found (optional for Bluetooth audio)"
     else
-        echo "      Installing PulseAudio for Bluetooth audio support..."
+        echo "      Installing PulseAudio (optional, for Bluetooth audio)..."
         sudo apt-get install -y pulseaudio pulseaudio-module-bluetooth 2>/dev/null || \
-            echo "      WARNING: Could not install PulseAudio — Bluetooth audio may not work"
+            echo "      WARNING: Could not install PulseAudio — Bluetooth audio will use BlueALSA instead"
     fi
 
     (cd "$REPO_DIR" && cargo build --release --features hw,hevc)
@@ -225,6 +227,35 @@ echo "[4/4] Restarting picast service..."
 sudo systemctl restart picast
 sleep 1
 sudo systemctl --no-pager status picast || true
+
+# ── CPU governor: performance ─────────────────────────────────────────
+# On Raspberry Pi 4B+, the default CPU governor is "ondemand", which keeps
+# the ARM clock at 800 MHz and only scales up under heavy CPU load.  This
+# is catastrophic for hardware video decode: V4L2 M2M decode uses very
+# little CPU (the GPU/VPU does the work), so ondemand never ramps up.
+# But the memory bus speed is tied to the ARM clock — at 800 MHz the bus
+# is too slow for DMA buffer transfers, causing decode stalls and low FPS.
+#
+# Setting the governor to "performance" locks the ARM clock at 1500 MHz,
+# ensuring the memory bus runs at full speed for V4L2 DMA throughput.
+# This also persists across reboots via cpufrequtils.
+if [[ -f /sys/devices/system/cpu/cpu0/cpufreq/scaling_governor ]]; then
+    current_gov=$(cat /sys/devices/system/cpu/cpu0/cpufreq/scaling_governor 2>/dev/null || echo "unknown")
+    if [[ "$current_gov" != "performance" ]]; then
+        echo ""
+        echo "      Setting CPU governor to 'performance' for video decode throughput..."
+        echo "      (Current: $current_gov → 1500 MHz memory bus for V4L2 DMA)"
+        # Set immediately
+        for cpu in /sys/devices/system/cpu/cpu*/cpufreq/scaling_governor; do
+            echo performance | sudo tee "$cpu" > /dev/null 2>&1 || true
+        done
+        # Persist across reboots
+        echo 'GOVERNOR="performance"' | sudo tee /etc/default/cpufrequtils > /dev/null 2>&1 || true
+    else
+        echo "      CPU governor already set to 'performance' ✓"
+    fi
+fi
+
 echo ""
 echo "=== Deploy complete ==="
 echo "  Binary:  $INSTALL_DIR/$INSTALL_AS"

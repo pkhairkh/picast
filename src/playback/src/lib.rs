@@ -277,24 +277,45 @@ fn detect_audio_output() -> (String, String) {
         }
     }
 
-    // Priority 1: Bluetooth device — use pulsesink
+    // Priority 1: Bluetooth device
     //
-    // Bluetooth audio on Pi requires PulseAudio. The BlueALSA ALSA plugin
-    // device string (`bluealsa:DEV=XX:XX:XX:XX:XX:XX,PROFILE=a2dp`) does NOT
-    // work with GStreamer's alsasink unless the BlueALSA ALSA plugin library
-    // (`libasound_module_pcm_bluealsa.so`) is installed, which it rarely is.
+    // Bluetooth audio on Pi can be routed through two paths:
     //
-    // PulseAudio handles Bluetooth routing automatically via its BlueZ
-    // module. When a Bluetooth device is connected and set as the default
-    // PulseAudio sink, pulsesink routes audio to it without any explicit
-    // device configuration.
+    // 1. PulseAudio (pulsesink): PA's module-bluez5-discover handles BT
+    //    routing automatically. When a BT device is connected and set as
+    //    the default PA sink, pulsesink routes to it without configuration.
+    //
+    // 2. BlueALSA + alsasink: When PulseAudio is NOT running, the BlueALSA
+    //    daemon provides an ALSA PCM plugin (`bluealsa:DEV=...,PROFILE=a2dp`)
+    //    that alsasink can use directly. This requires the BlueALSA ALSA
+    //    plugin library (`libasound_module_pcm_bluealsa.so`) which is
+    //    installed by the `bluealsa` package on Debian/Raspbian.
     //
     // We detect Bluetooth by checking for BlueALSA cards in /proc/asound
-    // OR by checking if the bluealsa daemon is running + a BT device is
+    // OR by checking if the BlueALSA daemon is running + a BT device is
     // connected.
     let has_bt_card = !bt_cards.is_empty();
-    let bluealsa_running = std::path::Path::new("/var/run/bluealsa").exists()
+
+    // Detect BlueALSA daemon. On Debian Bookworm, the BlueALSA daemon may
+    // not create socket files at /var/run/bluealsa or /run/bluealsa (it
+    // uses D-Bus instead). We check multiple detection methods:
+    //   1. Run directory (older BlueALSA versions)
+    //   2. systemctl is-active (reliable on systemd systems)
+    let bluealsa_socket = std::path::Path::new("/var/run/bluealsa").exists()
         || std::path::Path::new("/run/bluealsa").exists();
+    let bluealsa_systemd = std::process::Command::new("systemctl")
+        .args(["is-active", "bluealsa"])
+        .output()
+        .map(|o| String::from_utf8_lossy(&o.stdout).trim() == "active")
+        .unwrap_or(false);
+    let bluealsa_running = bluealsa_socket || bluealsa_systemd;
+
+    if bluealsa_running && !bluealsa_socket {
+        tracing::debug!(
+            "audio auto-detect: BlueALSA daemon active via systemctl but no /run/bluealsa socket — \
+             likely using D-Bus mode (Debian Bookworm+)"
+        );
+    }
 
     // Check for connected Bluetooth audio devices
     let has_connected_bt = (has_bt_card || bluealsa_running) && {
@@ -338,8 +359,11 @@ fn detect_audio_output() -> (String, String) {
             // auto-routes to the connected Bluetooth device.
             return ("pulsesink".into(), String::new());
         } else {
-            // PulseAudio not available. Try the BlueALSA ALSA plugin as a
-            // last resort — it might work if the plugin library is installed.
+            // PulseAudio not available. Use the BlueALSA ALSA plugin with
+            // alsasink. The BlueALSA ALSA plugin (`bluealsa:DEV=...,PROFILE=a2dp`)
+            // is provided by the `bluealsa` package and works with alsasink
+            // without PulseAudio. This is the standard BT audio path on Pi
+            // systems without PulseAudio running.
             if let Ok(output) = std::process::Command::new("bluetoothctl")
                 .args(["devices", "Connected"])
                 .output()
@@ -350,10 +374,11 @@ fn detect_audio_output() -> (String, String) {
                             let parts: Vec<&str> = rest.splitn(2, ' ').collect();
                             if parts.len() >= 2 {
                                 let bt_addr = parts[0];
-                                tracing::warn!(
+                                tracing::info!(
                                     bt_address = %bt_addr,
-                                    "audio auto-detect: Bluetooth device connected but PulseAudio NOT available. \
-                                     Trying BlueALSA ALSA plugin (requires libasound_module_pcm_bluealsa.so)"
+                                    bt_name = parts[1],
+                                    "audio auto-detect: Bluetooth device connected + BlueALSA available (no PulseAudio) — \
+                                     using alsasink with BlueALSA ALSA plugin"
                                 );
                                 return ("alsasink".into(), format!("bluealsa:DEV={},PROFILE=a2dp", bt_addr));
                             }
@@ -362,7 +387,7 @@ fn detect_audio_output() -> (String, String) {
                 }
             }
             tracing::warn!(
-                "audio auto-detect: Bluetooth device connected but neither PulseAudio nor BlueALSA plugin available — \
+                "audio auto-detect: Bluetooth device connected but could not get BT address — \
                  falling back to HDMI"
             );
         }
