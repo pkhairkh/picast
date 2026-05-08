@@ -7,11 +7,11 @@
 //! ## Pipeline Topology (H.264)
 //!
 //! ```text
-//! ┌──────────┐    ┌────────┐    ┌──────────┐    ┌───────┐    ┌──────────┐    ┌────────────────────┐    ┌──────────────┐
-//! │souphttpsrc│───►│queue2  │───►│parsebin  │──┬►│queue  │───►│h264parse │───►│v4l2h264dec(dmabuf)│───►│kmssink       │
-//! │(SOCKS5h) │    │(buffer)│    │(demux)   │  │ │       │    │          │    │(zero-copy HW dec) │    │(DRM/KMS,     │
-//! └──────────┘    └────────┘    └──────────┘  │ └───────┘    └──────────┘    └────────────────────┘    │ max-lateness) │
-//!                                               │                                                         └──────────────┘
+//! ┌──────────┐    ┌────────┐    ┌──────────┐    ┌───────┐    ┌────────────────────┐    ┌────────────┐    ┌──────────────┐
+//! │souphttpsrc│───►│queue2  │───►│parsebin  │──┬►│queue  │───►│v4l2h264dec(dmabuf) │───►│v4l2convert │───►│kmssink       │
+//! │(SOCKS5h) │    │(buffer)│    │(demux)   │  │ │       │    │(zero-copy HW dec)  │    │(ISP:       │    │(DRM/KMS,     │
+//! └──────────┘    └────────┘    └──────────┘  │ └───────┘    └────────────────────┘    │SAND→NV12)  │    │ max-lateness) │
+//!                                               │                                                   └────────────┘    └──────────────┘
 //!                                               │ ┌───────┐    ┌──────────────┐    ┌──────────────┐    ┌────────┐    ┌─────────────────────┐
 //!                                               └►│queue  │───►│audioconvert  │───►│audioresample │───►│volume │───►│alsasink             │
 //!                                                 │       │    │              │    │              │    │        │    │(device=plughw:C,D)  │
@@ -582,7 +582,7 @@ impl GstPipeline {
                 // Build the appropriate decoder chain on-the-fly based on
                 // the detected media type:
                 //
-                //   H.264 + hw_accel: queue → v4l2h264dec(dmabuf) → kmssink
+                //   H.264 + hw_accel: queue → v4l2h264dec(dmabuf) → v4l2convert(ISP) → kmssink
                 //   H.265 + hw_accel: queue → v4l2slh265dec → v4l2convert(ISP) → kmssink
                 //   Software decode:   queue → avdec_h264 → videoconvert → kmssink
                 //
@@ -684,6 +684,14 @@ impl GstPipeline {
 
                 } else if !is_h265 && hw_accel {
                     // ── H.264 hardware decode ───────────────────────
+                    //
+                    // v4l2h264dec with capture-io-mode=dmabuf may output
+                    // SAND128 (NV12_64Z32) tiled format on Pi 4, which
+                    // kmssink cannot scan out directly. v4l2convert uses
+                    // the bcm2835-ISP hardware to convert SAND→NV12 (or
+                    // passthrough if already NV12). This matches the HEVC
+                    // decode path which also uses v4l2convert for the
+                    // same reason.
 
                     let decoder = match ElementFactory::make("v4l2h264dec").build() {
                         Ok(d) => d,
@@ -696,26 +704,35 @@ impl GstPipeline {
                     decoder.set_property_from_str("output-io-mode", "dmabuf");
                     decoder.set_property_from_str("capture-io-mode", "dmabuf");
 
+                    let converter = match ElementFactory::make("v4l2convert").build() {
+                        Ok(c) => c,
+                        Err(e) => {
+                            tracing::error!(error = %e, "v4l2convert not available for H.264 path");
+                            return;
+                        }
+                    };
+
                     // Add elements to pipeline
-                    if let Err(e) = pipe.add_many([&video_queue, &decoder]) {
+                    if let Err(e) = pipe.add_many([&video_queue, &decoder, &converter]) {
                         tracing::error!(error = %e, "failed to add H.264 elements to pipeline");
                         return;
                     }
 
-                    // Link: video_queue → v4l2h264dec → kmssink
-                    if let Err(e) = Element::link_many([&video_queue, &decoder]) {
+                    // Link: video_queue → v4l2h264dec → v4l2convert(ISP) → kmssink
+                    if let Err(e) = Element::link_many([&video_queue, &decoder, &converter]) {
                         tracing::error!(error = %e, "failed to link H.264 decode chain");
                         return;
                     }
-                    if let Err(e) = decoder.link(&ksink) {
-                        tracing::error!(error = ?e, "failed to link v4l2h264dec → kmssink");
+                    if let Err(e) = converter.link(&ksink) {
+                        tracing::error!(error = ?e, "failed to link v4l2convert → kmssink");
                         return;
                     }
 
                     let _ = video_queue.set_state(State::Paused);
                     let _ = decoder.set_state(State::Paused);
+                    let _ = converter.set_state(State::Paused);
 
-                    tracing::info!("H.264 video chain: video_queue → v4l2h264dec(dmabuf) → kmssink");
+                    tracing::info!("H.264 video chain: video_queue → v4l2h264dec(dmabuf) → v4l2convert(ISP) → kmssink");
 
                 } else {
                     // ── Software decode fallback ────────────────────
