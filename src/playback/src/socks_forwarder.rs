@@ -306,8 +306,8 @@ async fn handle_connect(
     // the browser streams fluently through Tor because it uses large read
     // buffers, but PiCast's souphttpsrc receives data in tiny 8 KB chunks
     // through the forwarder, causing buffer underruns and low FPS.
-    let (cr, mut cw) = client.into_split();
-    let (rr, mut rw) = remote.into_split();
+    let (cr, cw) = client.into_split();
+    let (rr, rw) = remote.into_split();
 
     // Client → Remote (souphttpsrc → Tor): only the write side needs buffering
     let mut cr = tokio::io::BufReader::with_capacity(256 * 1024, cr);
