@@ -352,8 +352,8 @@ impl GstPipeline {
             .property("max-size-bytes", 100_000_000u32) // 100 MB — large byte buffer for Tor
             .property("max-size-time", 60_000_000_000u64) // 60 seconds of media data
             .property("use-buffering", true)
-            .property("high-percent", 60i32)  // start playing when 60% full (reduced from 80% to shorten refill wait on slow Tor links)
-            .property("low-percent", 5i32)    // pause when buffer drops to 5%
+            .property("high-percent", 95i32)  // start playing when 95% full — wait longer during initial buffering to build a deep buffer before consuming
+            .property("low-percent", 2i32)    // pause when buffer drops to 2% — avoid premature pause/resume cycles on slow Tor links
             .build()
             .map_err(|e| PlaybackError::PipelineCreation(format!("queue2: {}", e)))?;
 
@@ -395,12 +395,37 @@ impl GstPipeline {
             .build()
             .map_err(|e| PlaybackError::PipelineCreation(format!("audio_queue: {}", e)))?;
 
-        let audio_decoder = ElementFactory::make("avdec_aac")
+        // ── Audio decoder ──────────────────────────────────────────
+        //
+        // We use `decodebin3` for audio decoding instead of hardcoding a single
+        // decoder. Video CDNs serve audio in various formats:
+        //   - AAC (audio/mpeg, mpegversion=4) — most common in MP4 containers
+        //   - MP3 (audio/mpeg, mpegversion=1) — common in HLS streams
+        //   - Opus (audio/x-opus) — common in WebM/DASH
+        //   - Vorbis (audio/x-vorbis) — common in WebM
+        //
+        // Previously, only `avdec_aac` was used, which meant MP3 and Opus audio
+        // streams failed to link (caps mismatch) → fakesink fallback → no audio.
+        //
+        // `decodebin3` auto-detects the codec and plugs the right decoder.
+        // It handles all formats that have an installed GStreamer decoder plugin.
+        // If decodebin3 is not available (unlikely), we fall back to avdec_aac.
+        //
+        // The `audio_queue → decodebin3 → audioconvert` chain means:
+        //   - parsebin outputs encoded audio on its pad
+        //   - audio_queue buffers encoded audio
+        //   - decodebin3 decodes to raw PCM
+        //   - audioconvert handles format conversion to the sink's requirements
+        let audio_decoder = ElementFactory::make("decodebin3")
             .build()
-            .or_else(|_| ElementFactory::make("fdkaacdec").build())
+            .or_else(|_| ElementFactory::make("decodebin").build())
+            .or_else(|_| {
+                tracing::warn!("decodebin3/decodebin not available — falling back to avdec_aac (AAC only)");
+                ElementFactory::make("avdec_aac").build()
+                    .or_else(|_| ElementFactory::make("fdkaacdec").build())
+            })
             .map_err(|e| {
-                tracing::warn!("no AAC decoder available (avdec_aac or fdkaacdec) — audio will be disabled: {}", e);
-                // Non-fatal: we'll add a fakesink instead
+                tracing::warn!("no audio decoder available — audio will be disabled: {}", e);
                 e
             }).ok();
 
@@ -485,18 +510,71 @@ impl GstPipeline {
         })?;
 
         // Link audio chain.
-        // If we have an audio decoder: audio_queue → avdec_aac → audioconvert → audioresample → volume → alsasink
-        // If no decoder available:        audio_queue → audioconvert → audioresample → volume → alsasink
-        //   (will fail caps negotiation for encoded audio, but the fakesink
-        //    fallback in the pad-added handler prevents pipeline death)
+        //
+        // With decodebin3/decodebin: audio_queue → decodebin3 [→ dynamic src pad] → audioconvert
+        //   decodebin3 creates source pads dynamically, so we can't link it to
+        //   audioconvert at construction time. We connect to its "pad-added" signal
+        //   and link the new pad to audioconvert's sink.
+        //
+        // With avdec_aac (fallback): audio_queue → avdec_aac → audioconvert
+        //
+        // Both paths continue: audioconvert → audioresample → volume → alsasink
+        let uses_decodebin = audio_decoder.as_ref().map(|d| {
+            let factory_name = d.factory().map(|f: gstreamer::ElementFactory| f.name()).unwrap_or_default();
+            factory_name == "decodebin3" || factory_name == "decodebin"
+        }).unwrap_or(false);
+
         if let Some(ref dec) = audio_decoder {
-            Element::link_many([&audio_queue, dec, &audioconvert, &audioresample, &volume, &audiosink])
-                .map_err(|e| PlaybackError::PipelineCreation(format!("link audio chain (with decoder): {}", e)))?;
-            tracing::info!("audio chain: audio_queue → avdec_aac → audioconvert → audioresample → volume → alsasink");
+            if uses_decodebin {
+                // Link audio_queue → decodebin3 only (decodebin3's output is
+                // linked dynamically via pad-added signal below)
+                Element::link_many([&audio_queue, dec])
+                    .map_err(|e| PlaybackError::PipelineCreation(format!("link audio_queue→decodebin: {}", e)))?;
+
+                // Connect decodebin3's pad-added signal to link its output
+                // to audioconvert. decodebin3 creates source pads after
+                // detecting the input codec.
+                let audioconvert_weak = audioconvert.downgrade();
+                dec.connect_pad_added(move |_dec, pad| {
+                    let ac = match audioconvert_weak.upgrade() {
+                        Some(ac) => ac,
+                        None => return,
+                    };
+                    let sink_pad = ac.static_pad("sink")
+                        .expect("audioconvert should have a sink pad");
+                    if sink_pad.is_linked() {
+                        return; // already linked
+                    }
+                    match pad.link(&sink_pad) {
+                        Ok(_) => tracing::info!(
+                            caps = %pad.current_caps().map(|c| c.to_string()).unwrap_or_default(),
+                            "linked audio decodebin → audioconvert"
+                        ),
+                        Err(e) => tracing::error!(
+                            error = ?e,
+                            "failed to link audio decodebin → audioconvert"
+                        ),
+                    }
+                });
+
+                tracing::info!("audio chain: audio_queue → decodebin3 → (dynamic) → audioconvert → audioresample → volume → {}", config.audio_sink);
+            } else {
+                // Static decoder (avdec_aac) — link all elements at once
+                Element::link_many([&audio_queue, dec, &audioconvert, &audioresample, &volume, &audiosink])
+                    .map_err(|e| PlaybackError::PipelineCreation(format!("link audio chain (with decoder): {}", e)))?;
+                tracing::info!("audio chain: audio_queue → avdec_aac → audioconvert → audioresample → volume → {}", config.audio_sink);
+            }
         } else {
             Element::link_many([&audio_queue, &audioconvert, &audioresample, &volume, &audiosink])
                 .map_err(|e| PlaybackError::PipelineCreation(format!("link audio chain (no decoder): {}", e)))?;
             tracing::warn!("audio chain has no decoder — encoded audio streams will be dropped");
+        }
+
+        // Link the tail of the audio chain: audioconvert → audioresample → volume → audiosink
+        // (only needed for decodebin3 path — static decoder path already linked above)
+        if uses_decodebin {
+            Element::link_many([&audioconvert, &audioresample, &volume, &audiosink])
+                .map_err(|e| PlaybackError::PipelineCreation(format!("link audio tail: {}", e)))?;
         }
 
         // ── Dynamic pad linking (parsebin → video/audio) ────────────
@@ -606,8 +684,14 @@ impl GstPipeline {
                 }
 
                 // Create video queue (shared by all decode paths)
+                // 200 buffers at 25fps = 8 seconds of video buffer. This is
+                // critical for smooth playback on Tor-routed streams where
+                // network throughput is variable. With only 60 buffers (2.4s),
+                // the queue starves quickly during throughput dips, causing
+                // the decoder to stall and produce low FPS.
                 let video_queue = match ElementFactory::make("queue")
-                    .property("max-size-buffers", 60u32)
+                    .property("max-size-buffers", 200u32)
+                    .property("max-size-time", 5_000_000_000u64) // 5 seconds time-based limit
                     .build()
                 {
                     Ok(q) => q,
@@ -909,7 +993,19 @@ impl GstPipeline {
     fn build_kmssink(config: &PipelineConfig) -> Result<Element, PlaybackError> {
         let mut kmssink_builder = ElementFactory::make(&config.video_sink)
             .property("can-scale", true)
-            .property("max-lateness", -1i64); // unlimited — never drop late buffers on Pi
+            // max-lateness controls how late a buffer can be before the sink
+            // drops it. Setting -1 (unlimited) means kmssink NEVER drops late
+            // buffers, which causes stuttering on Tor-routed streams: when
+            // throughput dips, buffers arrive late, and displaying them pushes
+            // the pipeline clock behind real-time. This compounds: each late
+            // buffer makes subsequent buffers even later.
+            //
+            // 20ms (20_000_000ns) allows the sink to stay tightly synced to
+            // real-time. Buffers arriving more than 20ms late are dropped,
+            // which is preferable to stuttering — the human eye perceives a
+            // dropped frame as a brief flicker, but late frames as choppy
+            // motion. The pipeline clock continues advancing correctly.
+            .property("max-lateness", 20_000_000i64);
 
         // The fd and driver-name properties are mutually exclusive in kmssink.
         // If we have a valid DRM fd from the DisplayManager, use it;
@@ -976,7 +1072,8 @@ impl GstPipeline {
     #[allow(dead_code)]
     fn build_hw_video_bin(config: &PipelineConfig) -> Result<(Element, Element), PlaybackError> {
         let video_queue = ElementFactory::make("queue")
-            .property("max-size-buffers", 60u32)
+            .property("max-size-buffers", 200u32)
+            .property("max-size-time", 5_000_000_000u64)
             .build()
             .map_err(|e| {
                 PlaybackError::PipelineCreation(format!("video_queue: {}", e))
@@ -1119,7 +1216,8 @@ impl GstPipeline {
     #[allow(dead_code)]
     fn build_hevc_video_bin(config: &PipelineConfig) -> Result<(Element, Element, Option<V3dComputeEngine>), PlaybackError> {
         let video_queue = ElementFactory::make("queue")
-            .property("max-size-buffers", 60u32)
+            .property("max-size-buffers", 200u32)
+            .property("max-size-time", 5_000_000_000u64)
             .build()
             .map_err(|e| {
                 PlaybackError::PipelineCreation(format!("hevc video_queue: {}", e))
@@ -1302,7 +1400,8 @@ impl GstPipeline {
     #[allow(dead_code)]
     fn build_sw_video_bin(config: &PipelineConfig) -> Result<(Element, Element), PlaybackError> {
         let video_queue = ElementFactory::make("queue")
-            .property("max-size-buffers", 60u32)
+            .property("max-size-buffers", 200u32)
+            .property("max-size-time", 5_000_000_000u64)
             .build()
             .map_err(|e| {
                 PlaybackError::PipelineCreation(format!("sw video_queue: {}", e))

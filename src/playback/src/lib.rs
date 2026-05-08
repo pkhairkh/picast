@@ -163,15 +163,17 @@ pub struct PipelineConfig {
 
 impl Default for PipelineConfig {
     fn default() -> Self {
+        let (audio_sink, audio_device) = detect_audio_output();
         Self {
             video_sink: "kmssink".into(),
-            audio_sink: "alsasink".into(),
-            // Auto-detect HDMI audio device for Raspberry Pi 4.
-            // The default ALSA device (empty string) typically routes to the
-            // 3.5mm headphone jack, not HDMI.  On Pi 4, HDMI audio is usually
-            // card 1 (vc4hdmi0).  If the detection fails, we fall back to
-            // "plughw:1,0" which is the most common HDMI device on Pi 4.
-            audio_device: detect_audio_device(),
+            audio_sink,
+            // Auto-detect audio device for Raspberry Pi 4.
+            // detect_audio_output() returns the correct sink element and
+            // device string based on what's available:
+            //   Bluetooth → pulsesink (PulseAudio handles BT routing)
+            //   HDMI      → alsasink with plughw:<card>,0
+            //   Fallback  → alsasink with plughw:1,0
+            audio_device,
             buffer_duration_ms: 3000,
             hw_accel: true,
             volume: 1.0,
@@ -182,30 +184,43 @@ impl Default for PipelineConfig {
     }
 }
 
-/// Auto-detect the best audio output device on Raspberry Pi.
+/// Auto-detect the best audio output configuration for Raspberry Pi.
 ///
-/// Detection priority (highest to lowest):
-/// 1. **Bluetooth (BlueALSA)** — if a Bluetooth audio device is connected,
-///    this is almost always what the user wants. BlueALSA exposes the
-///    device as an ALSA pcm device (e.g. `plughw:CARD=XXXX,DEV=0`).
-/// 2. **HDMI** — common when the Pi is connected to a TV/monitor.
-/// 3. **Fallback** — `plughw:1,0` which is the most common HDMI device
-///    on Pi 4.
+/// Returns a `(audio_sink, audio_device)` tuple where:
+/// - `audio_sink` is the GStreamer element name ("pulsesink" or "alsasink")
+/// - `audio_device` is the device string (for alsasink: "plughw:C,D"; for
+///   pulsesink: empty string to use PulseAudio's default sink)
+///
+/// **Detection priority (highest to lowest):**
+///
+/// 1. **Bluetooth** — uses `pulsesink` (PulseAudio). PulseAudio on Pi
+///    automatically routes to BlueZ-connected Bluetooth devices. This is
+///    the ONLY reliable way to get Bluetooth audio on Pi — `alsasink` with
+///    BlueALSA device strings (`bluealsa:DEV=...`) requires the BlueALSA
+///    ALSA plugin library which is rarely installed, and direct ALSA
+///    `plughw:C,D` doesn't work because BlueALSA cards are virtual PCM
+///    plugins, not hardware devices.
+///
+/// 2. **HDMI** — uses `alsasink` with `plughw:<card>,0`. Common when the
+///    Pi is connected to a TV/monitor with speakers.
+///
+/// 3. **Fallback** — `alsasink` with `plughw:1,0`, which is the most
+///    common HDMI device on Pi 4.
 ///
 /// On Pi 4, the typical ALSA card layout is:
 /// - Card 0: Headphones (bcm2835, 3.5mm jack)
 /// - Card 1: vc4hdmi0 (HDMI 0 audio)
 /// - Card 2: vc4hdmi1 (HDMI 1 audio, if dual HDMI)
 /// - Card N: Bluetooth device (name varies by headset/speaker)
-fn detect_audio_device() -> String {
+fn detect_audio_output() -> (String, String) {
     let cards_content = match std::fs::read_to_string("/proc/asound/cards") {
         Ok(c) => c,
         Err(_) => {
             tracing::info!(
                 "audio auto-detect: /proc/asound/cards not available — \
-                 defaulting to plughw:1,0 (HDMI on Pi 4)"
+                 defaulting to alsasink with plughw:1,0 (HDMI on Pi 4)"
             );
-            return "plughw:1,0".into();
+            return ("alsasink".into(), "plughw:1,0".into());
         },
     };
 
@@ -262,82 +277,94 @@ fn detect_audio_device() -> String {
         }
     }
 
-    // Priority 1: Bluetooth device (from /proc/asound — BlueALSA plugin cards)
+    // Priority 1: Bluetooth device — use pulsesink
     //
-    // BlueALSA devices that appear in /proc/asound/cards are NOT real
-    // ALSA hardware devices — they're PCM plugin devices. Using plughw:<idx>,0
-    // won't work because BlueALSA doesn't register a real ALSA hardware driver.
-    // Instead, we must use the BlueALSA plugin device string:
-    //   bluealsa:DEV=XX:XX:XX:XX:XX:XX,PROFILE=a2dp
+    // Bluetooth audio on Pi requires PulseAudio. The BlueALSA ALSA plugin
+    // device string (`bluealsa:DEV=XX:XX:XX:XX:XX:XX,PROFILE=a2dp`) does NOT
+    // work with GStreamer's alsasink unless the BlueALSA ALSA plugin library
+    // (`libasound_module_pcm_bluealsa.so`) is installed, which it rarely is.
     //
-    // To construct this string, we need the BT MAC address, which we get
-    // via bluetoothctl.
-    if let Some((card_idx, name)) = bt_cards.first() {
-        // Try to find the BT MAC address via bluetoothctl so we can
-        // construct the proper BlueALSA device string.
-        if let Ok(output) = std::process::Command::new("bluetoothctl")
-            .args(["devices", "Connected"])
-            .output()
-        {
-            if let Ok(stdout) = String::from_utf8(output.stdout) {
-                for line in stdout.lines() {
-                    // Format: "Device XX:XX:XX:XX:XX:XX Device Name"
-                    if let Some(rest) = line.strip_prefix("Device ") {
-                        let parts: Vec<&str> = rest.splitn(2, ' ').collect();
-                        if parts.len() >= 2 {
-                            let bt_addr = parts[0];
-                            tracing::info!(
-                                card_index = card_idx,
-                                card_name = %name,
-                                bt_address = %bt_addr,
-                                "audio auto-detect: found Bluetooth audio card — using BlueALSA plugin device"
-                            );
-                            return format!("bluealsa:DEV={},PROFILE=a2dp", bt_addr);
-                        }
-                    }
-                }
-            }
-        }
-        // Fallback: if we can't find the BT address, log a warning and
-        // fall through to other detection methods. Using plughw:<idx>,0
-        // for a BlueALSA card will NOT work.
-        tracing::warn!(
-            card_index = card_idx,
-            card_name = %name,
-            "audio auto-detect: found Bluetooth card but couldn't determine BT address via bluetoothctl — \
-             skipping (plughw won't work for BlueALSA)"
-        );
-    }
-
-    // Priority 1b: BlueALSA plugin (not visible in /proc/asound)
-    // BlueALSA uses a special ALSA plugin device string like
-    // "bluealsa:DEV=XX:XX:XX:XX:XX:XX,PROFILE=a2dp". These don't
-    // appear in /proc/asound/cards, so we detect them by checking
-    // for the bluealsa daemon and listing connected BT devices.
+    // PulseAudio handles Bluetooth routing automatically via its BlueZ
+    // module. When a Bluetooth device is connected and set as the default
+    // PulseAudio sink, pulsesink routes audio to it without any explicit
+    // device configuration.
+    //
+    // We detect Bluetooth by checking for BlueALSA cards in /proc/asound
+    // OR by checking if the bluealsa daemon is running + a BT device is
+    // connected.
+    let has_bt_card = !bt_cards.is_empty();
     let bluealsa_running = std::path::Path::new("/var/run/bluealsa").exists()
         || std::path::Path::new("/run/bluealsa").exists();
-    if bluealsa_running {
-        // Try to find a connected Bluetooth audio device
+
+    // Check for connected Bluetooth audio devices
+    let has_connected_bt = (has_bt_card || bluealsa_running) && {
         if let Ok(output) = std::process::Command::new("bluetoothctl")
             .args(["devices", "Connected"])
             .output()
         {
             if let Ok(stdout) = String::from_utf8(output.stdout) {
-                for line in stdout.lines() {
-                    // Format: "Device XX:XX:XX:XX:XX:XX Device Name"
-                    if let Some(rest) = line.strip_prefix("Device ") {
-                        let parts: Vec<&str> = rest.splitn(2, ' ').collect();
-                        if parts.len() >= 2 {
-                            let bt_addr = parts[0];
-                            tracing::info!(
-                                bt_address = %bt_addr,
-                                "audio auto-detect: found connected Bluetooth device via BlueALSA"
-                            );
-                            return format!("bluealsa:DEV={},PROFILE=a2dp", bt_addr);
+                stdout.lines().any(|line| line.starts_with("Device "))
+            } else {
+                false
+            }
+        } else {
+            false
+        }
+    };
+
+    if has_connected_bt {
+        // Check if PulseAudio is actually available before committing to
+        // pulsesink. If PA isn't running, pulsesink will fail at pipeline
+        // creation time, and the user gets no audio at all.
+        let pulse_available = std::process::Command::new("pactl")
+            .args(["info"])
+            .output()
+            .map(|o| o.status.success())
+            .unwrap_or(false);
+
+        if pulse_available {
+            if let Some((card_idx, name)) = bt_cards.first() {
+                tracing::info!(
+                    card_index = card_idx,
+                    card_name = %name,
+                    "audio auto-detect: Bluetooth device connected + PulseAudio available — using pulsesink"
+                );
+            } else {
+                tracing::info!(
+                    "audio auto-detect: BlueALSA daemon running + BT device connected + PulseAudio available — using pulsesink"
+                );
+            }
+            // pulsesink with no device = PulseAudio default sink, which
+            // auto-routes to the connected Bluetooth device.
+            return ("pulsesink".into(), String::new());
+        } else {
+            // PulseAudio not available. Try the BlueALSA ALSA plugin as a
+            // last resort — it might work if the plugin library is installed.
+            if let Ok(output) = std::process::Command::new("bluetoothctl")
+                .args(["devices", "Connected"])
+                .output()
+            {
+                if let Ok(stdout) = String::from_utf8(output.stdout) {
+                    for line in stdout.lines() {
+                        if let Some(rest) = line.strip_prefix("Device ") {
+                            let parts: Vec<&str> = rest.splitn(2, ' ').collect();
+                            if parts.len() >= 2 {
+                                let bt_addr = parts[0];
+                                tracing::warn!(
+                                    bt_address = %bt_addr,
+                                    "audio auto-detect: Bluetooth device connected but PulseAudio NOT available. \
+                                     Trying BlueALSA ALSA plugin (requires libasound_module_pcm_bluealsa.so)"
+                                );
+                                return ("alsasink".into(), format!("bluealsa:DEV={},PROFILE=a2dp", bt_addr));
+                            }
                         }
                     }
                 }
             }
+            tracing::warn!(
+                "audio auto-detect: Bluetooth device connected but neither PulseAudio nor BlueALSA plugin available — \
+                 falling back to HDMI"
+            );
         }
     }
 
@@ -346,9 +373,9 @@ fn detect_audio_device() -> String {
         tracing::info!(
             card_index = card_idx,
             card_name = %name,
-            "audio auto-detect: found HDMI audio card"
+            "audio auto-detect: found HDMI audio card — using alsasink"
         );
-        return format!("plughw:{},0", card_idx);
+        return ("alsasink".into(), format!("plughw:{},0", card_idx));
     }
 
     // Log all detected cards for debugging
@@ -362,9 +389,9 @@ fn detect_audio_device() -> String {
     }
 
     tracing::info!(
-        "audio auto-detect: no HDMI/Bluetooth card found — defaulting to plughw:1,0 (HDMI on Pi 4)"
+        "audio auto-detect: no HDMI/Bluetooth card found — defaulting to alsasink with plughw:1,0 (HDMI on Pi 4)"
     );
-    "plughw:1,0".into()
+    ("alsasink".into(), "plughw:1,0".into())
 }
 
 // ── Buffer Health ────────────────────────────────────────────────────
@@ -916,25 +943,33 @@ impl PlaybackEngine {
                     // With use-buffering=true on queue2, we must handle
                     // BUFFERING messages to pause/resume the pipeline.
                     //
-                    // During initial buffering (before first play):
-                    //   - Buffer >= high-percent (80%): transition to Playing
-                    //     and clear initial_buffering flag so the StateChanged
-                    //     handler allows auto-play.
-                    //   - Buffer < high-percent: stay Paused, keep buffering.
+                    // **Initial buffering (before first play):**
+                    //   - Buffer >= high-percent (95%): transition to Playing
+                    //     and clear initial_buffering flag. We wait for 95%
+                    //     (not 80%) to build a deep buffer before consuming,
+                    //     which prevents the "play briefly → underrun → pause →
+                    //     refill → repeat" sawtooth cycle on slow Tor links.
                     //
-                    // After initial play (during playback):
-                    //   - Buffer < low-percent (10%): pause to refill
-                    //   - Buffer >= high-percent (80%): resume playing
+                    // **During playback (after first play):**
+                    //   - Buffer < low-percent (2%): pause to refill
+                    //   - Buffer >= 50%: resume playing
                     //
-                    // We use the pipeline_weak reference to change state.
-                    // Only act on significant buffering changes to avoid log spam.
+                    // IMPORTANT: We do NOT pause/resume on every small buffer
+                    // fluctuation. During playback on Tor, the buffer naturally
+                    // oscillates between 20-80%. Pausing at 5% and resuming at
+                    // 80% creates visible stutter. Instead, we only pause when
+                    // the buffer is critically low (2%), and resume at a modest
+                    // 50%. This allows the pipeline clock to continue advancing
+                    // even during mild buffer dips, trading a few dropped frames
+                    // (handled by kmssink's max-lateness) for much smoother
+                    // perceived playback.
                     if let Some(pipe) = pipeline_weak_bus.upgrade() {
-                        if percent >= 80 {
-                            // Buffer is sufficiently full — start/resume playing.
+                        if percent >= 95 {
+                            // Buffer is fully loaded — start/resume playing.
                             if initial_buffering_bus.load(Ordering::Relaxed) {
                                 tracing::info!(
                                     percent = percent,
-                                    "buffering reached high-percent — \
+                                    "buffering reached 95% — \
                                      clearing initial_buffering flag and starting playback"
                                 );
                                 initial_buffering_bus.store(false, Ordering::Relaxed);
@@ -945,19 +980,32 @@ impl PlaybackEngine {
                             if current == State::Paused {
                                 tracing::info!(
                                     percent = percent,
-                                    "buffer sufficiently full — resuming playback"
+                                    "buffer fully loaded — resuming playback"
                                 );
                                 let _ = pipe.set_state(State::Playing);
                             }
-                        } else if percent < 5 && !initial_buffering_bus.load(Ordering::Relaxed) {
-                            // Buffer too low during playback — pause to refill.
-                            // Only pause if we're NOT in initial buffering (we're
-                            // already paused during initial buffering).
+                        } else if percent >= 50 && !initial_buffering_bus.load(Ordering::Relaxed) {
+                            // During playback (not initial buffering): resume
+                            // from a buffer underrun pause when buffer refills
+                            // to 50%. This is lower than the initial threshold
+                            // (95%) to avoid frequent pause/resume cycles.
+                            let (_, current, _) = pipe.state(gstreamer::ClockTime::from_mseconds(0));
+                            if current == State::Paused {
+                                tracing::info!(
+                                    percent = percent,
+                                    "buffer recovered to 50% — resuming playback"
+                                );
+                                let _ = pipe.set_state(State::Playing);
+                            }
+                        } else if percent < 2 && !initial_buffering_bus.load(Ordering::Relaxed) {
+                            // Buffer critically low during playback — pause to
+                            // refill. Only pause if we're NOT in initial
+                            // buffering (we're already paused then).
                             let (_, current, _) = pipe.state(gstreamer::ClockTime::from_mseconds(0));
                             if current == State::Playing {
                                 tracing::warn!(
                                     percent = percent,
-                                    "buffer critically low — pausing to refill"
+                                    "buffer critically low (<2%) — pausing to refill"
                                 );
                                 let _ = pipe.set_state(State::Paused);
                             }
@@ -1637,22 +1685,24 @@ impl PlaybackEngine {
         self.is_playing.load(Ordering::Relaxed)
     }
 
-    /// Get the current ALSA audio device string.
+    /// Get the current audio device string.
     ///
-    /// Returns the device string (e.g. `"plughw:1,0"`) that will be used
-    /// for the next pipeline's `alsasink device=` property.
+    /// Returns the device string (e.g. `"plughw:1,0"` for alsasink,
+    /// or empty for pulsesink default) that will be used for the next
+    /// pipeline's audio sink `device=` property.
     pub fn audio_device(&self) -> String {
         self.config.audio_device.clone()
     }
 
-    /// Set the ALSA audio device for the next playback pipeline.
+    /// Set the audio device string for the next playback pipeline.
     ///
     /// This updates the runtime config so that the *next* `play()` call
-    /// creates an `alsasink` with `device=<new_device>`.  It does NOT
+    /// creates the audio sink with `device=<new_device>`.  It does NOT
     /// affect a currently-running pipeline — the change takes effect on
     /// the next playback session.
     ///
-    /// Pass an empty string to use the ALSA default device.
+    /// For alsasink: pass an ALSA device string (e.g. "plughw:1,0").
+    /// For pulsesink: pass a PulseAudio sink name, or empty string for default.
     pub fn set_audio_device(&self, device: String) {
         tracing::info!(old = %self.config.audio_device, new = %device, "audio device updated");
         // PipelineConfig is behind &self (not &mut self) because it's
@@ -1750,7 +1800,9 @@ mod tests {
     fn pipeline_config_defaults() {
         let config = PipelineConfig::default();
         assert_eq!(config.video_sink, "kmssink");
-        assert_eq!(config.audio_sink, "alsasink");
+        // audio_sink is auto-detected: "alsasink" (HDMI) or "pulsesink" (Bluetooth)
+        assert!(config.audio_sink == "alsasink" || config.audio_sink == "pulsesink",
+            "audio_sink should be alsasink or pulsesink, got: {}", config.audio_sink);
         assert_eq!(config.buffer_duration_ms, 3000);
         assert!(config.hw_accel);
         assert!((config.volume - 1.0).abs() < f64::EPSILON);

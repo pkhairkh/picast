@@ -181,6 +181,20 @@ if [[ "$SKIP_BUILD" == false ]]; then
             echo "      WARNING: Could not install EGL/GLES packages — V3D compute may not work"
     fi
 
+    # ── PulseAudio for Bluetooth audio ─────────────────────────────
+    # PiCast uses pulsesink for Bluetooth audio. PulseAudio's BlueZ
+    # module automatically routes audio to connected Bluetooth devices.
+    # Without PulseAudio, Bluetooth audio falls back to the BlueALSA
+    # ALSA plugin (which requires libasound_module_pcm_bluealsa.so and
+    # rarely works). This check ensures PulseAudio is installed.
+    if command -v pactl &>/dev/null; then
+        echo "      PulseAudio: pactl found (Bluetooth audio supported)"
+    else
+        echo "      Installing PulseAudio for Bluetooth audio support..."
+        sudo apt-get install -y pulseaudio pulseaudio-module-bluetooth 2>/dev/null || \
+            echo "      WARNING: Could not install PulseAudio — Bluetooth audio may not work"
+    fi
+
     (cd "$REPO_DIR" && cargo build --release --features hw,hevc)
     echo "      Build complete."
 else

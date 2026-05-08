@@ -85,15 +85,19 @@ impl DlnaRenderer {
         // %s is replaced by gmediarender with the URI set by the DLNA controller.
         //
         // Pipeline: souphttpsrc → queue2 → parsebin → h264parse
-        //           → v4l2h264dec(mmap) → kmssink(vc4)
+        //           → v4l2h264dec(dmabuf) → kmssink(vc4)
         //
         // No capssetter is used. Previous versions used capssetter with
         // replace=true to force bt709 colorimetry, but this caused caps
         // negotiation failures (see pipeline.rs Colorimetry section for
         // details). Most streams already report bt709 in their H.264 VUI
         // parameters, and v4l2h264dec passes this through correctly.
-        // Using mmap instead of dmabuf avoids memory:DMABuf caps features
-        // that kmssink may not negotiate correctly.
+        //
+        // capture-io-mode=dmabuf enables zero-copy decode — decoded frames
+        // stay in DMA memory and are passed directly to kmssink without CPU
+        // copies. This is critical for smooth playback on Pi 4; mmap mode
+        // forces frames through system memory, causing high CPU usage and
+        // dropped buffers.
         //
         // KNOWN LIMITATION: When a SOCKS5 proxy is configured, the DLNA
         // pipeline uses souphttpsrc's built-in socks5-proxy-ip/port
@@ -109,7 +113,7 @@ impl DlnaRenderer {
         // this works fine. For IP-bound CDN URLs, use the browser
         // extension or HTTP API instead of DLNA.
         let pipeline = if self.socks_addr.is_empty() {
-            "souphttpsrc location=%s ! queue2 max-size-bytes=52428800 use-buffering=true ! parsebin ! h264parse ! v4l2h264dec capture-io-mode=mmap ! kmssink driver-name=vc4 can-scale=true".to_owned()
+            "souphttpsrc location=%s ! queue2 max-size-bytes=52428800 use-buffering=true ! parsebin ! h264parse ! v4l2h264dec output-io-mode=dmabuf capture-io-mode=dmabuf ! kmssink driver-name=vc4 can-scale=true".to_owned()
         } else {
             // Safely extract the port number from socks_addr, validating it's numeric.
             let port_str = self.socks_addr.split(':').next_back().unwrap_or("9050");
@@ -118,7 +122,7 @@ impl DlnaRenderer {
                 9050
             });
             format!(
-                "souphttpsrc location=%s socks5-proxy-ip=127.0.0.1 socks5-proxy-port={} ! queue2 max-size-bytes=52428800 use-buffering=true ! parsebin ! h264parse ! v4l2h264dec capture-io-mode=mmap ! kmssink driver-name=vc4 can-scale=true",
+                "souphttpsrc location=%s socks5-proxy-ip=127.0.0.1 socks5-proxy-port={} ! queue2 max-size-bytes=52428800 use-buffering=true ! parsebin ! h264parse ! v4l2h264dec output-io-mode=dmabuf capture-io-mode=dmabuf ! kmssink driver-name=vc4 can-scale=true",
                 port
             )
         };
