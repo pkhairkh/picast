@@ -56,11 +56,13 @@ const CHANNEL_CAPACITY: usize = 128;
 #[derive(Debug)]
 pub struct DataChunk {
     pub data: bytes::Bytes,
+    #[allow(dead_code)] // Used for seek/offset tracking
     pub offset: u64,
 }
 
 /// Progress report from the download task.
 #[derive(Debug, Clone)]
+#[allow(dead_code)] // Public API for future progress reporting
 pub struct DownloadProgress {
     /// Total bytes downloaded so far.
     pub downloaded_bytes: u64,
@@ -443,6 +445,7 @@ impl StreamSource {
     }
 
     /// Get the current download progress.
+    #[allow(dead_code)] // Public API for future progress reporting
     pub fn progress(&self) -> DownloadProgress {
         let downloaded_bytes = self.progress.downloaded_bytes.load(Ordering::Relaxed);
         let throughput_kbps = self.progress.throughput_kbps.load(Ordering::Relaxed);
@@ -473,6 +476,7 @@ impl StreamSource {
     }
 
     /// Check if the download has been cancelled.
+    #[allow(dead_code)] // Public API for future cancel status
     pub fn is_cancelled(&self) -> bool {
         self.cancel.load(Ordering::Relaxed)
     }

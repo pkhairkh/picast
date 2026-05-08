@@ -32,6 +32,7 @@
 #[cfg(feature = "hw")]
 pub mod events;
 #[cfg(feature = "hw")]
+#[allow(dead_code)] // Retained as fallback; superseded by stream_source
 mod media_proxy;
 #[cfg(feature = "hw")]
 pub mod pipeline;
