@@ -977,12 +977,23 @@ impl GstPipeline {
             // the pipeline clock behind real-time. This compounds: each late
             // buffer makes subsequent buffers even later.
             //
-            // 20ms (20_000_000ns) allows the sink to stay tightly synced to
-            // real-time. Buffers arriving more than 20ms late are dropped,
-            // which is preferable to stuttering — the human eye perceives a
-            // dropped frame as a brief flicker, but late frames as choppy
-            // motion. The pipeline clock continues advancing correctly.
-            .property("max-lateness", 20_000_000i64)
+            // 500ms (500_000_000ns) strikes a balance between dropping very
+            // late buffers (which would cause visible A/V desync) and allowing
+            // the V4L2 decode pipeline's natural latency jitter.
+            //
+            // The V4L2 stateful h264 decoder has 2-4 capture buffers at 25fps
+            // = 80-160ms of decode latency. Combined with the ISP conversion
+            // (v4l2convert, ~40ms) and Tor's variable network throughput
+            // (which causes jittery frame delivery), a frame can easily arrive
+            // 100-300ms after its ideal display time. The previous value of
+            // 20ms was far too tight — even normal decode latency variations
+            // caused kmssink to drop most frames, resulting in "A lot of
+            // buffers are being dropped" warnings and choppy video.
+            //
+            // 500ms allows frames with realistic latency jitter to still be
+            // displayed, while dropping frames that are truly too late (e.g.
+            // after a multi-second network stall) to prevent clock drift.
+            .property("max-lateness", 500_000_000i64)
             // skip-vsync: when enabled, kmssink does NOT wait internally for
             // vsync when using atomic DRM drivers (like vc4 on Pi 4). Without
             // this, kmssink calls drmModeAtomicCommit with DRM_MODE_ATOMIC_ALLOW_MODESET

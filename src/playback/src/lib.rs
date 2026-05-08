@@ -211,10 +211,16 @@ impl Default for PipelineConfig {
             connector_id: None,
             drm_fd: None,
             // V4L2 hardware decode (v4l2h264dec + v4l2convert ISP) introduces
-            // ~100-160ms of pipeline latency that GStreamer's latency query
-            // may not fully account for. 100ms compensation aligns audio
-            // with video for typical 25-30fps streams on Pi 4.
-            audio_ts_offset_ns: if hw_accel { 100_000_000 } else { 0 },
+            // ~120-200ms of pipeline latency that GStreamer's latency query
+            // may not fully account for:
+            //   - v4l2h264dec: 2-4 capture buffers at 25fps = 80-160ms
+            //   - v4l2convert (ISP): ~40ms per frame
+            //   - Total: 120-200ms
+            // 200ms compensation ensures audio is delayed enough to align
+            // with the video output. The previous 100ms was insufficient,
+            // causing audio to play ahead of video and making kmssink
+            // perceive video frames as "late" and drop them.
+            audio_ts_offset_ns: if hw_accel { 200_000_000 } else { 0 },
         }
     }
 }

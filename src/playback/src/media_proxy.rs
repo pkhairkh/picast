@@ -468,6 +468,7 @@ async fn handle_connection(
 
     tracing::info!(
         status = %status,
+        http_version = ?response.version(),
         content_type = ?headers.get("content-type").and_then(|v| v.to_str().ok()),
         content_length = ?headers.get("content-length").and_then(|v| v.to_str().ok()),
         content_range = ?headers.get("content-range").and_then(|v| v.to_str().ok()),
