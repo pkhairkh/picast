@@ -270,7 +270,7 @@ impl GstPipeline {
                 .property_from_str("stream-type", "stream") // GST_APP_STREAM_TYPE_STREAM — sequential, no seeking
                 .property_from_str("format", "bytes") // GST_FORMAT_BYTES
                 .property("is-live", false)
-                .property("block", false) // Don't block push-buffer when queue is full
+                .property("block", true) // Block push-buffer when downstream is full — provides proper flow control
                 .build()
                 .map_err(|e| PlaybackError::PipelineCreation(format!("appsrc: {}", e)))?;
 
@@ -979,75 +979,101 @@ impl GstPipeline {
             }
         });
 
-        // ── AppSrc push task ────────────────────────────────────────
+        // ── AppSrc push thread ────────────────────────────────────────
         //
-        // If using StreamSource + appsrc, start a background task that
+        // If using StreamSource + appsrc, start a background thread that
         // reads downloaded data chunks from the StreamSource channel and
         // pushes them into the appsrc element as GStreamer buffers.
         //
         // This replaces the old MediaProxy HTTP server + souphttpsrc path.
         // Data flows: CDN → Tor → SOCKS Forwarder → reqwest → channel → appsrc.
         //
-        // The push task runs on the tokio runtime and uses GStreamer's
-        // thread-safe action signals (emit_by_name) to push buffers.
+        // IMPORTANT: The push loop runs on a dedicated std::thread, NOT a
+        // tokio task. With appsrc `block=true`, the push-buffer call blocks
+        // when the pipeline's internal queue is full (e.g., during buffering).
+        // Blocking a tokio worker thread would starve the async runtime;
+        // a dedicated thread avoids this entirely.
+        //
+        // The thread bridges the async tokio channel (recv_chunk) to the
+        // synchronous GStreamer push-buffer via Handle::block_on(). This is
+        // safe because the thread is NOT inside a tokio async context.
+        //
         // When the download completes, an EOS event is pushed into appsrc.
         if let Some(mut source) = stream_source.take() {
             let appsrc_weak = src.downgrade();
             let cancel = Arc::new(AtomicBool::new(false));
             let cancel_clone = cancel.clone();
+            let tokio_handle = tokio::runtime::Handle::current();
 
-            tokio::spawn(async move {
-                while let Some(chunk) = source.recv_chunk().await {
-                    if cancel_clone.load(Ordering::Relaxed) {
-                        tracing::info!(offset = chunk.offset, "appsrc push task: cancelled");
-                        return;
-                    }
+            std::thread::Builder::new()
+                .name("appsrc-push".into())
+                .spawn(move || {
+                    loop {
+                        // Receive the next chunk from the download channel.
+                        // Handle::block_on() bridges the async recv to this
+                        // synchronous thread without blocking the tokio runtime.
+                        let chunk = match tokio_handle.block_on(source.recv_chunk()) {
+                            Some(c) => c,
+                            None => {
+                                // Channel closed — download completed or source dropped.
+                                break;
+                            },
+                        };
 
-                    // Push the chunk into appsrc as a GStreamer buffer.
-                    if let Some(appsrc) = appsrc_weak.upgrade() {
-                        let buffer = gstreamer::Buffer::from_slice(chunk.data.to_vec());
-                        let result =
-                            appsrc.emit_by_name::<gstreamer::FlowReturn>("push-buffer", &[&buffer]);
-                        match result {
-                            gstreamer::FlowReturn::Ok => {},
-                            gstreamer::FlowReturn::Flushing => {
-                                tracing::debug!(
-                                    offset = chunk.offset,
-                                    "appsrc is flushing — stopping push task"
-                                );
-                                return;
-                            },
-                            gstreamer::FlowReturn::Eos => {
-                                tracing::debug!(
-                                    offset = chunk.offset,
-                                    "appsrc at EOS — stopping push task"
-                                );
-                                return;
-                            },
-                            other => {
-                                tracing::warn!(
-                                    offset = chunk.offset,
-                                    result = ?other,
-                                    "appsrc push-buffer returned unexpected result — stopping push task"
-                                );
-                                return;
-                            },
+                        if cancel_clone.load(Ordering::Relaxed) {
+                            tracing::info!(offset = chunk.offset, "appsrc push thread: cancelled");
+                            return;
                         }
-                    } else {
-                        tracing::debug!(
-                            offset = chunk.offset,
-                            "appsrc element dropped — stopping push task"
-                        );
-                        return;
-                    }
-                }
 
-                // Download completed — push EOS into appsrc.
-                tracing::info!("appsrc push task: download complete, pushing EOS");
-                if let Some(appsrc) = appsrc_weak.upgrade() {
-                    let _ = appsrc.emit_by_name::<gstreamer::FlowReturn>("end-of-stream", &[]);
-                }
-            });
+                        // Push the chunk into appsrc as a GStreamer buffer.
+                        // With block=true, this blocks when the pipeline's
+                        // internal queue is full, providing natural backpressure
+                        // that throttles the CDN download to match playback rate.
+                        if let Some(appsrc) = appsrc_weak.upgrade() {
+                            let buffer = gstreamer::Buffer::from_slice(chunk.data.to_vec());
+                            let result =
+                                appsrc.emit_by_name::<gstreamer::FlowReturn>("push-buffer", &[&buffer]);
+                            match result {
+                                gstreamer::FlowReturn::Ok => {},
+                                gstreamer::FlowReturn::Flushing => {
+                                    tracing::debug!(
+                                        offset = chunk.offset,
+                                        "appsrc is flushing — stopping push thread"
+                                    );
+                                    return;
+                                },
+                                gstreamer::FlowReturn::Eos => {
+                                    tracing::debug!(
+                                        offset = chunk.offset,
+                                        "appsrc at EOS — stopping push thread"
+                                    );
+                                    return;
+                                },
+                                other => {
+                                    tracing::warn!(
+                                        offset = chunk.offset,
+                                        result = ?other,
+                                        "appsrc push-buffer returned unexpected result — stopping push thread"
+                                    );
+                                    return;
+                                },
+                            }
+                        } else {
+                            tracing::debug!(
+                                offset = chunk.offset,
+                                "appsrc element dropped — stopping push thread"
+                            );
+                            return;
+                        }
+                    }
+
+                    // Download completed — push EOS into appsrc.
+                    tracing::info!("appsrc push thread: download complete, pushing EOS");
+                    if let Some(appsrc) = appsrc_weak.upgrade() {
+                        let _ = appsrc.emit_by_name::<gstreamer::FlowReturn>("end-of-stream", &[]);
+                    }
+                })
+                .expect("failed to spawn appsrc push thread");
 
             push_cancel = Some(cancel);
         }
@@ -1080,23 +1106,23 @@ impl GstPipeline {
             // the pipeline clock behind real-time. This compounds: each late
             // buffer makes subsequent buffers even later.
             //
-            // 500ms (500_000_000ns) strikes a balance between dropping very
-            // late buffers (which would cause visible A/V desync) and allowing
-            // the V4L2 decode pipeline's natural latency jitter.
+            // With the appsrc-based pipeline (replacing MediaProxy + souphttpsrc),
+            // the timing precision is lower than with souphttpsrc's native
+            // GStreamer-driven pull model. The appsrc push model introduces
+            // more jitter in frame delivery timing, especially during the
+            // initial startup when the video decode chain is created dynamically
+            // (~5 seconds after pipeline Paused). Frames can easily be 1-3
+            // seconds late during the first few seconds of playback.
             //
-            // The V4L2 stateful h264 decoder has 2-4 capture buffers at 25fps
-            // = 80-160ms of decode latency. Combined with the ISP conversion
-            // (v4l2convert, ~40ms) and Tor's variable network throughput
-            // (which causes jittery frame delivery), a frame can easily arrive
-            // 100-300ms after its ideal display time. The previous value of
-            // 20ms was far too tight — even normal decode latency variations
-            // caused kmssink to drop most frames, resulting in "A lot of
-            // buffers are being dropped" warnings and choppy video.
-            //
-            // 500ms allows frames with realistic latency jitter to still be
-            // displayed, while dropping frames that are truly too late (e.g.
-            // after a multi-second network stall) to prevent clock drift.
-            .property("max-lateness", 500_000_000i64)
+            // 5 seconds (5_000_000_000ns) provides enough tolerance for the
+            // appsrc pipeline's timing jitter while still dropping frames that
+            // are truly too late (after a multi-second network stall) to
+            // prevent clock drift. The previous value of 500ms was too tight
+            // for the appsrc path — combined with qos=true, it created a
+            // death spiral: a few late frames → QoS events → V4L2 decoder
+            // skips frames → even fewer frames displayed → more QoS events
+            // → decoder throttles to ~1 fps.
+            .property("max-lateness", 5_000_000_000i64)
             // skip-vsync: when enabled, kmssink does NOT wait internally for
             // vsync when using atomic DRM drivers (like vc4 on Pi 4). Without
             // this, kmssink calls drmModeAtomicCommit with DRM_MODE_ATOMIC_ALLOW_MODESET
@@ -1106,12 +1132,31 @@ impl GstPipeline {
             // kernel's atomic commit already handles page-flip synchronization.
             // Enabling skip-vsync reduces display latency by one full frame.
             .property("skip-vsync", true)
-            // qos (Quality of Service): when enabled, kmssink generates QoS
-            // events upstream when frames are dropped or displayed late. This
-            // allows the decoder (v4l2h264dec/v4l2slh265dec) to adapt its
-            // output rate, reducing unnecessary decode work when the display
-            // can't keep up (e.g. during 4K@30Hz bandwidth starvation).
-            .property("qos", true)
+            // qos (Quality of Service): DISABLED for hardware decode.
+            //
+            // When enabled, kmssink generates QoS events upstream when frames
+            // are dropped or displayed late. For software decoders (avdec_h264),
+            // QoS events help by skipping decode of frames that would arrive
+            // too late to display. But for V4L2 hardware decoders
+            // (v4l2h264dec/v4l2slh265dec), QoS events cause a death spiral:
+            //
+            //   1. A few frames arrive late (normal during initial startup
+            //      with the appsrc push model)
+            //   2. kmssink drops them and sends QoS events upstream
+            //   3. V4L2 decoder receives QoS and starts skipping decode frames
+            //   4. Fewer frames reach kmssink → more are late → more QoS events
+            //   5. Decoder throttles down to ~1 fps
+            //
+            // The hardware decoder produces frames at the correct rate driven
+            // by the pipeline clock. It does NOT benefit from QoS throttling
+            // because the decode is already hardware-accelerated and can't
+            // meaningfully "skip" frames without corrupting the decode state
+            // (B-frames reference previous frames).
+            //
+            // Disabling QoS prevents the feedback loop while max-lateness
+            // still drops truly late frames (after multi-second stalls) to
+            // prevent clock drift.
+            .property("qos", false)
             // async=false: kmssink completes its Ready→Paused transition
             // immediately WITHOUT waiting for the first video buffer. This is
             // CRITICAL on Raspberry Pi 4 because the video decode chain is
