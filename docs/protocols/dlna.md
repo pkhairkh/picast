@@ -9,14 +9,14 @@ boGDan implements a UPnP AV MediaRenderer device so that standard DLNA controlle
 │  DLNA        │◀───────────────────│  boGDan      │
 │  Controller  │    M-SEARCH/NOTIFY │  MediaRenderer│
 │  (Phone/PC)  │                    │              │
-│              │    HTTP (8200)     │              │
+│              │    HTTP (49152)   │              │
 │              │──────────────────▶│              │
 │              │  GET /desc.xml    │              │
 │              │  POST /ctl/*      │              │
 └──────────────┘                    └──────────────┘
 ```
 
-The DLNA renderer runs on port 8200 for HTTP (device description, SOAP control) and uses UDP port 1900 for SSDP discovery. All SOAP actions are translated into `SessionManager` calls, ensuring DLNA and HTTP/WebSocket clients see a consistent playback state.
+The DLNA renderer is implemented via gmediarender running on port 49152 for HTTP (device description, SOAP control) and uses UDP port 1900 for SSDP discovery. boGDan manages the gmediarender subprocess and synchronizes its state with the session manager, ensuring DLNA and HTTP/WebSocket clients see a consistent playback state.
 
 ## SSDP Discovery
 
@@ -28,7 +28,7 @@ boGDan sends NOTIFY messages every 30 seconds to the SSDP multicast address `239
 NOTIFY * HTTP/1.1
 HOST: 239.255.255.250:1900
 CACHE-CONTROL: max-age=1800
-LOCATION: http://<pi-ip>:8200/description.xml
+LOCATION: http://<pi-ip>:49152/description.xml
 NT: upnp:rootdevice
 NTS: ssdp:alive
 SERVER: Linux/5.15 UPnP/1.1 boGDan/0.1
@@ -39,7 +39,7 @@ USN: uuid:bogdan-001::upnp:rootdevice
 NOTIFY * HTTP/1.1
 HOST: 239.255.255.250:1900
 CACHE-CONTROL: max-age=1800
-LOCATION: http://<pi-ip>:8200/description.xml
+LOCATION: http://<pi-ip>:49152/description.xml
 NT: urn:schemas-upnp-org:device:MediaRenderer:1
 NTS: ssdp:alive
 SERVER: Linux/5.15 UPnP/1.1 boGDan/0.1
@@ -50,7 +50,7 @@ USN: uuid:bogdan-001::urn:schemas-upnp-org:device:MediaRenderer:1
 NOTIFY * HTTP/1.1
 HOST: 239.255.255.250:1900
 CACHE-CONTROL: max-age=1800
-LOCATION: http://<pi-ip>:8200/description.xml
+LOCATION: http://<pi-ip>:49152/description.xml
 NT: urn:schemas-upnp-org:service:AVTransport:1
 NTS: ssdp:alive
 SERVER: Linux/5.15 UPnP/1.1 boGDan/0.1
@@ -61,7 +61,7 @@ USN: uuid:bogdan-001::urn:schemas-upnp-org:service:AVTransport:1
 NOTIFY * HTTP/1.1
 HOST: 239.255.255.250:1900
 CACHE-CONTROL: max-age=1800
-LOCATION: http://<pi-ip>:8200/description.xml
+LOCATION: http://<pi-ip>:49152/description.xml
 NT: urn:schemas-upnp-org:service:RenderingControl:1
 NTS: ssdp:alive
 SERVER: Linux/5.15 UPnP/1.1 boGDan/0.1
@@ -77,7 +77,7 @@ HTTP/1.1 200 OK
 CACHE-CONTROL: max-age=1800
 DATE: Mon, 15 Jan 2024 10:30:00 GMT
 EXT:
-LOCATION: http://<pi-ip>:8200/description.xml
+LOCATION: http://<pi-ip>:49152/description.xml
 SERVER: Linux/5.15 UPnP/1.1 boGDan/0.1
 ST: urn:schemas-upnp-org:device:MediaRenderer:1
 USN: uuid:bogdan-001::urn:schemas-upnp-org:device:MediaRenderer:1
@@ -97,7 +97,7 @@ USN: uuid:bogdan-001::urn:schemas-upnp-org:device:MediaRenderer:1
 
 ## Device Description XML
 
-Served at `GET /description.xml` on port 8200. This XML describes the boGDan device, its services, and their control/event URLs.
+Served at `GET /description.xml` on port 49152. This XML describes the boGDan device, its services, and their control/event URLs.
 
 ```xml
 <?xml version="1.0" encoding="utf-8"?>
@@ -271,7 +271,7 @@ Control URL: `POST /ctl/renderingcontrol`
 
 ### SetVolume
 
-Set the playback volume (0–100 integer, mapped to 0.0–1.0 float internally).
+Set the playback volume (0–100 integer, matching boGDan's internal 0–100 range).
 
 ```xml
 <u:SetVolume xmlns:u="urn:schemas-upnp-org:service:RenderingControl:1">

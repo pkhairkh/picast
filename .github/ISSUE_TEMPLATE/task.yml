@@ -14,7 +14,7 @@ body:
     attributes:
       label: Task Description
       description: A clear and concise description of the task
-      placeholder: "e.g., Refactor picast-session to use connection pooling for SQLite"
+      placeholder: "e.g., Refactor bogdan-session to use connection pooling for SQLite"
     validations:
       required: true
 
@@ -22,15 +22,15 @@ body:
     id: crate
     attributes:
       label: Crate
-      description: Which crate in the PiCast workspace does this task relate to?
+      description: Which crate in the boGDan workspace does this task relate to?
       options:
-        - picast-server
-        - picast-protocols
-        - picast-session
-        - picast-resolver
-        - picast-playback
-        - picast-display
-        - picast-tor
+        - bogdan-server
+        - bogdan-protocols
+        - bogdan-session
+        - bogdan-resolver
+        - bogdan-playback
+        - bogdan-display
+        - bogdan-tor
         - Workspace / Cross-cutting
     validations:
       required: true

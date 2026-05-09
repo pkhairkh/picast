@@ -50,7 +50,7 @@ For pages with obvious media URLs (direct `<video src="...">`, YouTube watch pag
 // Simple cast: just send the page URL
 async function castCurrentTab() {
   const [tab] = await chrome.tabs.query({ active: true, currentWindow: true });
-  const response = await fetch(`http://${bogdanAddr}:8080/api/v1/cast`, {
+  const response = await fetch(`http://${bogdanAddr}:8585/api/cast`, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify({
@@ -233,7 +233,7 @@ The complete data flow from the user clicking "Cast" to playback starting:
    c. If no: use the page URL (tab.url)
 
 4. Service worker sends HTTP POST to boGDan:
-   POST http://<bogdan-ip>:8080/api/v1/cast
+   POST http://<bogdan-ip>:8585/api/cast
    {
      "url": "<manifest-or-page-url>",
      "title": "<tab-title>",
@@ -245,7 +245,7 @@ The complete data flow from the user clicking "Cast" to playback starting:
    b. If page URL: classify → resolve via yt-dlp → build pipeline
 
 6. Service worker connects WebSocket for status:
-   ws://<bogdan-ip>:8081/ws
+   ws://<bogdan-ip>:8586/ws
 
 7. Extension popup shows playback state:
    - "Resolving..." (yt-dlp running)
@@ -276,8 +276,8 @@ The extension does NOT read page content (DOM, cookies, form data). It only:
 ### Network Scope
 
 All boGDan communication is restricted to:
-- `http://*.local:8080` (HTTP API)
-- `ws://*.local:8081` (WebSocket)
+- `http://*.local:8585` (HTTP API)
+- `ws://*.local:8586` (WebSocket)
 
 The extension does NOT send data to any external server. All communication is local-network-only.
 

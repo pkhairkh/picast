@@ -10,9 +10,9 @@ The protocols crate implements all three control interfaces that external sender
 
 | Struct | Role |
 |--------|------|
-| `HttpApiServer` | RESTful JSON API on port 8080 (hyper) |
-| `WebSocketServer` | Real-time push + command channel on port 8081 (tokio-tungstenite) |
-| `DlnaRenderer` | UPnP AVTransport + RenderingControl on port 8200, SSDP on 1900 |
+| `HttpApiServer` | RESTful JSON API on port 8585 (hyper) |
+| `WebSocketServer` | Real-time push + command channel on port 8586 (tokio-tungstenite) |
+| `DlnaRenderer` | UPnP AVTransport + RenderingControl on port 49152, SSDP on 1900 |
 | `ApiResponse<T>` | JSON envelope for HTTP responses with `ok`, `data`, `error` fields |
 | `CastRequest` | Deserialized body of `POST /api/v1/cast` |
 | `ControlRequest` | Deserialized body of `POST /api/v1/control` |
@@ -88,7 +88,7 @@ Implement the five endpoints defined in `docs/protocols/http-api.md`. Use `hyper
 
 ### 2. WebSocket (`WebSocketServer`)
 
-Accept TCP connections on port 8081, upgrade with `tokio-tungstenite`. Split each connection into a sender task and receiver task. The receiver task deserializes `WsMessage` and forwards to `SessionManager` (same operations as HTTP). The sender task subscribes to `SessionManager::subscribe()` and forwards state-change, progress, and error events. Implement ping/pong keep-alive (30-second interval, 10-second timeout). Limit incoming frame size to 1 MiB.
+Accept TCP connections on port 8586, upgrade with `tokio-tungstenite`. Split each connection into a sender task and receiver task. The receiver task deserializes `WsMessage` and forwards to `SessionManager` (same operations as HTTP). The sender task subscribes to `SessionManager::subscribe()` and forwards state-change, progress, and error events. Implement ping/pong keep-alive (30-second interval, 10-second timeout). Limit incoming frame size to 1 MiB.
 
 **Testing strategy**: Use `tokio-tungstenite::tungstenite::client` in integration tests to connect, send a `cast` message, and verify `state_change` messages arrive in the expected order.
 
@@ -98,7 +98,7 @@ Three sub-components:
 
 1. **SSDP advertiser** — Every 30 seconds, send `NOTIFY` to `239.255.255.250:1900` with `ST: upnp:rootdevice` and `ST: urn:schemas-upnp-org:device:MediaRenderer:1`. Also respond to `M-SEARCH` queries with a random delay of 0–MX seconds to avoid response storms.
 
-2. **Device description** — Serve `/description.xml` on port 8200 with the full UPnP device template including AVTransport, RenderingControl, and ConnectionManager services (see `docs/protocols/dlna.md` for the complete XML).
+2. **Device description** — Serve `/description.xml` on port 49152 with the full UPnP device template including AVTransport, RenderingControl, and ConnectionManager services (see `docs/protocols/dlna.md` for the complete XML).
 
 3. **SOAP action handlers** — For AVTransport (`Play`, `Pause`, `Stop`, `Seek`, `SetAVTransportURI`) and RenderingControl (`SetVolume`, `GetVolume`). Translate each into `SessionManager` calls. Return UPnP-compliant SOAP XML responses.
 

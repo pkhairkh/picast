@@ -1,5 +1,5 @@
 name: Bug Report
-description: Report a bug or unexpected behavior in PiCast
+description: Report a bug or unexpected behavior in boGDan
 labels: ["bug", "triage"]
 assignees:
   - pkhairkh
@@ -7,14 +7,14 @@ body:
   - type: markdown
     attributes:
       value: |
-        Thank you for reporting a bug in PiCast. Please fill out the form below with as much detail as possible.
+        Thank you for reporting a bug in boGDan. Please fill out the form below with as much detail as possible.
 
   - type: textarea
     id: summary
     attributes:
       label: Summary
       description: A clear and concise description of the bug
-      placeholder: "e.g., Picast-server crashes when attempting to cast a DASH stream over Tor"
+      placeholder: "e.g., bogdan-server crashes when attempting to cast a DASH stream over Tor"
     validations:
       required: true
 
@@ -22,15 +22,15 @@ body:
     id: crate
     attributes:
       label: Crate Affected
-      description: Which crate in the PiCast workspace is affected?
+      description: Which crate in the boGDan workspace is affected?
       options:
-        - picast-server
-        - picast-protocols
-        - picast-session
-        - picast-resolver
-        - picast-playback
-        - picast-display
-        - picast-tor
+        - bogdan-server
+        - bogdan-protocols
+        - bogdan-session
+        - bogdan-resolver
+        - bogdan-playback
+        - bogdan-display
+        - bogdan-tor
         - Unsure / Multiple
     validations:
       required: true
@@ -54,7 +54,7 @@ body:
     id: tor-config
     attributes:
       label: Tor Configuration
-      description: How is Tor configured in your PiCast setup?
+      description: How is Tor configured in your boGDan setup?
       options:
         - System Tor (default torrc)
         - Custom torrc with stream isolation
@@ -70,7 +70,7 @@ body:
       label: Reproduction Steps
       description: Step-by-step instructions to reproduce the issue
       placeholder: |
-        1. Start picast-server with `sudo systemctl start picast`
+        1. Start bogdan-server with `sudo systemctl start bogdan`
         2. Open the browser extension
         3. Navigate to https://example.com/video
         4. Click the cast button
@@ -103,8 +103,8 @@ body:
     attributes:
       label: Relevant Logs
       description: |
-        Paste any relevant log output. You can retrieve PiCast logs with:
-        `journalctl -u picast -n 200 --no-pager`
+        Paste any relevant log output. You can retrieve boGDan logs with:
+        `journalctl -u bogdan -n 200 --no-pager`
         Or for Tor: `journalctl -u tor -n 100 --no-pager`
       render: shell
     validations:
@@ -118,7 +118,7 @@ body:
       placeholder: |
         - OS: Raspberry Pi OS (Bullseye/Bookworm)
         - Rust version: (from `rustc --version`)
-        - PiCast version/commit:
+        - boGDan version/commit:
         - GStreamer version:
         - Tor version:
     validations:

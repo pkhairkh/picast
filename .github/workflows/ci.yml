@@ -1,4 +1,4 @@
-name: PiCast CI
+name: boGDan CI
 
 on:
   push:

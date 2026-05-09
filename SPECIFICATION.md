@@ -22,7 +22,7 @@ Architecture Decision Records (ADR-001 through ADR-009) have been moved to their
 
 ### 2.1 HTTP REST API (Port 8585)
 
-The REST API is the primary control interface for the boGDan browser extension and third-party integrations. All endpoints are served over plain HTTP (no TLS—boGDan is a LAN-only device; TLS on LAN adds complexity without meaningful security benefit in a trusted-network model).
+The REST API is the primary control interface for the boGDan browser extension and third-party integrations. All endpoints are served over plain HTTP by default. HTTPS is enabled when `tls_cert_path` and `tls_key_path` are configured in `bogdan.toml` — TLS is recommended for production deployments, though on a trusted LAN it adds complexity without meaningful security benefit.
 
 **Base URL:** `http://<pi-ip>:8585`  
 **Content-Type:** `application/json` (request and response bodies)  
@@ -207,7 +207,7 @@ Returns the complete state of the current (or most recent) session.
 | `title` | `string` | Display title |
 | `position` | `number` | Current playback position in seconds (0.0 if idle) |
 | `duration` | `number` | Total duration in seconds (-1.0 if unknown/live) |
-| `volume` | `number` | Volume level 0.0–1.0 |
+| `volume` | `number` | Volume level 0–100 (integer) |
 | `muted` | `boolean` | Mute state |
 | `torMode` | `string` | Active Tor mode for this session |
 | `bufferPercent` | `number` | Buffer fill percentage 0–100 (from GStreamer `queue2` buffering signal) |
@@ -446,7 +446,7 @@ boGDan exposes a DLNA MediaRenderer device via gmediarender on port 49152. The d
 
 **Device Type:** `urn:schemas-upnp-org:device:MediaRenderer:1`
 
-**Friendly Name:** `boGDan` (configurable via `/etc/bogdan/bogdan.conf`)
+**Friendly Name:** `boGDan` (configurable via `BOGDAN_DLNA_NAME` env var or `bogdan.toml` `[dlna].friendly_name`)
 
 **UDN:** `uuid:bogdan-<machine-id>` (derived from `/etc/machine-id`)
 
@@ -474,7 +474,7 @@ boGDan exposes a DLNA MediaRenderer device via gmediarender on port 49152. The d
 
 | Action | Arguments | Description |
 |--------|-----------|-------------|
-| `SetVolume` | `InstanceID=0`, `Channel="Master"`, `DesiredVolume=<0-100>` | Sets volume as integer 0–100. boGDan maps this to GStreamer's `volume` element (0.0–1.0). |
+| `SetVolume` | `InstanceID=0`, `Channel="Master"`, `DesiredVolume=<0-100>` | Sets volume as integer 0–100. Matches boGDan's internal volume range. |
 | `GetVolume` | `InstanceID=0`, `Channel="Master"` | Returns `CurrentVolume` as integer 0–100. |
 | `SetMute` | `InstanceID=0`, `Channel="Master"`, `DesiredMute=<0|1>` | Sets mute state. |
 | `GetMute` | `InstanceID=0`, `Channel="Master"` | Returns `CurrentMute` as integer 0 or 1. |

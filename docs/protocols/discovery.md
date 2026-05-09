@@ -18,7 +18,7 @@ boGDan registers this custom service type on the local network. The browser exte
 Service Name:  boGDan (<hostname>)
 Service Type:  _bogcast._tcp
 Domain:        local.
-Port:          8080
+Port:          8585
 ```
 
 ### TXT Records
@@ -28,8 +28,8 @@ TXT records carry boGDan-specific metadata that clients use to determine capabil
 | Key | Value | Description |
 |-----|-------|-------------|
 | `ver` | `0.1.0` | boGDan software version (semver) |
-| `ws` | `8081` | WebSocket port for real-time status |
-| `dlna` | `8200` | DLNA HTTP port for UPnP control |
+| `ws` | `8586` | WebSocket port for real-time status |
+| `dlna` | `49152` | DLNA HTTP port for UPnP control |
 | `hw` | `pi4` | Hardware identifier (always `pi4` for Pi 4) |
 | `id` | `bogdan-001` | Unique device ID (derived from `/etc/machine-id`) |
 | `tor` | `1` | Tor routing enabled (1=yes, 0=no) |
@@ -39,8 +39,8 @@ TXT records carry boGDan-specific metadata that clients use to determine capabil
 
 ```
 _bogcast._tcp.local. PTR boGDan\032\(raspberrypi\)._bogcast._tcp.local.
-boGDan\032\(raspberrypi\)._bogcast._tcp.local. SRV 0 0 8080 raspberrypi.local.
-boGDan\032\(raspberrypi\)._bogcast._tcp.local. TXT "ver=0.1.0" "ws=8081" "dlna=8200" "hw=pi4" "id=bogdan-001" "tor=1" "maxres=1080p"
+boGDan\032\(raspberrypi\)._bogcast._tcp.local. SRV 0 0 8585 raspberrypi.local.
+boGDan\032\(raspberrypi\)._bogcast._tcp.local. TXT "ver=0.1.0" "ws=8586" "dlna=49152" "hw=pi4" "id=bogdan-001" "tor=1" "maxres=1080p"
 raspberrypi.local. A 192.168.1.100
 ```
 
@@ -53,7 +53,7 @@ The boGDan browser extension discovers boGDan instances using the mDNS API avail
 3. Extension resolves the SRV record to get the hostname and port.
 4. Extension resolves the A record to get the IP address.
 5. Extension reads TXT records for WebSocket port and device ID.
-6. Extension connects to the HTTP API on port 8080 and/or WebSocket on port 8081.
+6. Extension connects to the HTTP API on port 8585 and/or WebSocket on port 8586.
 
 ```javascript
 // Simplified discovery in the browser extension
@@ -140,9 +140,9 @@ The following ports must be open in iptables for discovery to work:
 |------|----------|-----------|---------|
 | 5353 | UDP | In/Out | mDNS multicast |
 | 1900 | UDP | In/Out | SSDP multicast |
-| 8080 | TCP | In | HTTP REST API |
-| 8081 | TCP | In | WebSocket |
-| 8200 | TCP | In | DLNA HTTP (device description + SOAP) |
+| 8585 | TCP | In | HTTP REST API |
+| 8586 | TCP | In | WebSocket |
+| 49152 | TCP | In | DLNA HTTP (device description + SOAP) |
 
 See `config/iptables.rules` for the complete firewall configuration. The iptables rules must allow multicast traffic on ports 5353 and 1900, and must NOT block the `239.255.255.250` and `224.0.0.251` multicast addresses.
 

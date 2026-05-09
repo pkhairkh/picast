@@ -1,5 +1,5 @@
 name: Feature Request
-description: Propose a new feature or enhancement for PiCast
+description: Propose a new feature or enhancement for boGDan
 labels: ["enhancement", "triage"]
 assignees:
   - pkhairkh
@@ -7,14 +7,14 @@ body:
   - type: markdown
     attributes:
       value: |
-        Thank you for suggesting a feature for PiCast. Please describe your idea clearly so we can evaluate it.
+        Thank you for suggesting a feature for boGDan. Please describe your idea clearly so we can evaluate it.
 
   - type: textarea
     id: description
     attributes:
       label: Feature Description
       description: A clear and concise description of the feature you would like to see
-      placeholder: "e.g., Add support for HLS (HTTP Live Streaming) protocol in picast-protocols"
+      placeholder: "e.g., Add support for HLS (HTTP Live Streaming) protocol in bogdan-protocols"
     validations:
       required: true
 
@@ -35,15 +35,15 @@ body:
     id: crate
     attributes:
       label: Affected Crate
-      description: Which crate in the PiCast workspace would this feature primarily affect?
+      description: Which crate in the boGDan workspace would this feature primarily affect?
       options:
-        - picast-server
-        - picast-protocols
-        - picast-session
-        - picast-resolver
-        - picast-playback
-        - picast-display
-        - picast-tor
+        - bogdan-server
+        - bogdan-protocols
+        - bogdan-session
+        - bogdan-resolver
+        - bogdan-playback
+        - bogdan-display
+        - bogdan-tor
         - Multiple / Cross-cutting
     validations:
       required: true
@@ -56,9 +56,9 @@ body:
         If you have ideas about how this could be implemented, describe them here.
         This is optional but helps speed up evaluation.
       placeholder: |
-        - Add an HLS demuxer in picast-protocols using the existing GStreamer pipeline
+        - Add an HLS demuxer in bogdan-protocols using the existing GStreamer pipeline
         - Create a new `HlsHandler` struct that implements the `ProtocolHandler` trait
-        - Extend the URL resolver in picast-resolver to detect .m3u8 URLs
+        - Extend the URL resolver in bogdan-resolver to detect .m3u8 URLs
     validations:
       required: false
 

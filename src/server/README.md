@@ -20,8 +20,8 @@ This crate produces a single binary, not a library. There are no public structs 
 
 | Variable | Default | Description |
 |----------|---------|-------------|
-| `BOGDAN_HTTP_ADDR` | `0.0.0.0:8080` | HTTP REST API listen address |
-| `BOGDAN_WS_ADDR` | `0.0.0.0:8081` | WebSocket listen address |
+| `BOGDAN_HTTP_ADDR` | `0.0.0.0:8585` | HTTP REST API listen address |
+| `BOGDAN_WS_ADDR` | `0.0.0.0:8586` | WebSocket listen address |
 | `BOGDAN_DLNA_NAME` | `boGDan` | Friendly name for DLNA/SSDP announcements |
 | `BOGDAN_TOR_SOCKS` | `127.0.0.1:9050` | Tor SOCKS5 proxy address |
 | `BOGDAN_DB_PATH` | `/var/lib/bogdan/sessions.db` | SQLite database path |
@@ -74,9 +74,9 @@ The subsystems MUST be initialized in this exact order due to hard dependencies:
       resolver, playback,            manager via their trait objects.
       display, tor)
 
-8. HttpApiServer::new(session)     — Start HTTP REST API on port 8080.
-9. WebSocketServer::new(session)   — Start WebSocket server on port 8081.
-10. DlnaRenderer::new(session)     — Start DLNA/SSDP on port 8200 + 1900.
+8. HttpApiServer::new(session)     — Start HTTP REST API on port 8585.
+9. WebSocketServer::new(session)   — Start WebSocket server on port 8586.
+10. DlnaRenderer::new(session)     — Start DLNA/SSDP on port 49152 + 1900.
 
 11. Wait for SIGINT / SIGTERM.
 12. shutdown_tx.send(())           — Broadcast shutdown to all tasks.

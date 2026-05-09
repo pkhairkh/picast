@@ -49,8 +49,8 @@ The extension uses Manifest V3, which is the current standard for both Chrome an
   ],
 
   "host_permissions": [
-    "http://*.local:8080/*",
-    "ws://*.local:8081/*"
+    "http://*.local:8585/*",
+    "ws://*.local:8586/*"
   ],
 
   "content_scripts": [
@@ -91,10 +91,10 @@ Each permission is requested for a specific purpose. The extension follows the p
 
 | Pattern | Purpose |
 |---------|---------|
-| `http://*.local:8080/*` | Access the boGDan HTTP API on mDNS-resolved addresses |
-| `ws://*.local:8081/*` | Connect to the boGDan WebSocket for real-time status |
+| `http://*.local:8585/*` | Access the boGDan HTTP API on mDNS-resolved addresses |
+| `ws://*.local:8586/*` | Connect to the boGDan WebSocket for real-time status |
 
-These are scoped to `.local` mDNS hostnames on the boGDan ports (8080, 8081). The extension does NOT request access to arbitrary HTTP/WebSocket servers.
+These are scoped to `.local` mDNS hostnames on the boGDan ports (8585, 8586). The extension does NOT request access to arbitrary HTTP/WebSocket servers.
 
 ## Background Service Worker
 
