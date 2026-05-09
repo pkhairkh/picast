@@ -1,4 +1,4 @@
-//! PiCast Server Entry Point
+//! boGDan Server Entry Point
 //!
 //! Initializes the tracing subscriber, loads configuration, wires up all
 //! subsystems (session manager, resolver, playback, display, Tor), and
@@ -26,7 +26,7 @@ use tokio::signal;
 use tokio::sync::broadcast;
 use tracing::{error, info, warn};
 
-/// PiCast version — set at build time via `env!` / `cargo:rerun-if-changed`.
+/// boGDan version — set at build time via `env!` / `cargo:rerun-if-changed`.
 const VERSION: &str = env!("CARGO_PKG_VERSION");
 
 // ── Trait adapters ───────────────────────────────────────────────────
@@ -35,11 +35,11 @@ const VERSION: &str = env!("CARGO_PKG_VERSION");
 // to the concrete subsystem types. They bridge the gap between the
 // concrete crates and the session manager's trait-object requirements.
 
-/// Adapter: `picast_tor::TorManager` → `TorTrait`
-struct TorAdapter(Arc<picast_tor::TorManager>);
+/// Adapter: `bogdan_tor::TorManager` → `TorTrait`
+struct TorAdapter(Arc<bogdan_tor::TorManager>);
 
 #[async_trait::async_trait]
-impl picast_session::interfaces::TorTrait for TorAdapter {
+impl bogdan_session::interfaces::TorTrait for TorAdapter {
     async fn ensure_running(&self) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
         self.0.ensure_running(30000).await?;
         Ok(())
@@ -55,15 +55,15 @@ impl picast_session::interfaces::TorTrait for TorAdapter {
     }
 
     fn isolation_username(&self, hostname: &str) -> String {
-        picast_tor::TorManager::isolation_username(hostname)
+        bogdan_tor::TorManager::isolation_username(hostname)
     }
 }
 
-/// Adapter: `picast_display::DisplayManager` → `DisplayTrait`
-struct DisplayAdapter(Arc<tokio::sync::Mutex<picast_display::DisplayManager>>);
+/// Adapter: `bogdan_display::DisplayManager` → `DisplayTrait`
+struct DisplayAdapter(Arc<tokio::sync::Mutex<bogdan_display::DisplayManager>>);
 
 #[async_trait::async_trait]
-impl picast_session::interfaces::DisplayTrait for DisplayAdapter {
+impl bogdan_session::interfaces::DisplayTrait for DisplayAdapter {
     async fn acquire(&self) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
         let mut dm = self.0.lock().await;
         dm.acquire()?;
@@ -82,11 +82,11 @@ impl picast_session::interfaces::DisplayTrait for DisplayAdapter {
     }
 }
 
-/// Adapter: `picast_playback::PlaybackEngine` → `PlaybackTrait`
-struct PlaybackAdapter(Arc<picast_playback::PlaybackEngine>);
+/// Adapter: `bogdan_playback::PlaybackEngine` → `PlaybackTrait`
+struct PlaybackAdapter(Arc<bogdan_playback::PlaybackEngine>);
 
 #[async_trait::async_trait]
-impl picast_session::interfaces::PlaybackTrait for PlaybackAdapter {
+impl bogdan_session::interfaces::PlaybackTrait for PlaybackAdapter {
     async fn play(
         &self,
         url: &str,
@@ -156,18 +156,18 @@ impl picast_session::interfaces::PlaybackTrait for PlaybackAdapter {
     }
 }
 
-/// Adapter: `picast_resolver::Resolver` → `ResolverTrait`
-struct ResolverAdapter(Arc<picast_resolver::Resolver>);
+/// Adapter: `bogdan_resolver::Resolver` → `ResolverTrait`
+struct ResolverAdapter(Arc<bogdan_resolver::Resolver>);
 
 #[async_trait::async_trait]
-impl picast_session::interfaces::ResolverTrait for ResolverAdapter {
+impl bogdan_session::interfaces::ResolverTrait for ResolverAdapter {
     async fn resolve(
         &self,
         url: &str,
-    ) -> Result<picast_session::interfaces::ResolveInfo, Box<dyn std::error::Error + Send + Sync>>
+    ) -> Result<bogdan_session::interfaces::ResolveInfo, Box<dyn std::error::Error + Send + Sync>>
     {
         let result = self.0.resolve(url).await?;
-        Ok(picast_session::interfaces::ResolveInfo {
+        Ok(bogdan_session::interfaces::ResolveInfo {
             direct_url: result.direct_url,
             title: result.title,
             duration_ms: result.duration,
@@ -185,7 +185,7 @@ impl picast_session::interfaces::ResolverTrait for ResolverAdapter {
 /// Initialize the `tracing-subscriber` with an `env-filter`.
 ///
 /// The log level defaults to `info` but can be overridden via:
-/// 1. The `PICAST_LOG_LEVEL` environment variable
+/// 1. The `BOGDAN_LOG_LEVEL` environment variable
 /// 2. The `RUST_LOG` environment variable (standard tracing convention)
 /// 3. The `logging.level` field in the TOML config file
 fn init_tracing(config_level: &str) {
@@ -204,15 +204,15 @@ fn init_tracing(config_level: &str) {
 /// Supports `--version`, `--help`, and `--config <path>`.
 /// Everything else is handled by the TOML config + env vars.
 fn parse_cli_args() -> clap::ArgMatches {
-    clap::Command::new("picast")
+    clap::Command::new("bogdan")
         .version(VERSION)
-        .about("PiCast — Tor-routed media casting appliance")
+        .about("boGDan — Tor-routed media casting appliance")
         .arg(
             clap::Arg::new("config")
                 .short('c')
                 .long("config")
                 .value_name("FILE")
-                .help("Path to picast.toml configuration file"),
+                .help("Path to bogdan.toml configuration file"),
         )
         .get_matches()
 }
@@ -231,9 +231,9 @@ async fn main() -> Result<()> {
     // ── 0b. CLI arguments ─────────────────────────────────────────────
     let cli = parse_cli_args();
 
-    // If --config was given, set PICAST_CONFIG before loading config.
+    // If --config was given, set BOGDAN_CONFIG before loading config.
     if let Some(config_path) = cli.get_one::<String>("config") {
-        std::env::set_var("PICAST_CONFIG", config_path);
+        std::env::set_var("BOGDAN_CONFIG", config_path);
     }
 
     // ── 1. Configuration ──────────────────────────────────────────────
@@ -244,7 +244,7 @@ async fn main() -> Result<()> {
 
     // ── 2. Logging ────────────────────────────────────────────────────
     init_tracing(&config.logging.level);
-    info!("PiCast starting …");
+    info!("boGDan starting …");
     info!(
         http_addr = %config.server.http_addr,
         ws_addr = %config.server.ws_addr,
@@ -270,7 +270,7 @@ async fn main() -> Result<()> {
 
     // 4a. Tor
     let tor_manager = Arc::new(
-        picast_tor::TorManager::new(&config.tor.socks_addr)
+        bogdan_tor::TorManager::new(&config.tor.socks_addr)
             .with_control_port(config.tor.control_port)
             .with_cookie_path(&config.tor.cookie_path),
     );
@@ -295,7 +295,7 @@ async fn main() -> Result<()> {
     // the correct HDMI output explicitly rather than relying on auto-detect.
     #[cfg(feature = "hw")]
     let (display_manager, connector_id) = {
-        let mut dm = picast_display::DisplayManager::new(&config.display.drm_device)?;
+        let mut dm = bogdan_display::DisplayManager::new(&config.display.drm_device)?;
         if let Err(e) = dm.acquire() {
             warn!(error = %e, "display acquire failed at startup — kmssink will auto-detect display");
         }
@@ -306,9 +306,9 @@ async fn main() -> Result<()> {
         (Arc::new(tokio::sync::Mutex::new(dm)), conn_id)
     };
     #[cfg(not(feature = "hw"))]
-    let display_manager: Arc<tokio::sync::Mutex<picast_display::DisplayManager>> = {
+    let display_manager: Arc<tokio::sync::Mutex<bogdan_display::DisplayManager>> = {
         info!("hw feature disabled — display manager running in mock mode");
-        let dm = picast_display::DisplayManager::new(&config.display.drm_device)?;
+        let dm = bogdan_display::DisplayManager::new(&config.display.drm_device)?;
         Arc::new(tokio::sync::Mutex::new(dm))
     };
     #[cfg(not(feature = "hw"))]
@@ -320,7 +320,7 @@ async fn main() -> Result<()> {
     // Create the playback engine with display info from the DisplayManager.
     // Passing connector_id explicitly ensures kmssink renders to the correct
     // HDMI output — auto-detect can misdetect on multi-output setups.
-    let mut pipeline_config = picast_playback::PipelineConfig::default();
+    let mut pipeline_config = bogdan_playback::PipelineConfig::default();
     if let Some(conn_id) = connector_id {
         pipeline_config.connector_id = Some(conn_id);
         info!(connector_id = conn_id, "playback engine configured with explicit connector ID");
@@ -331,35 +331,35 @@ async fn main() -> Result<()> {
     }
     info!(audio_device = %pipeline_config.audio_device, "playback engine will use ALSA device");
     #[cfg(feature = "hw")]
-    let playback_engine: Arc<picast_playback::PlaybackEngine> =
-        { Arc::new(picast_playback::PlaybackEngine::new(pipeline_config)?) };
+    let playback_engine: Arc<bogdan_playback::PlaybackEngine> =
+        { Arc::new(bogdan_playback::PlaybackEngine::new(pipeline_config)?) };
     #[cfg(not(feature = "hw"))]
-    let playback_engine: Arc<picast_playback::PlaybackEngine> = {
+    let playback_engine: Arc<bogdan_playback::PlaybackEngine> = {
         info!("hw feature disabled — playback engine running in mock mode");
-        Arc::new(picast_playback::PlaybackEngine::new(pipeline_config)?)
+        Arc::new(bogdan_playback::PlaybackEngine::new(pipeline_config)?)
     };
     info!("Playback engine created");
 
     // 4d. Resolver — use a persistent cache so resolved URLs survive restarts.
-    let cache_path = std::path::Path::new("/var/lib/picast/resolve-cache.db");
+    let cache_path = std::path::Path::new("/var/lib/bogdan/resolve-cache.db");
     let resolver =
-        Arc::new(picast_resolver::Resolver::with_persistent_cache(tor_manager.clone(), cache_path));
+        Arc::new(bogdan_resolver::Resolver::with_persistent_cache(tor_manager.clone(), cache_path));
     info!(cache = %cache_path.display(), "Resolver created (persistent cache)");
 
     // ── 5. Session manager ────────────────────────────────────────────
     // Wrap concrete types in trait adapters and wire them into the
     // SessionManager so it can drive each subsystem through its trait
     // interface.
-    let tor_trait: Arc<dyn picast_session::interfaces::TorTrait> =
+    let tor_trait: Arc<dyn bogdan_session::interfaces::TorTrait> =
         Arc::new(TorAdapter(tor_manager.clone()));
-    let display_trait: Arc<dyn picast_session::interfaces::DisplayTrait> =
+    let display_trait: Arc<dyn bogdan_session::interfaces::DisplayTrait> =
         Arc::new(DisplayAdapter(display_manager.clone()));
-    let playback_trait: Arc<dyn picast_session::interfaces::PlaybackTrait> =
+    let playback_trait: Arc<dyn bogdan_session::interfaces::PlaybackTrait> =
         Arc::new(PlaybackAdapter(playback_engine.clone()));
-    let resolver_trait: Arc<dyn picast_session::interfaces::ResolverTrait> =
+    let resolver_trait: Arc<dyn bogdan_session::interfaces::ResolverTrait> =
         Arc::new(ResolverAdapter(resolver.clone()));
 
-    let session = Arc::new(picast_session::SessionManager::with_subsystems(
+    let session = Arc::new(bogdan_session::SessionManager::with_subsystems(
         &config.server.db_path,
         resolver_trait,
         playback_trait,
@@ -372,7 +372,7 @@ async fn main() -> Result<()> {
 
     // Load TLS acceptor if cert/key are configured.
     let tls_acceptor = if config.server.tls_enabled() {
-        match picast_protocols::load_tls_acceptor(
+        match bogdan_protocols::load_tls_acceptor(
             &config.server.tls_cert_path,
             &config.server.tls_key_path,
         ) {
@@ -395,16 +395,16 @@ async fn main() -> Result<()> {
     };
 
     let mut http_server =
-        picast_protocols::HttpApiServer::new(&config.server.http_addr, session.clone());
+        bogdan_protocols::HttpApiServer::new(&config.server.http_addr, session.clone());
     let mut ws_server =
-        picast_protocols::WebSocketServer::new(&config.server.ws_addr, session.clone());
+        bogdan_protocols::WebSocketServer::new(&config.server.ws_addr, session.clone());
 
     if let Some(acceptor) = tls_acceptor {
         http_server = http_server.with_tls(acceptor.clone());
         ws_server = ws_server.with_tls(acceptor);
     }
 
-    let dlna_renderer = Arc::new(picast_protocols::DlnaRenderer::new(
+    let dlna_renderer = Arc::new(bogdan_protocols::DlnaRenderer::new(
         &config.dlna.friendly_name,
         &config.tor.socks_addr,
     ));
@@ -460,11 +460,11 @@ async fn main() -> Result<()> {
         }
     });
 
-    // Start DLNA session sync — mirrors PiCast session state to gmediarender.
+    // Start DLNA session sync — mirrors boGDan session state to gmediarender.
     let dlna_sync = dlna_renderer.clone();
     let dlna_event_rx = session.subscribe();
     let dlna_sync_handle = tokio::spawn(async move {
-        picast_protocols::run_dlna_sync(dlna_sync, dlna_event_rx).await;
+        bogdan_protocols::run_dlna_sync(dlna_sync, dlna_event_rx).await;
     });
 
     // ── 8. Background tasks ──────────────────────────────────────────
@@ -563,6 +563,6 @@ async fn main() -> Result<()> {
         warn!(error = %e, "Tor shutdown error");
     }
 
-    info!("PiCast stopped.");
+    info!("boGDan stopped.");
     Ok(())
 }

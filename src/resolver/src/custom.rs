@@ -1,4 +1,4 @@
-//! PiCast Custom Site Resolvers
+//! boGDan Custom Site Resolvers
 //!
 //! Handles video hosting sites that yt-dlp does not support (or supports
 //! poorly). Currently implements resolvers for:
@@ -40,7 +40,7 @@ const UA: &str = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (
 /// same Tor circuit as the playback path.
 ///
 /// The `socks5_proxy` parameter should be a full SOCKS5h proxy URL with
-/// isolation username, e.g. `socks5h://picast-hash@127.0.0.1:9050`.
+/// isolation username, e.g. `socks5h://bogdan-hash@127.0.0.1:9050`.
 async fn build_client(
     socks5_proxy: Option<&str>,
 ) -> Result<(reqwest::Client, Option<ResolverSocksForwarder>), ResolveError> {
@@ -61,7 +61,7 @@ async fn build_client(
         // Tor SOCKS address, then start a local HTTP CONNECT→SOCKS5
         // forwarder that only offers username/password auth (0x02).
         //
-        // URL format: socks5h://picast-HASH@127.0.0.1:9050/
+        // URL format: socks5h://bogdan-HASH@127.0.0.1:9050/
         if let Some((username, socks_addr)) = parse_socks5_url(proxy_url) {
             match ResolverSocksForwarder::start(socks_addr, username).await {
                 Ok(fwd) => {
@@ -110,8 +110,8 @@ async fn build_client(
 
 /// Parse a SOCKS5h proxy URL to extract the isolation username and address.
 ///
-/// Input: `socks5h://picast-HASH@127.0.0.1:9050/`
-/// Returns: `Some(("picast-HASH", "127.0.0.1:9050"))`
+/// Input: `socks5h://bogdan-HASH@127.0.0.1:9050/`
+/// Returns: `Some(("bogdan-HASH", "127.0.0.1:9050"))`
 fn parse_socks5_url(url: &str) -> Option<(String, String)> {
     // Strip the scheme prefix
     let rest = url.strip_prefix("socks5h://").or_else(|| url.strip_prefix("socks5://"))?;
@@ -519,7 +519,7 @@ pub fn is_doodstream_domain(host: &str) -> bool {
 /// 5. Fallback: search for `var source = '...'` and direct `.mp4` URLs (no HLS).
 ///
 /// `socks5_proxy` should be a full SOCKS5h proxy URL with isolation
-/// username, e.g. `socks5h://picast-abc123@127.0.0.1:9050`. This ensures
+/// username, e.g. `socks5h://bogdan-abc123@127.0.0.1:9050`. This ensures
 /// the page fetch goes through the same Tor circuit as the media fetch,
 /// so the CDN's IP-bound token matches.
 pub async fn resolve_voe(
@@ -602,7 +602,7 @@ pub async fn resolve_voe(
 /// 3. Extract the direct media URL from the download page.
 ///
 /// `socks5_proxy` should be a full SOCKS5h proxy URL with isolation
-/// username, e.g. `socks5h://picast-abc123@127.0.0.1:9050`. This ensures
+/// username, e.g. `socks5h://bogdan-abc123@127.0.0.1:9050`. This ensures
 /// the page fetch goes through the same Tor circuit as the media fetch,
 /// so the CDN's IP-bound token matches.
 pub async fn resolve_doodstream(

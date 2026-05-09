@@ -1,12 +1,12 @@
 # Tor Integration
 
-This document describes how PiCast integrates the Tor anonymity network for privacy-preserving media retrieval. It covers the daemon lifecycle, SOCKS5 proxy configuration, port allocation, data directory management, security considerations, performance tuning, and the auto-restart mechanism.
+This document describes how boGDan integrates the Tor anonymity network for privacy-preserving media retrieval. It covers the daemon lifecycle, SOCKS5 proxy configuration, port allocation, data directory management, security considerations, performance tuning, and the auto-restart mechanism.
 
 ## Architecture
 
 ```
 ┌──────────────────────────────────────────────────┐
-│                 PiCast Process                     │
+│                 boGDan Process                     │
 │                                                   │
 │  ┌──────────┐  ┌──────────┐  ┌──────────────┐   │
 │  │ Resolver  │  │ GStreamer│  │ CircuitMonitor│   │
@@ -26,13 +26,13 @@ This document describes how PiCast integrates the Tor anonymity network for priv
                ▼
 ┌──────────────────────────┐
 │     Tor Daemon Process    │
-│  (child of PiCast)       │
+│  (child of boGDan)       │
 │                          │
 │  SOCKS5: 127.0.0.1:9050 │
 │  DNS:    127.0.0.1:9053  │
 │  Control: 9051           │
 │                          │
-│  Data: /var/lib/picast/tor│
+│  Data: /var/lib/bogdan/tor│
 └──────────┬───────────────┘
            │
            ▼
@@ -42,7 +42,7 @@ This document describes how PiCast integrates the Tor anonymity network for priv
 └──────────────────────────┘
 ```
 
-PiCast's `TorManager` spawns the C Tor daemon as a child process, configures it with a custom torrc that enables `IsolateSOCKSAuth` for per-site circuit isolation, monitors its health via periodic SOCKS5 connectivity checks, and automatically restarts it if it becomes unresponsive. The resolver (yt-dlp) and GStreamer (souphttpsrc) both route their HTTP connections through the Tor SOCKS5 proxy at `127.0.0.1:9050`.
+boGDan's `TorManager` spawns the C Tor daemon as a child process, configures it with a custom torrc that enables `IsolateSOCKSAuth` for per-site circuit isolation, monitors its health via periodic SOCKS5 connectivity checks, and automatically restarts it if it becomes unresponsive. The resolver (yt-dlp) and GStreamer (souphttpsrc) both route their HTTP connections through the Tor SOCKS5 proxy at `127.0.0.1:9050`.
 
 ## Daemon Lifecycle
 
@@ -54,12 +54,12 @@ PiCast's `TorManager` spawns the C Tor daemon as a child process, configures it 
 
 2. TorManager::start()
    ├─ Check if SOCKS port is already in use (system Tor conflict)
-   ├─ Spawn: tor --defaults-torrc /etc/picast/torrc \
+   ├─ Spawn: tor --defaults-torrc /etc/bogdan/torrc \
    │             --SocksPort 9050 IsolateSOCKSAuth \
    │             --DNSPort 9053 \
    │             --ControlPort 9051 \
    │             --Log notice stderr \
-   │             --DataDirectory /var/lib/picast/tor
+   │             --DataDirectory /var/lib/bogdan/tor
    └─ Child process running in background
 
 3. TorManager::wait_ready(timeout=60)
@@ -141,7 +141,7 @@ export SOUP_PROXY=socks5://127.0.0.1:9050
 souphttpsrc proxy=socks5://127.0.0.1:9050 location=<URL>
 ```
 
-**Note on stream isolation**: `souphttpsrc`'s built-in SOCKS5 support does not include username/password authentication. For connections that need per-site stream isolation (different sites using different Tor circuits), PiCast uses its own SOCKS5 client implementation in `TorManager` that sends the appropriate username/password credentials derived from the destination hostname. For connections that don't need isolation (e.g., fetching a resolved CDN URL that's already been isolated by the resolver), the simple `proxy` property suffices.
+**Note on stream isolation**: `souphttpsrc`'s built-in SOCKS5 support does not include username/password authentication. For connections that need per-site stream isolation (different sites using different Tor circuits), boGDan uses its own SOCKS5 client implementation in `TorManager` that sends the appropriate username/password credentials derived from the destination hostname. For connections that don't need isolation (e.g., fetching a resolved CDN URL that's already been isolated by the resolver), the simple `proxy` property suffices.
 
 ## Port Allocation
 
@@ -154,17 +154,17 @@ souphttpsrc proxy=socks5://127.0.0.1:9050 location=<URL>
 ## Data Directory
 
 ```
-/var/lib/picast/tor/
+/var/lib/bogdan/tor/
 ├── cached-certs              ← Certificate cache (X.509 certs for directory authorities)
 ├── cached-microdesc-consensus ← Network consensus (refreshed every hour)
 ├── cached-microdescs/        ← Microdescriptor cache (relay capability info)
 ├── lock                      ← Lock file (prevents double-start)
 ├── state                     ← Tor state file (guard selection, circuit history)
-└── keys/                     ← (empty – PiCast doesn't run as a relay or onion service)
+└── keys/                     ← (empty – boGDan doesn't run as a relay or onion service)
 ```
 
 The data directory must be:
-- Owned by the `picast` user
+- Owned by the `bogdan` user
 - Mode `0700` (Tor will refuse to start if the directory is group- or world-readable)
 - On a filesystem with sufficient space (~50 MB for cached consensus and descriptors)
 - Preserved across restarts (contains guard selections that improve security if stable)
@@ -173,7 +173,7 @@ The data directory must be:
 
 ### 1. No Exit Relaying
 
-PiCast explicitly disables all relay and exit functionality. The Pi's bandwidth is used exclusively for its own traffic:
+boGDan explicitly disables all relay and exit functionality. The Pi's bandwidth is used exclusively for its own traffic:
 
 ```torrc
 RelayBandwidthRate 0          # No relay traffic
@@ -194,7 +194,7 @@ All DNS queries MUST go through Tor's DNSPort. This is enforced at multiple laye
 
 ### 3. No Hidden Services
 
-PiCast does not host any onion services. The torrc disables them:
+boGDan does not host any onion services. The torrc disables them:
 
 ```torrc
 HiddenServiceDir disabled
@@ -202,10 +202,10 @@ HiddenServiceDir disabled
 
 ### 4. System Tor Conflicts
 
-PiCast runs its own Tor instance to avoid conflicts with the system Tor service. If both are running on the same port (9050), one will fail to bind. The setup script should detect the conflict and either:
+boGDan runs its own Tor instance to avoid conflicts with the system Tor service. If both are running on the same port (9050), one will fail to bind. The setup script should detect the conflict and either:
 
 - Stop the system Tor service (`sudo systemctl stop tor`), OR
-- Configure PiCast's Tor to use a different SOCKS5 port (e.g., 9054)
+- Configure boGDan's Tor to use a different SOCKS5 port (e.g., 9054)
 
 ### 5. SOCKS5 Port Binding
 
@@ -223,7 +223,7 @@ CircuitBuildTimeout 30
 
 ### Entry Guards
 
-Tor uses 3 long-lived entry guards for security (preventing entry-node profiling attacks). PiCast uses the default configuration:
+Tor uses 3 long-lived entry guards for security (preventing entry-node profiling attacks). boGDan uses the default configuration:
 
 ```torrc
 NumEntryGuards 3
@@ -261,4 +261,4 @@ RelayBandwidthRate 5 MBytes
 RelayBandwidthBurst 10 MBytes
 ```
 
-These limits apply to relay traffic only (which PiCast doesn't use), but they also serve as a safety net. Client traffic (PiCast's own streaming) is not rate-limited by these settings — it's limited by the Tor network's available exit relay bandwidth (typically 2–5 Mbps).
+These limits apply to relay traffic only (which boGDan doesn't use), but they also serve as a safety net. Client traffic (boGDan's own streaming) is not rate-limited by these settings — it's limited by the Tor network's available exit relay bandwidth (typically 2–5 Mbps).

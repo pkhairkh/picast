@@ -1,8 +1,8 @@
 [package]
-name = "picast-display"
+name = "bogdan-display"
 version.workspace = true
 edition.workspace = true
-description = "DRM/KMS atomic modesetting display manager for PiCast on Raspberry Pi 4B+"
+description = "DRM/KMS atomic modesetting display manager for boGDan on Raspberry Pi 4B+"
 
 [features]
 default = []

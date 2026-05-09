@@ -1,8 +1,8 @@
 "use strict";
 /**
- * PiCast Background Service Worker
+ * boGDan Background Service Worker
  *
- * Manages communication with the PiCast receiver on the Raspberry Pi:
+ * Manages communication with the boGDan receiver on the Raspberry Pi:
  * - HTTP API client for cast/control operations with retry logic
  * - WebSocket client for real-time status updates with auto-reconnect
  * - webRequest interception of media URLs (HLS/DASH/direct)
@@ -18,7 +18,7 @@
 
 // ─── Constants ────────────────────────────────────────────────────
 
-const DEFAULT_PICAST_HOST = "picast.local";
+const DEFAULT_BOGDAN_HOST = "bogdan.local";
 const DEFAULT_HTTP_PORT = 8585;
 const DEFAULT_WS_PORT = 8586;
 const WS_RECONNECT_BASE_MS = 1000;
@@ -29,7 +29,7 @@ const MEDIA_CACHE_TTL_MS = 5 * 60 * 1000; // 5 minutes
 const API_TIMEOUT_MS = 8000;
 const API_MAX_RETRIES = 2;
 const VOLUME_DEBOUNCE_MS = 300;
-const ALARM_KEEPALIVE = "picast-keepalive";
+const ALARM_KEEPALIVE = "bogdan-keepalive";
 const ALARM_PERIOD_MINUTES = 0.5; // 30 seconds
 const STATUS_STALE_MS = 30000;
 
@@ -61,10 +61,10 @@ let wsReconnectTimer = null;
 let wsPingTimer = null;
 let wsConnecting = false;
 
-/** Current PiCast status from WebSocket. */
-let currentPicastStatus = null;
+/** Current boGDan status from WebSocket. */
+let currentBogdanStatus = null;
 
-/** Whether we're currently connected to a PiCast device. */
+/** Whether we're currently connected to a boGDan device. */
 let isConnected = false;
 
 /** Whether we have an active playback session. */
@@ -112,7 +112,7 @@ async function getConfig() {
   return new Promise((resolve) => {
     chrome.storage.local.get(
       {
-        piHost: DEFAULT_PICAST_HOST,
+        piHost: DEFAULT_BOGDAN_HOST,
         httpPort: DEFAULT_HTTP_PORT,
         wsPort: DEFAULT_WS_PORT,
         torMode: "full",
@@ -125,11 +125,11 @@ async function getConfig() {
   });
 }
 
-function picastHttpBase(config) {
+function bogdanHttpBase(config) {
   return `https://${config.piHost}:${config.httpPort}`;
 }
 
-function picastWsUrl(config) {
+function bogdanWsUrl(config) {
   return `wss://${config.piHost}:${config.wsPort}/ws`;
 }
 
@@ -164,12 +164,12 @@ function isValidCastUrl(url) {
 // ─── HTTP API Client ──────────────────────────────────────────────
 
 /**
- * Make an API call to the PiCast server with retry logic and timeout.
+ * Make an API call to the boGDan server with retry logic and timeout.
  * Retries on network errors and 5xx responses.
  */
-async function picastApi(endpoint, method = "GET", body = null, retries = API_MAX_RETRIES) {
+async function bogdanApi(endpoint, method = "GET", body = null, retries = API_MAX_RETRIES) {
   const config = await getConfig();
-  const url = `${picastHttpBase(config)}${endpoint}`;
+  const url = `${bogdanHttpBase(config)}${endpoint}`;
   const opts = {
     method,
     headers: { "Content-Type": "application/json" },
@@ -189,26 +189,26 @@ async function picastApi(endpoint, method = "GET", body = null, retries = API_MA
         const text = await response.text().catch(() => "");
         // Retry on 5xx errors
         if (response.status >= 500 && attempt < retries) {
-          console.warn(`[PiCast] API ${response.status}, retrying (${attempt + 1}/${retries})...`);
+          console.warn(`[boGDan] API ${response.status}, retrying (${attempt + 1}/${retries})...`);
           await delay(500 * (attempt + 1));
           continue;
         }
-        throw new Error(`PiCast API ${response.status}: ${text || response.statusText}`);
+        throw new Error(`boGDan API ${response.status}: ${text || response.statusText}`);
       }
       return response.json();
     } catch (err) {
       clearTimeout(timeout);
       if (err.name === "AbortError") {
         if (attempt < retries) {
-          console.warn(`[PiCast] API timeout, retrying (${attempt + 1}/${retries})...`);
+          console.warn(`[boGDan] API timeout, retrying (${attempt + 1}/${retries})...`);
           await delay(500 * (attempt + 1));
           continue;
         }
-        throw new Error(`PiCast API timeout after ${API_TIMEOUT_MS}ms`);
+        throw new Error(`boGDan API timeout after ${API_TIMEOUT_MS}ms`);
       }
       // Network errors — retry (Fix 8: Firefox network error retry)
       if (attempt < retries && (err.message.includes("Failed to fetch") || err.message.includes("NetworkError") || err.name === "TypeError")) {
-        console.warn(`[PiCast] Network error, retrying (${attempt + 1}/${retries})...`);
+        console.warn(`[boGDan] Network error, retrying (${attempt + 1}/${retries})...`);
         await delay(500 * (attempt + 1));
         continue;
       }
@@ -241,18 +241,18 @@ async function connectWebSocket() {
     // Re-check after async gap (Fix 3)
     if (ws && (ws.readyState === WebSocket.OPEN || ws.readyState === WebSocket.CONNECTING)) return;
 
-    const url = picastWsUrl(config);
+    const url = bogdanWsUrl(config);
 
     try {
       ws = new WebSocket(url);
     } catch (e) {
-      console.warn("[PiCast] WebSocket connect failed:", e);
+      console.warn("[boGDan] WebSocket connect failed:", e);
       scheduleWsReconnect();
       return;
     }
 
     ws.onopen = () => {
-      console.log("[PiCast] WebSocket connected to", url);
+      console.log("[boGDan] WebSocket connected to", url);
       wsReconnectAttempts = 0;
       isConnected = true;
       updateBadge("connected");
@@ -266,12 +266,12 @@ async function connectWebSocket() {
         const msg = JSON.parse(event.data);
         handleWsMessage(msg);
       } catch (e) {
-        console.warn("[PiCast] Invalid WebSocket message:", e);
+        console.warn("[boGDan] Invalid WebSocket message:", e);
       }
     };
 
     ws.onclose = () => {
-      console.log("[PiCast] WebSocket closed");
+      console.log("[boGDan] WebSocket closed");
       isConnected = false;
       stopWsPing();
       // Fix 4: Fix dead ternary
@@ -282,7 +282,7 @@ async function connectWebSocket() {
     };
 
     ws.onerror = (e) => {
-      console.warn("[PiCast] WebSocket error:", e);
+      console.warn("[boGDan] WebSocket error:", e);
       isConnected = false;
       stopWsPing();
       // Fix 15: Broadcast WS status changes to popup
@@ -303,7 +303,7 @@ function scheduleWsReconnect() {
   );
   wsReconnectAttempts++;
 
-  console.log(`[PiCast] WebSocket reconnecting in ${delay}ms (attempt ${wsReconnectAttempts})`);
+  console.log(`[boGDan] WebSocket reconnecting in ${delay}ms (attempt ${wsReconnectAttempts})`);
   wsReconnectTimer = setTimeout(async () => {
     wsReconnectTimer = null;
     await connectWebSocket();
@@ -353,12 +353,12 @@ function sendWsCommand(command) {
 function handleWsMessage(msg) {
   switch (msg.type) {
     case "CONNECTED":
-      console.log("[PiCast] Server confirmed connection");
+      console.log("[boGDan] Server confirmed connection");
       break;
 
     case "MEDIA_STATUS":
       // Fix 16/18: Add _receivedAt for staleness tracking
-      currentPicastStatus = { ...msg, _receivedAt: Date.now() };
+      currentBogdanStatus = { ...msg, _receivedAt: Date.now() };
       const state = msg.state?.toLowerCase() || "idle";
       hasActiveSession = state !== "idle";
       updateBadge(state);
@@ -375,7 +375,7 @@ function handleWsMessage(msg) {
       break;
 
     case "ERROR":
-      console.error("[PiCast] Server error:", msg.message);
+      console.error("[boGDan] Server error:", msg.message);
       // Fix 9: Reset hasActiveSession on ERROR
       hasActiveSession = false;
       updateBadge("error");
@@ -386,7 +386,7 @@ function handleWsMessage(msg) {
             chrome.notifications.create({
               type: "basic",
               iconUrl: "icons/icon-48.png",
-              title: "PiCast Error",
+              title: "boGDan Error",
               message: msg.message || "Unknown error",
             });
           } catch {}
@@ -402,7 +402,7 @@ function handleWsMessage(msg) {
       break;
 
     default:
-      console.debug("[PiCast] Unknown WS message type:", msg.type);
+      console.debug("[boGDan] Unknown WS message type:", msg.type);
   }
 }
 
@@ -461,7 +461,7 @@ function updateBadge(state) {
     api.setBadgeBackgroundColor({ color });
     api.setBadgeText({ text });
   } catch (e) {
-    console.warn("[PiCast] Badge update failed:", e);
+    console.warn("[boGDan] Badge update failed:", e);
   }
 }
 
@@ -532,10 +532,10 @@ chrome.tabs.onRemoved.addListener((tabId) => {
 // ─── Cast Logic ───────────────────────────────────────────────────
 
 /**
- * Cast a URL to the PiCast receiver.
+ * Cast a URL to the boGDan receiver.
  * Strategy:
  * 1. Check if a manifest URL was intercepted for this tab → send that
- * 2. Otherwise, send the page URL → PiCast resolves via yt-dlp
+ * 2. Otherwise, send the page URL → boGDan resolves via yt-dlp
  */
 async function handleCast(url, title = null) {
   if (!isValidCastUrl(url)) {
@@ -551,7 +551,7 @@ async function handleCast(url, title = null) {
     castInProgress = true;
 
     const config = await getConfig();
-    const result = await picastApi("/api/cast", "POST", {
+    const result = await bogdanApi("/api/cast", "POST", {
       url,
       title,
       torMode: config.torMode,
@@ -585,12 +585,12 @@ async function handleCast(url, title = null) {
 async function handlePause() {
   // Try WebSocket first, fall back to HTTP
   if (sendWsCommand({ type: "PAUSE" })) return { status: "paused" };
-  return picastApi("/api/pause", "POST");
+  return bogdanApi("/api/pause", "POST");
 }
 
 async function handleResume() {
   if (sendWsCommand({ type: "RESUME" })) return { status: "playing" };
-  return picastApi("/api/resume", "POST");
+  return bogdanApi("/api/resume", "POST");
 }
 
 async function handleStop() {
@@ -602,7 +602,7 @@ async function handleStop() {
     updateBadge("idle");
     return { status: "idle" };
   }
-  const result = await picastApi("/api/stop", "POST");
+  const result = await bogdanApi("/api/stop", "POST");
   updateBadge("idle");
   return result;
 }
@@ -611,7 +611,7 @@ async function handleSeek(positionMs) {
   if (sendWsCommand({ type: "SEEK", position_ms: positionMs })) {
     return { position_ms: positionMs };
   }
-  return picastApi("/api/seek", "POST", { position_ms: positionMs });
+  return bogdanApi("/api/seek", "POST", { position_ms: positionMs });
 }
 
 async function handleVolume(volume) {
@@ -624,7 +624,7 @@ async function handleVolume(volume) {
         if (sendWsCommand({ type: "VOLUME", volume })) {
           result = { volume };
         } else {
-          result = await picastApi("/api/volume", "POST", { volume });
+          result = await bogdanApi("/api/volume", "POST", { volume });
         }
         resolve(result);
       } catch (err) {
@@ -642,18 +642,18 @@ async function handleSubtitle(lang) {
 
 // Fix 16: Handle stale status with _receivedAt
 async function handleStatus() {
-  if (currentPicastStatus && isConnected) {
-    const age = Date.now() - (currentPicastStatus._receivedAt || 0);
-    if (age < STATUS_STALE_MS) return currentPicastStatus;
+  if (currentBogdanStatus && isConnected) {
+    const age = Date.now() - (currentBogdanStatus._receivedAt || 0);
+    if (age < STATUS_STALE_MS) return currentBogdanStatus;
   }
-  return picastApi("/api/status");
+  return bogdanApi("/api/status");
 }
 
 // ─── Auto-Cast Logic ──────────────────────────────────────────────
 
 /**
  * When auto-cast is enabled and media is detected on a page,
- * automatically send the page URL to PiCast.
+ * automatically send the page URL to boGDan.
  */
 async function maybeAutoCast(tabId) {
   const config = await getConfig();
@@ -672,10 +672,10 @@ async function maybeAutoCast(tabId) {
     // Don't auto-cast browser internal pages
     if (tab.url.startsWith("chrome://") || tab.url.startsWith("about:")) return;
 
-    console.log("[PiCast] Auto-casting:", tab.url);
+    console.log("[boGDan] Auto-casting:", tab.url);
     await handleCast(tab.url, tab.title);
   } catch (err) {
-    console.warn("[PiCast] Auto-cast failed:", err.message);
+    console.warn("[boGDan] Auto-cast failed:", err.message);
   }
 }
 
@@ -741,7 +741,7 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
     }
 
     case "WS_STATUS":
-      sendResponse({ connected: isConnected, status: currentPicastStatus });
+      sendResponse({ connected: isConnected, status: currentBogdanStatus });
       return false;
 
     // Fix 7: Fix WS_RECONNECT handler returns connected:false always
@@ -816,7 +816,7 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
 
     case "SET_AUDIO_DEVICE": {
       const audioDevice = message.device || "";
-      picastApi("/api/audio-device", "POST", { device: audioDevice })
+      bogdanApi("/api/audio-device", "POST", { device: audioDevice })
         .then((result) => sendResponse(result))
         .catch((err) => sendResponse({ error: err.message }));
       return true;
@@ -835,13 +835,13 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
     }
 
     case "DISCOVER":
-      discoverPiCast().then((result) => {
+      discoverboGDan().then((result) => {
         sendResponse({ success: true, discovered: result });
       });
       return true;
 
     default:
-      console.warn("[PiCast] Unknown message type:", message.type);
+      console.warn("[boGDan] Unknown message type:", message.type);
       return false;
   }
 });
@@ -849,7 +849,7 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
 // ─── Connection Test (background context) ────────────────────────
 
 /**
- * Test connection to a PiCast receiver from the background script.
+ * Test connection to a boGDan receiver from the background script.
  * This avoids Firefox CSP/CORS issues with fetch() from extension pages.
  */
 async function testConnectionFromBackground(host, port) {
@@ -887,11 +887,11 @@ async function testConnectionFromBackground(host, port) {
       return {
         success: false,
         error:
-          "TLS certificate not trusted. The PiCast server uses a " +
+          "TLS certificate not trusted. The boGDan server uses a " +
           "self-signed CA. Import the CA certificate into your browser: " +
           "Settings > Privacy & Security > Certificates > View Certificates " +
           "> Import > select ca.pem. " +
-          "See the PiCast deploy guide for details.",
+          "See the boGDan deploy guide for details.",
       };
     }
     return { success: false, error: err.message || "Network error" };
@@ -901,7 +901,7 @@ async function testConnectionFromBackground(host, port) {
 // ─── Discovery ────────────────────────────────────────────────────
 
 /**
- * Fetch ALSA audio devices from the PiCast receiver.
+ * Fetch ALSA audio devices from the boGDan receiver.
  * Queries /api/audio-devices and returns the list.
  */
 async function fetchAudioDevicesFromBackground(host, port) {
@@ -931,14 +931,14 @@ async function fetchAudioDevicesFromBackground(host, port) {
 }
 
 /**
- * Attempt to discover a PiCast device on the local network.
+ * Attempt to discover a boGDan device on the local network.
  * Strategy:
  * 1. Try HTTP health check to configured host
  * 2. Try HTTP health check to last-known IP
  */
-async function discoverPiCast() {
+async function discoverboGDan() {
   const config = await getConfig();
-  const base = picastHttpBase(config);
+  const base = bogdanHttpBase(config);
 
   try {
     const controller = new AbortController();
@@ -953,7 +953,7 @@ async function discoverPiCast() {
     if (response.ok) {
       const data = await response.json();
       if (data.status === "ok") {
-        console.log("[PiCast] Discovered device at", base);
+        console.log("[boGDan] Discovered device at", base);
         // Fix 11: Don't set isConnected=true prematurely; ws.onopen handles it
         updateBadge("connected");
         await connectWebSocket();
@@ -967,12 +967,12 @@ async function discoverPiCast() {
       e.name === "TypeError"
     ) {
       console.warn(
-        "[PiCast] Discovery failed — TLS certificate not trusted.",
-        "Import the PiCast CA certificate (ca.pem) into your browser's",
+        "[boGDan] Discovery failed — TLS certificate not trusted.",
+        "Import the boGDan CA certificate (ca.pem) into your browser's",
         "trusted root certificate store. See deploy/generate-certs.sh."
       );
     } else {
-      console.warn("[PiCast] Discovery failed for", base, e.message);
+      console.warn("[boGDan] Discovery failed for", base, e.message);
     }
     isConnected = false;
     updateBadge("disconnected");
@@ -995,7 +995,7 @@ chrome.alarms.onAlarm.addListener((alarm) => {
     }
     // Refresh discovery if we've never connected
     if (!isConnected && !hasActiveSession) {
-      discoverPiCast();
+      discoverboGDan();
     }
   }
 });
@@ -1006,9 +1006,9 @@ async function startKeepAlive() {
     chrome.alarms.create(ALARM_KEEPALIVE, {
       periodInMinutes: ALARM_PERIOD_MINUTES,
     });
-    console.log("[PiCast] Keep-alive alarm set (every", ALARM_PERIOD_MINUTES, "min)");
+    console.log("[boGDan] Keep-alive alarm set (every", ALARM_PERIOD_MINUTES, "min)");
   } catch (e) {
-    console.warn("[PiCast] Failed to set keep-alive alarm:", e);
+    console.warn("[boGDan] Failed to set keep-alive alarm:", e);
   }
 }
 
@@ -1020,16 +1020,16 @@ async function init() {
   initialized = true;
   await loadState();
   await startKeepAlive();
-  await discoverPiCast();
+  await discoverboGDan();
 }
 
 chrome.runtime.onInstalled.addListener(async (details) => {
-  console.log("[PiCast] Extension installed:", details.reason);
+  console.log("[boGDan] Extension installed:", details.reason);
   await init();
 });
 
 chrome.runtime.onStartup.addListener(async () => {
-  console.log("[PiCast] Browser started");
+  console.log("[boGDan] Browser started");
   await init();
 });
 

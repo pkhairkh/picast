@@ -1,4 +1,4 @@
-# picast-resolver
+# bogdan-resolver
 
 Takes a user-provided URL, classifies it, and resolves it to a direct media URL that GStreamer can play. This is the "intelligence" layer that handles the huge diversity of web URLs — from direct MP4 links to YouTube pages to HLS manifests — and produces a concrete, playable stream URL with metadata.
 
@@ -14,7 +14,7 @@ The resolver translates arbitrary URLs from sender apps into concrete, playable 
 | `Resolver::new(ytdlp_path, max_concurrent, socks5_proxy)` | constructor | Create with yt-dlp binary path, concurrency semaphore limit, and Tor SOCKS5 proxy address |
 | `UrlClass` | enum | Classification: `Direct`, `Manifest`, `Media`, `Page` |
 
-The `Resolver` struct implements `picast_session::interfaces::ResolverTrait`:
+The `Resolver` struct implements `bogdan_session::interfaces::ResolverTrait`:
 
 | Method | Description |
 |--------|-------------|
@@ -26,7 +26,7 @@ The `Resolver` struct implements `picast_session::interfaces::ResolverTrait`:
 
 | Dependency | Why |
 |------------|-----|
-| `picast-session` | Provides `ResolverTrait` trait definition that this crate implements |
+| `bogdan-session` | Provides `ResolverTrait` trait definition that this crate implements |
 | `tokio` | Async process spawning for yt-dlp (`tokio::process::Command`), timeout wrappers |
 | `serde` / `serde_json` | Parsing yt-dlp `--dump-json` output (50–200 KB of JSON per video) |
 | `url` | URL parsing, host extraction, and path extension detection for classification |
@@ -79,7 +79,7 @@ Input: URL string
 
 ## yt-dlp Format Selection String
 
-The format string is the most critical part of the resolver — it determines which video stream yt-dlp selects. PiCast forces H.264 (AVC) as the primary codec because the BCM2711 SoC has a dedicated hardware H.264 decoder that can decode 1080p60 with near-zero CPU usage. VP9 and AV1 must be software-decoded, which limits the Pi to ~720p30 due to CPU constraints. HEVC hardware decode is deferred to v2 (ADR-009) because the decoder outputs SAND format incompatible with the HVS.
+The format string is the most critical part of the resolver — it determines which video stream yt-dlp selects. boGDan forces H.264 (AVC) as the primary codec because the BCM2711 SoC has a dedicated hardware H.264 decoder that can decode 1080p60 with near-zero CPU usage. VP9 and AV1 must be software-decoded, which limits the Pi to ~720p30 due to CPU constraints. HEVC hardware decode is deferred to v2 (ADR-009) because the decoder outputs SAND format incompatible with the HVS.
 
 ### Full Format String
 
@@ -159,7 +159,7 @@ The resolver uses `tokio::process::Command` with `tokio::time::timeout` wrappers
 
 - **yt-dlp is blocking**: always acquire the `Semaphore` permit before spawning. Never run more than `max_concurrent` instances simultaneously (default: 2). Multiple concurrent yt-dlp processes would saturate the Pi's CPU and Tor bandwidth.
 
-- **Tor proxy required**: yt-dlp MUST route through the SOCKS5 proxy at `127.0.0.1:9050`. Direct connections leak the Pi's IP address to the content server, violating PiCast's core privacy requirement. The proxy address comes from `TorTrait::socks_addr()`.
+- **Tor proxy required**: yt-dlp MUST route through the SOCKS5 proxy at `127.0.0.1:9050`. Direct connections leak the Pi's IP address to the content server, violating boGDan's core privacy requirement. The proxy address comes from `TorTrait::socks_addr()`.
 
 - **JSON parsing resilience**: yt-dlp's JSON schema varies by site (YouTube, Vimeo, Twitch all produce different field sets). Use `#[serde(default)]` and `Option<T>` for all non-required fields. The `url`, `title`, and `formats` array are the only truly required fields.
 

@@ -1,7 +1,7 @@
 //! Resolver integration tests.
 //!
 //! These tests exercise the URL classification and resolution logic
-//! exposed by `picast_resolver::Resolver`.
+//! exposed by `bogdan_resolver::Resolver`.
 //!
 //! Note: WebPage and Onion URLs now route through yt-dlp, which
 //! requires `yt-dlp` to be installed and Tor to be running. These
@@ -9,11 +9,11 @@
 
 mod common;
 
-use picast_resolver::{ResolveError, Resolver, UrlCategory};
+use bogdan_resolver::{ResolveError, Resolver, UrlCategory};
 use std::sync::Arc;
 
 fn test_resolver() -> Resolver {
-    let tor = Arc::new(picast_tor::TorManager::new("127.0.0.1:9050"));
+    let tor = Arc::new(bogdan_tor::TorManager::new("127.0.0.1:9050"));
     Resolver::new(tor)
 }
 

@@ -1,41 +1,41 @@
 #!/bin/bash
-# PiCast post-remove script
+# boGDan post-remove script
 set -e
 
 case "$1" in
     purge)
         # Disable and remove systemd service
         if command -v systemctl >/dev/null 2>&1; then
-            systemctl disable picast 2>/dev/null || true
+            systemctl disable bogdan 2>/dev/null || true
         fi
-        if [ -f /etc/systemd/system/picast.service ]; then
-            rm -f /etc/systemd/system/picast.service
+        if [ -f /etc/systemd/system/bogdan.service ]; then
+            rm -f /etc/systemd/system/bogdan.service
             if command -v systemctl >/dev/null 2>&1; then
                 systemctl daemon-reload
             fi
         fi
 
-        # Remove picast user
-        if id -u picast >/dev/null 2>&1; then
-            userdel picast 2>/dev/null || true
-            echo "picast: Removed system user"
+        # Remove bogdan user
+        if id -u bogdan >/dev/null 2>&1; then
+            userdel bogdan 2>/dev/null || true
+            echo "bogdan: Removed system user"
         fi
 
         # Remove data directory
-        if [ -d /var/lib/picast ]; then
-            rm -rf /var/lib/picast
-            echo "picast: Removed data directory /var/lib/picast"
+        if [ -d /var/lib/bogdan ]; then
+            rm -rf /var/lib/bogdan
+            echo "bogdan: Removed data directory /var/lib/bogdan"
         fi
 
         # Remove temp directory
-        if [ -d /tmp/picast ]; then
-            rm -rf /tmp/picast
+        if [ -d /tmp/bogdan ]; then
+            rm -rf /tmp/bogdan
         fi
 
         # Remove config directory
-        if [ -d /etc/picast ]; then
-            rm -rf /etc/picast
-            echo "picast: Removed config directory /etc/picast"
+        if [ -d /etc/bogdan ]; then
+            rm -rf /etc/bogdan
+            echo "bogdan: Removed config directory /etc/bogdan"
         fi
         ;;
 

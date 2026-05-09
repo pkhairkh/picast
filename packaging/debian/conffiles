@@ -1,4 +1,4 @@
-/etc/picast/torrc
-/etc/picast/iptables.rules
-/etc/systemd/system/picast.service
-/etc/picast/picast.toml
+/etc/bogdan/torrc
+/etc/bogdan/iptables.rules
+/etc/systemd/system/bogdan.service
+/etc/bogdan/bogdan.toml

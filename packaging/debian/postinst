@@ -1,31 +1,31 @@
 #!/bin/bash
-# PiCast post-install script
+# boGDan post-install script
 set -e
 
 case "$1" in
     configure)
-        # Create picast system user if it doesn't exist
-        if ! id -u picast >/dev/null 2>&1; then
-            useradd -r -m -s /usr/sbin/nologin picast
-            echo "picast: Created system user"
+        # Create bogdan system user if it doesn't exist
+        if ! id -u bogdan >/dev/null 2>&1; then
+            useradd -r -m -s /usr/sbin/nologin bogdan
+            echo "bogdan: Created system user"
         fi
 
-        # Add picast user to required groups (idempotent)
-        usermod -aG video,render,audio picast
+        # Add bogdan user to required groups (idempotent)
+        usermod -aG video,render,audio bogdan
 
         # Create data directory
-        mkdir -p /var/lib/picast
-        chown picast:picast /var/lib/picast
+        mkdir -p /var/lib/bogdan
+        chown bogdan:bogdan /var/lib/bogdan
 
         # Create temp directory
-        mkdir -p /tmp/picast/subs
-        chown picast:picast /tmp/picast
+        mkdir -p /tmp/bogdan/subs
+        chown bogdan:bogdan /tmp/bogdan
 
         # Install iptables rules if available
-        if [ -f /etc/picast/iptables.rules ]; then
+        if [ -f /etc/bogdan/iptables.rules ]; then
             if command -v iptables-restore >/dev/null 2>&1; then
-                iptables-restore < /etc/picast/iptables.rules
-                echo "picast: Firewall rules applied"
+                iptables-restore < /etc/bogdan/iptables.rules
+                echo "bogdan: Firewall rules applied"
             fi
             # Persist rules if iptables-persistent is available
             if command -v netfilter-persistent >/dev/null 2>&1; then
@@ -34,27 +34,27 @@ case "$1" in
         fi
 
         # Configure Tor if available
-        if [ -f /etc/picast/torrc ]; then
+        if [ -f /etc/bogdan/torrc ]; then
             if [ -d /etc/tor ]; then
                 # Back up existing torrc before overwriting
                 if [ -f /etc/tor/torrc ]; then
-                    cp -a /etc/tor/torrc /etc/tor/torrc.picast-backup 2>/dev/null || true
+                    cp -a /etc/tor/torrc /etc/tor/torrc.bogdan-backup 2>/dev/null || true
                 fi
-                cp /etc/picast/torrc /etc/tor/torrc
+                cp /etc/bogdan/torrc /etc/tor/torrc
                 chmod 644 /etc/tor/torrc
                 if command -v systemctl >/dev/null 2>&1; then
                     systemctl restart tor 2>/dev/null || true
                     systemctl enable tor 2>/dev/null || true
                 fi
-                echo "picast: Tor configured"
+                echo "bogdan: Tor configured"
             fi
         fi
 
         # Enable systemd service
         if command -v systemctl >/dev/null 2>&1; then
             systemctl daemon-reload
-            systemctl enable picast 2>/dev/null || true
-            echo "picast: Service enabled (start with: systemctl start picast)"
+            systemctl enable bogdan 2>/dev/null || true
+            echo "bogdan: Service enabled (start with: systemctl start bogdan)"
         fi
         ;;
 

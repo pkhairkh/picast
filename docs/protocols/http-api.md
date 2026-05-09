@@ -1,6 +1,6 @@
 # HTTP API Specification
 
-PiCast exposes a RESTful JSON API on port **8080** for sender applications (browser extension, phone app, CLI tools, Home Assistant integrations). All endpoints accept and return `application/json`. The API is served over plain HTTP (no TLS) because PiCast is a LAN-only device — TLS on a local network adds complexity without meaningful security benefit in a trusted-network model.
+boGDan exposes a RESTful JSON API on port **8080** for sender applications (browser extension, phone app, CLI tools, Home Assistant integrations). All endpoints accept and return `application/json`. The API is served over plain HTTP (no TLS) because boGDan is a LAN-only device — TLS on a local network adds complexity without meaningful security benefit in a trusted-network model.
 
 ## Base URL
 
@@ -80,7 +80,7 @@ The `state` field will be `"resolving"` initially. Use `GET /api/v1/status` or t
 | Status | When |
 |--------|------|
 | 400 | Missing or invalid `url` field |
-| 409 | Already resolving or playing another URL (PiCast supports one session at a time) |
+| 409 | Already resolving or playing another URL (boGDan supports one session at a time) |
 | 500 | Resolver failed (yt-dlp error, network timeout, unsupported URL) |
 
 #### Example: Cast a direct MP4
@@ -256,7 +256,7 @@ curl http://192.168.1.100:8080/api/v1/status | jq .
 
 ### 4. GET /api/v1/queue
 
-Get the current playback queue. PiCast v1 supports single-item playback; the queue is defined for forward compatibility.
+Get the current playback queue. boGDan v1 supports single-item playback; the queue is defined for forward compatibility.
 
 #### Response (200 OK)
 

@@ -1,4 +1,4 @@
-//! Shared test utilities for PiCast integration tests.
+//! Shared test utilities for boGDan integration tests.
 //!
 //! Provides helper functions for resolving test configuration from
 //! environment variables and waiting for servers to become available.
@@ -10,18 +10,18 @@ use std::time::{Duration, Instant};
 /// Return the Tor SOCKS proxy address used for tests.
 ///
 /// Defaults to `127.0.0.1:9050` but can be overridden with the
-/// `PICAST_TEST_TOR_SOCKS` environment variable.
+/// `BOGDAN_TEST_TOR_SOCKS` environment variable.
 pub fn test_tor_socks_addr() -> String {
-    std::env::var("PICAST_TEST_TOR_SOCKS").unwrap_or_else(|_| "127.0.0.1:9050".into())
+    std::env::var("BOGDAN_TEST_TOR_SOCKS").unwrap_or_else(|_| "127.0.0.1:9050".into())
 }
 
 /// Return the HTTP API address used for tests.
 ///
 /// Defaults to `127.0.0.1:8585` but can be overridden with the
-/// `PICAST_TEST_HTTP_ADDR` environment variable.
+/// `BOGDAN_TEST_HTTP_ADDR` environment variable.
 #[allow(dead_code)]
 pub fn test_http_addr() -> String {
-    std::env::var("PICAST_TEST_HTTP_ADDR").unwrap_or_else(|_| "127.0.0.1:8585".into())
+    std::env::var("BOGDAN_TEST_HTTP_ADDR").unwrap_or_else(|_| "127.0.0.1:8585".into())
 }
 
 /// Poll `addr` with TCP connect attempts until the server is up.

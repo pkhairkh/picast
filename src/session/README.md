@@ -1,6 +1,6 @@
-# picast-session
+# bogdan-session
 
-Central state machine, playback queue, and adaptive bitrate controller. This is the "brain" of PiCast — every protocol server funnels commands through `SessionManager`. It owns the global playback state, coordinates the four subsystems via trait interfaces, persists the queue to SQLite, and monitors buffer health to drive ABR decisions.
+Central state machine, playback queue, and adaptive bitrate controller. This is the "brain" of boGDan — every protocol server funnels commands through `SessionManager`. It owns the global playback state, coordinates the four subsystems via trait interfaces, persists the queue to SQLite, and monitors buffer health to drive ABR decisions.
 
 ## Purpose
 
@@ -46,11 +46,11 @@ The session crate owns and coordinates the global playback state, the FIFO queue
 
 | Dependency | Why |
 |------------|-----|
-| `picast-resolver` | Via `ResolverTrait` trait object — resolves URLs through yt-dlp and Tor |
-| `picast-playback` | Via `PlaybackTrait` trait object — GStreamer pipeline construction and control |
-| `picast-display` | Via `DisplayTrait` trait object — DRM/KMS plane acquisition and mode setting |
-| `picast-tor` | Via `TorTrait` trait object — Tor daemon lifecycle and SOCKS5 proxy address |
-| `rusqlite` | Queue and session persistence (SQLite at `/var/lib/picast/sessions.db`) |
+| `bogdan-resolver` | Via `ResolverTrait` trait object — resolves URLs through yt-dlp and Tor |
+| `bogdan-playback` | Via `PlaybackTrait` trait object — GStreamer pipeline construction and control |
+| `bogdan-display` | Via `DisplayTrait` trait object — DRM/KMS plane acquisition and mode setting |
+| `bogdan-tor` | Via `TorTrait` trait object — Tor daemon lifecycle and SOCKS5 proxy address |
+| `rusqlite` | Queue and session persistence (SQLite at `/var/lib/bogdan/sessions.db`) |
 | `tokio` | Async runtime, `watch` channel for state notifications, `spawn_blocking` for SQLite |
 | `uuid` | Session and queue item identifiers (UUID v4) |
 | `serde` / `serde_json` | JSON serialization for status snapshots and WebSocket messages |
@@ -162,7 +162,7 @@ When a tier change is triggered, `SessionManager` calls `ResolverTrait::resolve(
 
 - **Error state is sticky**: once the state machine enters `Error`, the only valid transition is `Error → Idle` via `stop()`. Do not attempt to auto-recover from the Error state without user intervention — the error may indicate a fundamental problem (e.g., unsupported codec) that retrying will not solve.
 
-- **Single active session**: PiCast supports one playback session at a time. If `load()` is called while a session is active, return `SessionError::Subsystem("session already active")` with the existing session ID.
+- **Single active session**: boGDan supports one playback session at a time. If `load()` is called while a session is active, return `SessionError::Subsystem("session already active")` with the existing session ID.
 
 ## Reference
 

@@ -1,4 +1,4 @@
-//! PiCast Display Manager
+//! boGDan Display Manager
 //!
 //! Direct rendering manager for the Raspberry Pi's DRM/KMS subsystem.
 //! Bypasses X11/Wayland and speaks directly to the kernel mode-setting
@@ -325,7 +325,7 @@ impl DisplayManager {
         //   A) gmediarender just exited but the kernel hasn't released the
         //      master lock yet (typically < 200 ms).
         //   B) The kernel fbcon (framebuffer console) holds DRM master on
-        //      the vc4 device.  The ExecStartPre in picast.service unbinds
+        //      the vc4 device.  The ExecStartPre in bogdan.service unbinds
         //      fbcon, but that may take a moment to propagate.
         //
         // If we cannot get master, we continue anyway — resource enumeration

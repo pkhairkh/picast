@@ -1,24 +1,24 @@
 [package]
-name = "picast-server"
+name = "bogdan-server"
 version.workspace = true
 edition.workspace = true
-description = "PiCast main binary — orchestrates all subsystems"
+description = "boGDan main binary — orchestrates all subsystems"
 
 [[bin]]
-name = "picast"
+name = "bogdan"
 path = "src/main.rs"
 
 [features]
 default = []
-hw = ["picast-playback/hw", "picast-display/hw"]
+hw = ["bogdan-playback/hw", "bogdan-display/hw"]
 
 [dependencies]
-picast-protocols = { path = "../protocols" }
-picast-session = { path = "../session" }
-picast-resolver = { path = "../resolver" }
-picast-playback = { path = "../playback", default-features = false }
-picast-display = { path = "../display", default-features = false }
-picast-tor = { path = "../tor" }
+bogdan-protocols = { path = "../protocols" }
+bogdan-session = { path = "../session" }
+bogdan-resolver = { path = "../resolver" }
+bogdan-playback = { path = "../playback", default-features = false }
+bogdan-display = { path = "../display", default-features = false }
+bogdan-tor = { path = "../tor" }
 tokio = { workspace = true, features = ["full"] }
 tracing = { workspace = true }
 tracing-subscriber = { workspace = true }
@@ -35,5 +35,5 @@ ring = "0.17"
 tokio = { workspace = true }
 serde_json = { workspace = true }
 reqwest = { version = "0.12", features = ["json"] }
-picast-tor = { path = "../tor" }
+bogdan-tor = { path = "../tor" }
 tempfile = "3"

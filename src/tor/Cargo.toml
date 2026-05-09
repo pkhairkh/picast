@@ -1,8 +1,8 @@
 [package]
-name = "picast-tor"
+name = "bogdan-tor"
 version.workspace = true
 edition.workspace = true
-description = "Tor daemon lifecycle management and SOCKS5 proxy layer for PiCast"
+description = "Tor daemon lifecycle management and SOCKS5 proxy layer for boGDan"
 
 [dependencies]
 tokio = { workspace = true, features = ["process", "net", "time", "rt", "macros", "io-util"] }

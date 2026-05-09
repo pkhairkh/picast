@@ -1,20 +1,20 @@
-//! PiCast Configuration
+//! boGDan Configuration
 //!
 //! Loads application configuration from a TOML file and/or environment
 //! variables. Configuration sources are merged with the following
 //! precedence (highest to lowest):
 //!
-//! 1. Environment variables (`PICAST_*`)
-//! 2. TOML config file (`picast.toml` or path from `PICAST_CONFIG`)
+//! 1. Environment variables (`BOGDAN_*`)
+//! 2. TOML config file (`bogdan.toml` or path from `BOGDAN_CONFIG`)
 //! 3. Built-in defaults
 //!
-//! ## Example `picast.toml`
+//! ## Example `bogdan.toml`
 //!
 //! ```toml
 //! [server]
 //! http_addr = "0.0.0.0:8585"
 //! ws_addr = "0.0.0.0:8586"
-//! db_path = "/var/lib/picast/sessions.db"
+//! db_path = "/var/lib/bogdan/sessions.db"
 //!
 //! [tor]
 //! socks_addr = "127.0.0.1:9050"
@@ -25,7 +25,7 @@
 //! drm_device = ""
 //!
 //! [dlna]
-//! friendly_name = "PiCast"
+//! friendly_name = "boGDan"
 //!
 //! [logging]
 //! level = "info"
@@ -40,7 +40,7 @@ use std::path::Path;
 /// Full application configuration.
 ///
 /// Deserialized from a TOML file and/or populated from environment
-/// variables. All fields have sensible defaults so PiCast works
+/// variables. All fields have sensible defaults so boGDan works
 /// out of the box with no config file.
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct AppConfig {
@@ -186,7 +186,7 @@ fn default_ws_addr() -> String {
     "0.0.0.0:8586".into()
 }
 fn default_db_path() -> String {
-    "/var/lib/picast/sessions.db".into()
+    "/var/lib/bogdan/sessions.db".into()
 }
 fn default_socks_addr() -> String {
     "127.0.0.1:9050".into()
@@ -198,7 +198,7 @@ fn default_tor_cookie_path() -> String {
     "/run/tor/control.authcookie".into()
 }
 fn default_dlna_name() -> String {
-    "PiCast".into()
+    "boGDan".into()
 }
 fn default_dlna_port() -> u16 {
     49152
@@ -211,19 +211,19 @@ fn default_log_level() -> String {
 
 /// Configuration file search paths (in order of priority).
 const CONFIG_SEARCH_PATHS: &[&str] =
-    &["picast.toml", "/etc/picast/picast.toml", "/usr/local/etc/picast/picast.toml"];
+    &["bogdan.toml", "/etc/bogdan/bogdan.toml", "/usr/local/etc/bogdan/bogdan.toml"];
 
 impl AppConfig {
     /// Load configuration from file (if found) and merge with env vars.
     ///
     /// The config file is searched in the following locations:
-    /// 1. `PICAST_CONFIG` env var (explicit path)
-    /// 2. `./picast.toml` (current directory)
-    /// 3. `/etc/picast/picast.toml`
-    /// 4. `/usr/local/etc/picast/picast.toml`
+    /// 1. `BOGDAN_CONFIG` env var (explicit path)
+    /// 2. `./bogdan.toml` (current directory)
+    /// 3. `/etc/bogdan/bogdan.toml`
+    /// 4. `/usr/local/etc/bogdan/bogdan.toml`
     ///
     /// If no config file is found, defaults are used and then overridden
-    /// by any `PICAST_*` environment variables that are set.
+    /// by any `BOGDAN_*` environment variables that are set.
     pub fn load() -> Result<Self> {
         let mut config = Self::load_from_file()?;
         config.merge_env();
@@ -232,15 +232,15 @@ impl AppConfig {
 
     /// Load configuration from a TOML file.
     ///
-    /// Searches the standard paths unless `PICAST_CONFIG` is set.
+    /// Searches the standard paths unless `BOGDAN_CONFIG` is set.
     /// Returns default config if no file is found.
     pub fn load_from_file() -> Result<Self> {
         // Check for explicit config path.
-        let explicit_path = std::env::var("PICAST_CONFIG").ok();
+        let explicit_path = std::env::var("BOGDAN_CONFIG").ok();
 
         let config_path = if let Some(ref path) = explicit_path {
             if !Path::new(path).exists() {
-                anyhow::bail!("PICAST_CONFIG={:?} does not exist", path);
+                anyhow::bail!("BOGDAN_CONFIG={:?} does not exist", path);
             }
             Some(path.clone())
         } else {
@@ -269,51 +269,51 @@ impl AppConfig {
     ///
     /// Environment variables take precedence over config file values.
     fn merge_env(&mut self) {
-        if let Ok(v) = std::env::var("PICAST_HTTP_ADDR") {
+        if let Ok(v) = std::env::var("BOGDAN_HTTP_ADDR") {
             self.server.http_addr = v;
         }
-        if let Ok(v) = std::env::var("PICAST_WS_ADDR") {
+        if let Ok(v) = std::env::var("BOGDAN_WS_ADDR") {
             self.server.ws_addr = v;
         }
-        if let Ok(v) = std::env::var("PICAST_DB_PATH") {
+        if let Ok(v) = std::env::var("BOGDAN_DB_PATH") {
             self.server.db_path = v;
         }
-        if let Ok(v) = std::env::var("PICAST_TOR_SOCKS") {
+        if let Ok(v) = std::env::var("BOGDAN_TOR_SOCKS") {
             self.tor.socks_addr = v;
         }
-        if let Ok(v) = std::env::var("PICAST_TOR_CONTROL_PORT") {
+        if let Ok(v) = std::env::var("BOGDAN_TOR_CONTROL_PORT") {
             if let Ok(port) = v.parse::<u16>() {
                 self.tor.control_port = port;
             } else {
-                tracing::warn!(value = %v, "PICAST_TOR_CONTROL_PORT is not a valid port number");
+                tracing::warn!(value = %v, "BOGDAN_TOR_CONTROL_PORT is not a valid port number");
             }
         }
-        if let Ok(v) = std::env::var("PICAST_TOR_COOKIE_PATH") {
+        if let Ok(v) = std::env::var("BOGDAN_TOR_COOKIE_PATH") {
             self.tor.cookie_path = v;
         }
-        if let Ok(v) = std::env::var("PICAST_DRM_DEVICE") {
+        if let Ok(v) = std::env::var("BOGDAN_DRM_DEVICE") {
             self.display.drm_device = v;
         }
-        if let Ok(v) = std::env::var("PICAST_AUDIO_DEVICE") {
+        if let Ok(v) = std::env::var("BOGDAN_AUDIO_DEVICE") {
             self.playback.audio_device = v;
         }
-        if let Ok(v) = std::env::var("PICAST_DLNA_NAME") {
+        if let Ok(v) = std::env::var("BOGDAN_DLNA_NAME") {
             self.dlna.friendly_name = v;
         }
-        if let Ok(v) = std::env::var("PICAST_DLNA_PORT") {
+        if let Ok(v) = std::env::var("BOGDAN_DLNA_PORT") {
             if let Ok(port) = v.parse::<u16>() {
                 self.dlna.port = port;
             } else {
-                tracing::warn!(value = %v, "PICAST_DLNA_PORT is not a valid port number");
+                tracing::warn!(value = %v, "BOGDAN_DLNA_PORT is not a valid port number");
             }
         }
-        if let Ok(v) = std::env::var("PICAST_TLS_CERT") {
+        if let Ok(v) = std::env::var("BOGDAN_TLS_CERT") {
             self.server.tls_cert_path = v;
         }
-        if let Ok(v) = std::env::var("PICAST_TLS_KEY") {
+        if let Ok(v) = std::env::var("BOGDAN_TLS_KEY") {
             self.server.tls_key_path = v;
         }
-        if let Ok(v) = std::env::var("PICAST_LOG_LEVEL") {
+        if let Ok(v) = std::env::var("BOGDAN_LOG_LEVEL") {
             self.logging.level = v;
         }
     }
@@ -328,12 +328,12 @@ mod tests {
         let config = AppConfig::default();
         assert_eq!(config.server.http_addr, "0.0.0.0:8585");
         assert_eq!(config.server.ws_addr, "0.0.0.0:8586");
-        assert_eq!(config.server.db_path, "/var/lib/picast/sessions.db");
+        assert_eq!(config.server.db_path, "/var/lib/bogdan/sessions.db");
         assert_eq!(config.tor.socks_addr, "127.0.0.1:9050");
         assert_eq!(config.tor.control_port, 9051);
         assert_eq!(config.tor.cookie_path, "/run/tor/control.authcookie");
         assert_eq!(config.display.drm_device, "");
-        assert_eq!(config.dlna.friendly_name, "PiCast");
+        assert_eq!(config.dlna.friendly_name, "boGDan");
         assert_eq!(config.logging.level, "info");
     }
 
@@ -358,12 +358,12 @@ http_addr = "0.0.0.0:9999"
 [server]
 http_addr = "0.0.0.0:8080"
 ws_addr = "0.0.0.0:8081"
-db_path = "/tmp/picast-test.db"
+db_path = "/tmp/bogdan-test.db"
 
 [tor]
 socks_addr = "127.0.0.1:19050"
 control_port = 19051
-cookie_path = "/tmp/picast-test/control_auth_cookie"
+cookie_path = "/tmp/bogdan-test/control_auth_cookie"
 
 [display]
 drm_device = "/dev/dri/card1"
@@ -377,10 +377,10 @@ level = "debug"
         let config: AppConfig = toml::from_str(toml).unwrap();
         assert_eq!(config.server.http_addr, "0.0.0.0:8080");
         assert_eq!(config.server.ws_addr, "0.0.0.0:8081");
-        assert_eq!(config.server.db_path, "/tmp/picast-test.db");
+        assert_eq!(config.server.db_path, "/tmp/bogdan-test.db");
         assert_eq!(config.tor.socks_addr, "127.0.0.1:19050");
         assert_eq!(config.tor.control_port, 19051);
-        assert_eq!(config.tor.cookie_path, "/tmp/picast-test/control_auth_cookie");
+        assert_eq!(config.tor.cookie_path, "/tmp/bogdan-test/control_auth_cookie");
         assert_eq!(config.display.drm_device, "/dev/dri/card1");
         assert_eq!(config.dlna.friendly_name, "Living Room Pi");
         assert_eq!(config.logging.level, "debug");
@@ -416,33 +416,33 @@ level = "debug"
     fn merge_env_overrides_config() {
         let _guard = ENV_TEST_MUTEX.lock().unwrap();
         // Ensure a clean state before we start.
-        std::env::remove_var("PICAST_HTTP_ADDR");
+        std::env::remove_var("BOGDAN_HTTP_ADDR");
 
         let mut config = AppConfig::default();
         assert_eq!(config.server.http_addr, "0.0.0.0:8585");
 
         // Set env var.
-        std::env::set_var("PICAST_HTTP_ADDR", "0.0.0.0:9999");
+        std::env::set_var("BOGDAN_HTTP_ADDR", "0.0.0.0:9999");
         config.merge_env();
         assert_eq!(config.server.http_addr, "0.0.0.0:9999");
 
         // Clean up.
-        std::env::remove_var("PICAST_HTTP_ADDR");
+        std::env::remove_var("BOGDAN_HTTP_ADDR");
     }
 
     #[test]
     fn merge_env_applies_defaults_for_unset() {
         let _guard = ENV_TEST_MUTEX.lock().unwrap();
-        // Clear any PICAST env vars from other tests.
-        std::env::remove_var("PICAST_HTTP_ADDR");
-        std::env::remove_var("PICAST_WS_ADDR");
-        std::env::remove_var("PICAST_TOR_SOCKS");
-        std::env::remove_var("PICAST_TOR_CONTROL_PORT");
-        std::env::remove_var("PICAST_TOR_COOKIE_PATH");
-        std::env::remove_var("PICAST_DRM_DEVICE");
-        std::env::remove_var("PICAST_DLNA_NAME");
-        std::env::remove_var("PICAST_DB_PATH");
-        std::env::remove_var("PICAST_LOG_LEVEL");
+        // Clear any BOGDAN env vars from other tests.
+        std::env::remove_var("BOGDAN_HTTP_ADDR");
+        std::env::remove_var("BOGDAN_WS_ADDR");
+        std::env::remove_var("BOGDAN_TOR_SOCKS");
+        std::env::remove_var("BOGDAN_TOR_CONTROL_PORT");
+        std::env::remove_var("BOGDAN_TOR_COOKIE_PATH");
+        std::env::remove_var("BOGDAN_DRM_DEVICE");
+        std::env::remove_var("BOGDAN_DLNA_NAME");
+        std::env::remove_var("BOGDAN_DB_PATH");
+        std::env::remove_var("BOGDAN_LOG_LEVEL");
 
         let mut config = AppConfig::default();
         config.merge_env();
@@ -457,12 +457,12 @@ level = "debug"
 [tor]
 socks_addr = "127.0.0.1:19051"
 control_port = 19052
-cookie_path = "/tmp/picast/control_auth_cookie"
+cookie_path = "/tmp/bogdan/control_auth_cookie"
 "#;
         let config: AppConfig = toml::from_str(toml).unwrap();
         assert_eq!(config.tor.socks_addr, "127.0.0.1:19051");
         assert_eq!(config.tor.control_port, 19052);
-        assert_eq!(config.tor.cookie_path, "/tmp/picast/control_auth_cookie");
+        assert_eq!(config.tor.cookie_path, "/tmp/bogdan/control_auth_cookie");
         assert_eq!(config.server.http_addr, "0.0.0.0:8585");
         assert_eq!(config.display.drm_device, "");
     }
@@ -477,7 +477,7 @@ cookie_path = "/tmp/picast/control_auth_cookie"
     #[test]
     fn load_from_temp_file() {
         let dir = tempfile::tempdir().unwrap();
-        let path = dir.path().join("picast.toml");
+        let path = dir.path().join("bogdan.toml");
         let contents = r#"
 [server]
 http_addr = "0.0.0.0:7777"

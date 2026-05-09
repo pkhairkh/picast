@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# PiCast Pi Hardware Smoke Test (T-9.3)
+# boGDan Pi Hardware Smoke Test (T-9.3)
 #
 # Automated smoke test for Pi hardware: verifies the server is up,
 # Tor connectivity works, casting plays media, playback controls
@@ -7,8 +7,8 @@
 #
 # Usage:
 #   ./scripts/smoke-test.sh                        # defaults
-#   PICAST_HOST=192.168.1.100 ./scripts/smoke-test.sh
-#   PICAST_PORT=8585 TEST_URL=... ./scripts/smoke-test.sh
+#   BOGDAN_HOST=192.168.1.100 ./scripts/smoke-test.sh
+#   BOGDAN_PORT=8585 TEST_URL=... ./scripts/smoke-test.sh
 #
 # Exit codes:
 #   0  — all tests passed
@@ -17,12 +17,12 @@
 set -euo pipefail
 
 # ── Configurable variables ──────────────────────────────────────────
-PICAST_HOST="${PICAST_HOST:-localhost}"
-PICAST_PORT="${PICAST_PORT:-8585}"
+BOGDAN_HOST="${BOGDAN_HOST:-localhost}"
+BOGDAN_PORT="${BOGDAN_PORT:-8585}"
 TEST_URL="${TEST_URL:-https://upload.wikimedia.org/wikipedia/commons/transcoded/c/c0/Big_Buck_Bunny_4K.webm/Big_Buck_Bunny_4K.webm.480p.vp9.webm}"
 
 # Derived
-BASE_URL="http://${PICAST_HOST}:${PICAST_PORT}"
+BASE_URL="http://${BOGDAN_HOST}:${BOGDAN_PORT}"
 
 # ── Timeouts (seconds) ─────────────────────────────────────────────
 HEALTH_TIMEOUT="${HEALTH_TIMEOUT:-30}"
@@ -135,39 +135,39 @@ cleanup() {
 trap cleanup EXIT
 
 # ── Banner ──────────────────────────────────────────────────────────
-printf "\n${CYN}PiCast Smoke Test${RST}\n"
+printf "\n${CYN}boGDan Smoke Test${RST}\n"
 printf "  Target : %s\n" "${BASE_URL}"
 printf "  Test URL: %s\n" "${TEST_URL}"
 printf "  Date   : %s\n\n" "$(date -Iseconds)"
 
 # ════════════════════════════════════════════════════════════════════
-# TEST 1: Start / verify picast-server
+# TEST 1: Start / verify bogdan-server
 # ════════════════════════════════════════════════════════════════════
 printf "${CYN}[1/8] Server availability${RST}\n"
 
 # Check if server is already running on the target.
 if curl -sf --max-time 2 "${BASE_URL}/api/health" &>/dev/null; then
-    log_pass "picast-server already running" ""
+    log_pass "bogdan-server already running" ""
 else
     # Try to start via systemctl (common on Pi deployments).
-    if systemctl is-active --quiet picast 2>/dev/null; then
-        log_pass "picast-server started via systemctl" ""
-    elif command -v picast-server &>/dev/null; then
+    if systemctl is-active --quiet bogdan 2>/dev/null; then
+        log_pass "bogdan-server started via systemctl" ""
+    elif command -v bogdan-server &>/dev/null; then
         # Start as background process for local testing.
-        picast-server &>/tmp/picast-smoke-test.log &
+        bogdan-server &>/tmp/bogdan-smoke-test.log &
         SERVER_PID=$!
         # Wait briefly for it to come up.
         sleep 2
-        log_pass "picast-server started (PID ${SERVER_PID})" ""
-    elif command -v picast &>/dev/null; then
-        picast &>/tmp/picast-smoke-test.log &
+        log_pass "bogdan-server started (PID ${SERVER_PID})" ""
+    elif command -v bogdan &>/dev/null; then
+        bogdan &>/tmp/bogdan-smoke-test.log &
         SERVER_PID=$!
         sleep 2
-        log_pass "picast started (PID ${SERVER_PID})" ""
+        log_pass "bogdan started (PID ${SERVER_PID})" ""
     else
-        log_fail "picast-server not running and not found in PATH"
+        log_fail "bogdan-server not running and not found in PATH"
         # We cannot continue without a server.
-        printf "\n  ${RED}Cannot proceed without picast-server. Aborting.${RST}\n\n"
+        printf "\n  ${RED}Cannot proceed without bogdan-server. Aborting.${RST}\n\n"
         exit 1
     fi
 fi
@@ -253,7 +253,7 @@ sleep 1
 cast_ok=false
 cast_body=""
 elapsed_start=$(date +%s%N)
-http_code=$(curl -s -o /tmp/picast-smoke-cast.json -w "%{http_code}" \
+http_code=$(curl -s -o /tmp/bogdan-smoke-cast.json -w "%{http_code}" \
     --max-time 30 \
     -X POST "${BASE_URL}/api/cast" \
     -H "Content-Type: application/json" \
@@ -262,7 +262,7 @@ elapsed_end=$(date +%s%N)
 elapsed_ms=$(( (elapsed_end - elapsed_start) / 1000000 ))
 
 if [[ "${http_code}" == "202" ]]; then
-    cast_body=$(cat /tmp/picast-smoke-cast.json 2>/dev/null || echo "{}")
+    cast_body=$(cat /tmp/bogdan-smoke-cast.json 2>/dev/null || echo "{}")
     # Extract session ID.
     if command -v jq &>/dev/null; then
         SESSION_ID=$(printf '%s' "$cast_body" | jq -r '.session_id // .id // empty' 2>/dev/null || true)

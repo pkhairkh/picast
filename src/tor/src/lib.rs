@@ -1,4 +1,4 @@
-//! PiCast Tor Manager
+//! boGDan Tor Manager
 //!
 //! Manages a local Tor daemon and its SOCKS5 proxy so that the
 //! resolver can fetch `.onion` addresses or route any request
@@ -24,9 +24,9 @@ use tokio::process::{Child, Command};
 use tokio::sync::Mutex;
 
 fn runtime_dir() -> PathBuf {
-    std::env::var_os("PICAST_RUNTIME_DIR")
+    std::env::var_os("BOGDAN_RUNTIME_DIR")
         .map(PathBuf::from)
-        .unwrap_or_else(|| PathBuf::from("/tmp/picast"))
+        .unwrap_or_else(|| PathBuf::from("/tmp/bogdan"))
 }
 
 // ── Stream Isolation ─────────────────────────────────────────────────
@@ -34,13 +34,13 @@ fn runtime_dir() -> PathBuf {
 /// Compute a per-domain SOCKS5 stream-isolation identifier.
 ///
 /// Takes a domain name, hashes it with SHA-256, and returns a
-/// string in the format `picast-<first_16_hex_chars>`. This feeds
+/// string in the format `bogdan-<first_16_hex_chars>`. This feeds
 /// into Tor's `IsolateSOCKSAuth` feature so that each unique domain
 /// gets its own circuit.
 pub fn stream_isolation_id(domain: &str) -> String {
     let hash = Sha256::digest(domain.as_bytes());
     let hex: String = hash.encode_hex();
-    format!("picast-{}", &hex[..16])
+    format!("bogdan-{}", &hex[..16])
 }
 
 // ── Errors ───────────────────────────────────────────────────────────
@@ -88,7 +88,7 @@ pub struct SocksProxy {
     pub port: u16,
     /// Whether the proxy requires authentication.
     pub requires_auth: bool,
-    /// Prefix for stream-isolation usernames (default `"picast"`).
+    /// Prefix for stream-isolation usernames (default `"bogdan"`).
     pub stream_isolation_prefix: String,
 }
 
@@ -99,7 +99,7 @@ impl SocksProxy {
             host: host.to_owned(),
             port,
             requires_auth: false,
-            stream_isolation_prefix: "picast".to_owned(),
+            stream_isolation_prefix: "bogdan".to_owned(),
         }
     }
 
@@ -111,7 +111,7 @@ impl SocksProxy {
     /// Build a full SOCKS5h proxy URL with per-hostname circuit
     /// isolation embedded as the username.
     ///
-    /// Returns a URL like `socks5h://picast-a804e89b1ec4a1d7@127.0.0.1:9050/`.
+    /// Returns a URL like `socks5h://bogdan-a804e89b1ec4a1d7@127.0.0.1:9050/`.
     pub fn proxy_url_for(&self, hostname: &str) -> String {
         let id = stream_isolation_id(hostname);
         format!("socks5h://{}@{}:{}/", id, self.host, self.port)
@@ -536,7 +536,7 @@ impl TorManager {
 
         // If server selected Username/Password auth (0x02), authenticate.
         if response[1] == 0x02 {
-            let username = b"picast-health";
+            let username = b"bogcast-health";
             let password = b"";
             let mut auth_msg = Vec::with_capacity(3 + username.len() + password.len());
             auth_msg.push(0x01); // sub-negotiation version
@@ -1069,8 +1069,8 @@ mod tests {
         let id1 = stream_isolation_id("youtube.com");
         let id2 = stream_isolation_id("youtube.com");
         assert_eq!(id1, id2);
-        assert!(id1.starts_with("picast-"));
-        assert_eq!(id1.len(), 7 + 16); // "picast-" + 16 hex chars
+        assert!(id1.starts_with("bogdan-"));
+        assert_eq!(id1.len(), 7 + 16); // "bogdan-" + 16 hex chars
     }
 
     #[test]
@@ -1091,7 +1091,7 @@ mod tests {
     fn test_socks_username_for_url() {
         let tor = TorManager::new("127.0.0.1:9050");
         let id = tor.socks_username_for_url("https://www.youtube.com/watch?v=abc");
-        assert!(id.starts_with("picast-"));
+        assert!(id.starts_with("bogdan-"));
         assert_eq!(id.len(), 7 + 16);
     }
 
@@ -1099,14 +1099,14 @@ mod tests {
     fn test_socks_username_for_url_no_host() {
         let tor = TorManager::new("127.0.0.1:9050");
         let id = tor.socks_username_for_url("not-a-url");
-        assert!(id.starts_with("picast-"));
+        assert!(id.starts_with("bogdan-"));
     }
 
     #[test]
     fn test_socks_proxy_url_for() {
         let proxy = SocksProxy::new("127.0.0.1", 9050);
         let url = proxy.proxy_url_for("youtube.com");
-        assert!(url.starts_with("socks5h://picast-"));
+        assert!(url.starts_with("socks5h://bogdan-"));
         assert!(url.contains("@127.0.0.1:9050/"));
     }
 
@@ -1187,8 +1187,8 @@ mod tests {
         let u1 = TorManager::isolation_username("youtube.com");
         let u2 = TorManager::isolation_username("youtube.com");
         assert_eq!(u1, u2, "same hostname must produce same username");
-        assert!(u1.starts_with("picast-"), "username should have picast- prefix");
-        assert_eq!(u1.len(), 23, "picast- (7) + 16 hex chars = 23");
+        assert!(u1.starts_with("bogdan-"), "username should have bogdan- prefix");
+        assert_eq!(u1.len(), 23, "bogdan- (7) + 16 hex chars = 23");
     }
 
     #[test]
@@ -1201,7 +1201,7 @@ mod tests {
     #[test]
     fn isolation_username_onion() {
         let u = TorManager::isolation_username("xyz123456.onion");
-        assert!(u.starts_with("picast-"));
+        assert!(u.starts_with("bogdan-"));
         assert_eq!(u.len(), 23);
     }
 

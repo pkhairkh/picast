@@ -1,5 +1,5 @@
 [package]
-name = "picast-session"
+name = "bogdan-session"
 version.workspace = true
 edition.workspace = true
 
@@ -19,6 +19,6 @@ url.workspace = true
 [dev-dependencies]
 tokio = { workspace = true }
 serde_json = { workspace = true }
-picast-tor = { path = "../tor" }
+bogdan-tor = { path = "../tor" }
 async-trait = { workspace = true }
 tempfile = "3"

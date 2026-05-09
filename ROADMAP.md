@@ -1,4 +1,4 @@
-# PiCast Production Roadmap
+# boGDan Production Roadmap
 
 **From scaffolding to a shippable Raspberry Pi 4B+ media casting appliance.**
 
@@ -9,7 +9,7 @@
 > cross-compilation setup. The documentation (7,000+ lines) is the most mature
 > artifact in the project.
 >
-> **Target state:** A PiCast binary that boots on a Raspberry Pi 4B+, connects
+> **Target state:** A boGDan binary that boots on a Raspberry Pi 4B+, connects
 > to Tor, accepts a URL from the browser extension, resolves it via yt-dlp,
 > plays 1080p60 H.264 video through the zero-copy V4L2→DRM/KMS pipeline, and
 > can be controlled via HTTP, WebSocket, and DLNA — all surviving a `cargo test`
@@ -23,8 +23,8 @@
 
 **Why first:** Every subsequent phase assumes a working build. Right now, the
 crates may not even compile against each other — the workspace `Cargo.toml`
-dependencies are declared but the actual crate APIs they reference (`picast_tor`,
-`picast_display`, etc.) are `Arc<()>` stubs in `server/main.rs`. A CI pipeline
+dependencies are declared but the actual crate APIs they reference (`bogdan_tor`,
+`bogdan_display`, etc.) are `Arc<()>` stubs in `server/main.rs`. A CI pipeline
 catches regressions from day one.
 
 | Milestone | Deliverable | Exit Criteria |
@@ -47,7 +47,7 @@ catches regressions from day one.
 
 ## Phase 1 — Tor Daemon Integration
 
-**Goal:** `picast-tor` can start/stop a real Tor daemon, verify the SOCKS5 proxy
+**Goal:** `bogdan-tor` can start/stop a real Tor daemon, verify the SOCKS5 proxy
 is reachable, and provide the proxy address to other crates.
 
 **Why second:** The resolver and playback engine both need the SOCKS proxy
@@ -84,11 +84,11 @@ tor.shutdown().await?;                 // SIGTERM + wait
 
 ## Phase 2 — DRM/KMS Display Manager
 
-**Goal:** `picast-display` opens `/dev/dri/card0`, becomes DRM master, enumerates
+**Goal:** `bogdan-display` opens `/dev/dri/card0`, becomes DRM master, enumerates
 planes and CRTCs, and can set a mode on the HDMI connector.
 
 **Why third:** The playback engine needs a working display to render video frames.
-The `kmssink` GStreamer element handles plane assignment internally, but PiCast
+The `kmssink` GStreamer element handles plane assignment internally, but boGDan
 needs the display manager to: (a) verify hardware at startup, (b) provide the
 plane/CRTC configuration to the playback engine, and (c) render OSD on Plane 1.
 
@@ -118,7 +118,7 @@ display.release()?;
 **Risks:**
 - Requires actual Pi hardware for integration tests; x86 dev uses mock mode.
 - DRM master conflicts: if X11/Wayland is running, `drmSetMaster()` fails.
-  The `picast.service` systemd unit must ensure no display server starts.
+  The `bogdan.service` systemd unit must ensure no display server starts.
 - GBM buffer allocation from CMA pool can fail under memory pressure — need
   fallback strategy or early CMA reservation via kernel cmdline.
 
@@ -126,12 +126,12 @@ display.release()?;
 
 ## Phase 3 — GStreamer Playback Engine
 
-**Goal:** `picast-playback` constructs and controls a real GStreamer pipeline
+**Goal:** `bogdan-playback` constructs and controls a real GStreamer pipeline
 that plays H.264 video through V4L2 hardware decode and DRM/KMS direct display.
 
 **Why fourth:** The playback engine is the core value proposition — it must work
-before any protocol or session logic can be meaningful. It depends on `picast-tor`
-(for SOCKS proxy address) and `picast-display` (for plane/CRTC configuration).
+before any protocol or session logic can be meaningful. It depends on `bogdan-tor`
+(for SOCKS proxy address) and `bogdan-display` (for plane/CRTC configuration).
 
 | Milestone | Deliverable | Exit Criteria |
 |-----------|-------------|---------------|
@@ -171,7 +171,7 @@ souphttpsrc location={url} socks5-proxy-ip={proxy_ip} socks5-proxy-port={proxy_p
 
 ## Phase 4 — Content Resolver (yt-dlp)
 
-**Goal:** `picast-resolver` invokes yt-dlp as a subprocess, parses its JSON
+**Goal:** `bogdan-resolver` invokes yt-dlp as a subprocess, parses its JSON
 output, and returns a `ResolveResult` with the direct media URL, format metadata,
 and subtitle availability.
 
@@ -197,7 +197,7 @@ and "playback engine gets an H.264 stream URL."
 **Key command template:**
 ```bash
 yt-dlp -J --no-warnings \
-  --proxy "socks5h://picast-<sha256-domain>@127.0.0.1:9050/" \
+  --proxy "socks5h://bogdan-<sha256-domain>@127.0.0.1:9050/" \
   --format "bestvideo[vcodec^=avc1]+bestaudio/best[vcodec^=avc1]/best" \
   --write-subs --sub-langs "en,es,fr,de" --sub-format vtt \
   --no-playlist \
@@ -213,7 +213,7 @@ yt-dlp -J --no-warnings \
 
 ## Phase 5 — Session Manager
 
-**Goal:** `picast-session` implements the full state machine, wires resolver →
+**Goal:** `bogdan-session` implements the full state machine, wires resolver →
 playback → display → Tor through trait objects, and persists state in SQLite.
 
 **Why sixth:** The session manager is the central coordinator. It depends on all
@@ -270,7 +270,7 @@ session manager do real work.
 
 ## Phase 6 — Protocol Servers
 
-**Goal:** `picast-protocols` implements the HTTP REST API, WebSocket server, and
+**Goal:** `bogdan-protocols` implements the HTTP REST API, WebSocket server, and
 DLNA MediaRenderer — the three interfaces external controllers use.
 
 **Why seventh:** Protocol servers are the outermost layer. They depend on the
@@ -307,7 +307,7 @@ because they can be tested with HTTP/WebSocket clients without Pi hardware.
 
 ## Phase 7 — Server Orchestration
 
-**Goal:** `picast-server` wires all subsystems together, spawns tasks, and
+**Goal:** `bogdan-server` wires all subsystems together, spawns tasks, and
 handles graceful shutdown.
 
 | Milestone | Deliverable | Exit Criteria |
@@ -317,7 +317,7 @@ handles graceful shutdown.
 | 7.3 | Graceful shutdown | SIGINT/SIGTERM → broadcast shutdown → wait for tasks → stop playback → release display → kill Tor |
 | 7.4 | Startup ordering | Tor → Display → Playback → Resolver → Session → Protocols (sequential, each must succeed) |
 | 7.5 | Health check endpoint | `GET /api/health` returns status of all subsystems |
-| 7.6 | Configuration from file | `picast.conf` (TOML) in addition to env vars |
+| 7.6 | Configuration from file | `bogdan.conf` (TOML) in addition to env vars |
 | 7.7 | End-to-end test on Pi | Boot → cast YouTube URL → verify video on HDMI → stop → clean shutdown |
 
 **Estimated effort:** 5–7 days
@@ -340,7 +340,7 @@ distributable.
 | 8.7 | Options page: full settings | Pi address, port, Tor mode, auto-detect toggle |
 | 8.8 | Chrome Web Store package | `zip` of extension directory, passes `chrome://extensions` developer mode load |
 | 8.9 | Firefox Add-on package | `xpi` or unsigned `zip`, passes `about:debugging` load |
-| 8.10 | Error handling | API unreachable → "PiCast not found" message; timeout → retry with backoff |
+| 8.10 | Error handling | API unreachable → "boGDan not found" message; timeout → retry with backoff |
 
 **Estimated effort:** 6–8 days
 
@@ -367,14 +367,14 @@ distributable.
 
 ## Phase 10 — Distribution & Documentation
 
-**Goal:** PiCast can be installed on a fresh Raspberry Pi OS image with a single
+**Goal:** boGDan can be installed on a fresh Raspberry Pi OS image with a single
 command and minimal configuration.
 
 | Milestone | Deliverable | Exit Criteria |
 |-----------|-------------|---------------|
 | 10.1 | `scripts/setup.sh` overhaul | One-command install: `curl -sSL https://.../setup.sh | bash` installs all deps, builds, configures |
-| 10.2 | Debian package (`picast_0.1.0_arm64.deb`) | `dpkg -i picast.deb` installs binary, config, systemd service, torrc |
-| 10.3 | Pre-built SD card image | Flash-and-boot Pi OS image with PiCast pre-installed (Raspberry Pi Imager compatible) |
+| 10.2 | Debian package (`bogdan_0.1.0_arm64.deb`) | `dpkg -i bogdan.deb` installs binary, config, systemd service, torrc |
+| 10.3 | Pre-built SD card image | Flash-and-boot Pi OS image with boGDan pre-installed (Raspberry Pi Imager compatible) |
 | 10.4 | README.md rewrite | Quick start guide: flash → boot → install extension → cast |
 | 10.5 | User guide | `docs/USER_GUIDE.md`: configuration, troubleshooting, FAQ |
 | 10.6 | Security hardening guide | `docs/SECURITY.md`: iptables rules explanation, Tor verification, physical security |
@@ -417,7 +417,7 @@ Phase 0 → Phase 1 → Phase 2 → Phase 3 → Phase 5 → Phase 6 → Phase 7 
 
 ### First Demo Milestone
 
-**After Phase 3 (day 36):** A PiCast binary that boots on Pi, starts Tor, and
+**After Phase 3 (day 36):** A boGDan binary that boots on Pi, starts Tor, and
 plays a direct H.264 URL through the zero-copy pipeline to HDMI. This is the
 "it works" moment — everything after this is wiring and polish.
 

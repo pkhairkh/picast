@@ -1,21 +1,21 @@
 [Unit]
-Description=PiCast Media Receiver
+Description=boGDan Media Receiver
 After=network-online.target
 Wants=network-online.target
 
 [Service]
 Type=notify
-User=picast
-Group=picast
+User=bogdan
+Group=bogdan
 SupplementaryGroups=video render audio
 
 # Release the kernel framebuffer console (fbcon) from the vc4 DRM
-# device so that PiCast (and kmssink) can acquire DRM master.
+# device so that boGDan (and kmssink) can acquire DRM master.
 # On Raspberry Pi with vc4, fbcon binds to the DRM device and holds
 # DRM master, preventing other processes from acquiring it.  drmSetMaster
 # returns EBUSY even with CAP_SYS_ADMIN in current Linux kernels (6.x),
 # so the only way to release master is to unbind fbcon first.
-# The "+" prefix runs this as root (overriding User=picast) because
+# The "+" prefix runs this as root (overriding User=bogdan) because
 # writing to /sys/class/vtconsole requires root even with CAP_SYS_ADMIN.
 # The "-" prefix makes failure non-fatal (e.g. on vkms or systems
 # without fbcon).
@@ -27,11 +27,11 @@ ExecStartPre=+-/bin/sh -c 'for vt in /sys/class/vtconsole/vtcon*/bind; do [ -f "
 AmbientCapabilities=CAP_SYS_ADMIN
 CapabilityBoundingSet=CAP_SYS_ADMIN
 
-Environment=RUST_LOG=picast=info
-Environment=HOME=/var/lib/picast
-Environment=XDG_CACHE_HOME=/var/lib/picast/.cache
-Environment=PICAST_RUNTIME_DIR=/run/picast
-Environment=TMPDIR=/run/picast
+Environment=RUST_LOG=bogdan=info
+Environment=HOME=/var/lib/bogdan
+Environment=XDG_CACHE_HOME=/var/lib/bogdan/.cache
+Environment=BOGDAN_RUNTIME_DIR=/run/bogdan
+Environment=TMPDIR=/run/bogdan
 # GStreamer debug for diagnosing preroll/playback and caps negotiation failures.
 # kmssink:5 = DEBUG (DRM master, plane selection, buffer rendering)
 # v4l2h264dec:5 = DEBUG (HW decode caps negotiation)
@@ -41,23 +41,23 @@ Environment=TMPDIR=/run/picast
 # GST_STATES:5 = DEBUG (state change transitions)
 # souphttpsrc:3 = FIXME (HTTP errors like 403)
 Environment=GST_DEBUG=kmssink:5,v4l2h264dec:5,h264parse:5,GST_CAPS:5,GST_PADS:4,GST_STATES:5,souphttpsrc:3
-Environment=GST_DEBUG_FILE=/run/picast/gst-debug.log
-ExecStart=/usr/local/bin/picast-server --config /etc/picast/picast.toml
+Environment=GST_DEBUG_FILE=/run/bogdan/gst-debug.log
+ExecStart=/usr/local/bin/bogdan-server --config /etc/bogdan/bogdan.toml
 NotifyAccess=all
 
 Restart=on-failure
 RestartSec=5
 WatchdogSec=30
 
-RuntimeDirectory=picast
+RuntimeDirectory=bogdan
 RuntimeDirectoryMode=0755
-StateDirectory=picast
+StateDirectory=bogdan
 StateDirectoryMode=0755
 
 NoNewPrivileges=true
 ProtectSystem=strict
 ProtectHome=true
-ReadWritePaths=/run/picast /var/lib/picast /etc/picast
+ReadWritePaths=/run/bogdan /var/lib/bogdan /etc/bogdan
 PrivateTmp=false
 ProtectKernelTunables=true
 ProtectKernelModules=true

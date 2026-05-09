@@ -1,10 +1,10 @@
-# picast-playback
+# bogdan-playback
 
 Constructs and controls GStreamer pipelines for media playback on the Raspberry Pi 4, including buffer monitoring, gapless source switching for ABR quality changes, and subtitle overlay. This crate translates high-level commands (play, pause, seek, stop) into GStreamer pipeline state changes and provides buffer fill telemetry to the ABR controller.
 
 ## Purpose
 
-The playback crate is the media engine of PiCast. It builds GStreamer pipelines with hardware-accelerated V4L2 H.264 decoding and zero-copy DRM/KMS display output via kmssink. It handles three distinct pipeline topologies (progressive, HLS, and with-subtitles), manages the V4L2 decoder's DMA-BUF output mode, monitors the `queue2` buffering element for ABR decisions, and coordinates with `picast-display` to ensure kmssink uses the correct DRM plane and CRTC. All GStreamer threading concerns are encapsulated within this crate — external callers never touch GStreamer objects directly.
+The playback crate is the media engine of boGDan. It builds GStreamer pipelines with hardware-accelerated V4L2 H.264 decoding and zero-copy DRM/KMS display output via kmssink. It handles three distinct pipeline topologies (progressive, HLS, and with-subtitles), manages the V4L2 decoder's DMA-BUF output mode, monitors the `queue2` buffering element for ABR decisions, and coordinates with `bogdan-display` to ensure kmssink uses the correct DRM plane and CRTC. All GStreamer threading concerns are encapsulated within this crate — external callers never touch GStreamer objects directly.
 
 ## Public API
 
@@ -16,7 +16,7 @@ The playback crate is the media engine of PiCast. It builds GStreamer pipelines 
 | `MediaType` | enum | `Progressive`, `Hls`, `Dash` — determines pipeline topology |
 | `PipelineHandle` | struct | Wrapper around `gst::Pipeline` with `RwLock` for thread safety |
 
-The `PlaybackEngine` struct implements `picast_session::interfaces::PlaybackTrait`:
+The `PlaybackEngine` struct implements `bogdan_session::interfaces::PlaybackTrait`:
 
 | Method | Description |
 |--------|-------------|
@@ -40,8 +40,8 @@ Additional methods for ABR integration:
 
 | Dependency | Why |
 |------------|-----|
-| `picast-session` | Provides `PlaybackTrait` trait definition and `MediaType` enum |
-| `picast-display` | Provides DRM FD and plane info for kmssink configuration |
+| `bogdan-session` | Provides `PlaybackTrait` trait definition and `MediaType` enum |
+| `bogdan-display` | Provides DRM FD and plane info for kmssink configuration |
 | `gstreamer` | Core GStreamer bindings (pipeline construction, state management, bus messages) |
 | `gstreamer-video` | Video-specific utilities (caps, format negotiation) |
 | `gstreamer-app` | `appsrc`/`appsink` for custom data flow (future: subtitle injection) |
@@ -157,7 +157,7 @@ parsebin                                                            subparse enc
 
 3. **V4L2 M2M decoder** — `v4l2h264dec` only works on Linux with the BCM2711 V4L2 stateful decoder (`bcm2835-codec` driver at `/dev/video10`). On a dev machine (x86_64), the fallback to `avdec_h264` (software decoder) is essential. Always include the fallback in pipeline construction: try `v4l2h264dec` first, fall back to `avdec_h264` if the element is not available.
 
-4. **DMA-BUF mode** — set `io-mode=dmabuf` and `capture-io-mode=dmabuf` on `v4l2h264dec`. Without `capture-io-mode=dmabuf`, the decoder allocates system memory buffers and the zero-copy path is broken. This is the single most important property for PiCast's performance.
+4. **DMA-BUF mode** — set `io-mode=dmabuf` and `capture-io-mode=dmabuf` on `v4l2h264dec`. Without `capture-io-mode=dmabuf`, the decoder allocates system memory buffers and the zero-copy path is broken. This is the single most important property for boGDan's performance.
 
 5. **Buffer query** — use `GstQueryBuffering` to read the current buffer fill percentage. Convert to 0.0–1.0 ratio. Test with network-throttled streams (`--limit-rate` on a local HTTP server) to verify the buffering logic triggers correctly.
 
@@ -167,7 +167,7 @@ parsebin                                                            subparse enc
 
 ## Key Constraints
 
-- **kmssink requires DRM master**: only one process can be DRM master. If the display manager has already opened `/dev/dri/card0`, kmssink will fail to acquire the plane. Coordinate with `picast-display` to share the DRM FD or ensure no other process is DRM master.
+- **kmssink requires DRM master**: only one process can be DRM master. If the display manager has already opened `/dev/dri/card0`, kmssink will fail to acquire the plane. Coordinate with `bogdan-display` to share the DRM FD or ensure no other process is DRM master.
 
 - **GStreamer threading**: GStreamer creates its own threads internally (streaming threads, the bus thread, pad task threads). Do not call GStreamer methods from multiple tokio tasks without a `Mutex` or `RwLock`. The `RwLock<PipelineHandle>` protects against concurrent access.
 

@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# verify-network-isolation.sh — PiCast T-9.4 Network Isolation Verification
+# verify-network-isolation.sh — boGDan T-9.4 Network Isolation Verification
 #
 # Verifies that iptables rules block all outbound traffic except through Tor.
 # Tests DNS leak prevention, direct-HTTP blocking, SOCKS5 proxy functionality,
@@ -72,7 +72,7 @@ has_command() {
 # ─── Header ──────────────────────────────────────────────────────
 
 echo -e "${BOLD}╔════════════════════════════════════════════════════════════╗${NC}"
-echo -e "${BOLD}║       PiCast Network Isolation Verification (T-9.4)      ║${NC}"
+echo -e "${BOLD}║       boGDan Network Isolation Verification (T-9.4)      ║${NC}"
 echo -e "${BOLD}╚════════════════════════════════════════════════════════════╝${NC}"
 echo ""
 echo -e "  Date:    $(date -u '+%Y-%m-%d %H:%M:%S UTC')"
@@ -414,14 +414,14 @@ fi
 
 # ─── 8. LAN-only access for service ports ────────────────────────
 
-section "8. LAN-Only Access for PiCast Service Ports"
+section "8. LAN-Only Access for boGDan Service Ports"
 
 if ! is_root; then
     skip "iptables INPUT chain audit requires root (use sudo)"
 elif ! has_command iptables; then
     skip "iptables not available"
 else
-    # Check that PiCast service ports (8585, 8586, 49152) are restricted to LAN
+    # Check that boGDan service ports (8585, 8586, 49152) are restricted to LAN
     for port in 8585 8586 49152; do
         port_rules=$(iptables -S INPUT 2>/dev/null | grep -E "--dport ${port}" || true)
         if [[ -z "$port_rules" ]]; then
@@ -441,7 +441,7 @@ fi
 section "9. Tor is Client-Only (Not Relay/Exit)"
 
 # Check torrc for relay/exit settings
-TORRC_PATHS=("/etc/tor/torrc" "/etc/picast/torrc")
+TORRC_PATHS=("/etc/tor/torrc" "/etc/bogdan/torrc")
 torrc_found=false
 
 for torrc in "${TORRC_PATHS[@]}"; do
@@ -491,63 +491,63 @@ if [[ "$torrc_found" == "false" ]]; then
     skip "No torrc found at ${TORRC_PATHS[*]}"
 fi
 
-# ─── 10. Process runs as picast user ────────────────────────────
+# ─── 10. Process runs as bogdan user ────────────────────────────
 
-section "10. PiCast Process Runs as Non-Root User"
+section "10. boGDan Process Runs as Non-Root User"
 
-PICAST_PID=$(pgrep -f "picast" 2>/dev/null || true)
+BOGDAN_PID=$(pgrep -f "bogdan" 2>/dev/null || true)
 
-if [[ -n "$PICAST_PID" ]]; then
-    picast_user=$(ps -o user= -p "$PICAST_PID" 2>/dev/null | head -1 || true)
-    picast_uid=$(ps -o uid= -p "$PICAST_PID" 2>/dev/null | head -1 || true)
+if [[ -n "$BOGDAN_PID" ]]; then
+    bogdan_user=$(ps -o user= -p "$BOGDAN_PID" 2>/dev/null | head -1 || true)
+    bogdan_uid=$(ps -o uid= -p "$BOGDAN_PID" 2>/dev/null | head -1 || true)
 
-    if [[ "$picast_user" == "root" || "$picast_uid" == "0" ]]; then
-        fail "PiCast process is running as root — should run as 'picast' user"
-    elif [[ "$picast_user" == "picast" ]]; then
-        pass "PiCast process runs as 'picast' user"
+    if [[ "$bogdan_user" == "root" || "$bogdan_uid" == "0" ]]; then
+        fail "boGDan process is running as root — should run as 'bogdan' user"
+    elif [[ "$bogdan_user" == "bogdan" ]]; then
+        pass "boGDan process runs as 'bogdan' user"
     else
-        info "PiCast process runs as user '${picast_user}' (expected 'picast')"
+        info "boGDan process runs as user '${bogdan_user}' (expected 'bogdan')"
         # Still pass if it's not root
-        if [[ "$picast_uid" != "0" ]]; then
-            pass "PiCast process is not running as root"
+        if [[ "$bogdan_uid" != "0" ]]; then
+            pass "boGDan process is not running as root"
         fi
     fi
 
     # Check group membership for DRM access
-    picast_groups=$(id -Gn "$picast_user" 2>/dev/null || true)
-    if echo "$picast_groups" | grep -qw "video"; then
+    bogdan_groups=$(id -Gn "$bogdan_user" 2>/dev/null || true)
+    if echo "$bogdan_groups" | grep -qw "video"; then
         pass "Process user has 'video' group membership (DRM/KMS access)"
     else
         fail "Process user does NOT have 'video' group membership (needed for DRM/KMS)"
     fi
 
-    if echo "$picast_groups" | grep -qw "render"; then
+    if echo "$bogdan_groups" | grep -qw "render"; then
         pass "Process user has 'render' group membership (GPU access)"
     else
         info "Process user does not have 'render' group membership (may not be needed)"
     fi
 
-    if echo "$picast_groups" | grep -qw "audio"; then
+    if echo "$bogdan_groups" | grep -qw "audio"; then
         pass "Process user has 'audio' group membership (ALSA access)"
     else
         info "Process user does not have 'audio' group membership (may not be needed)"
     fi
 else
-    skip "PiCast process not running — cannot verify process user"
+    skip "boGDan process not running — cannot verify process user"
 fi
 
-# ─── 11. DRM master is only PiCast (no X11/Wayland) ─────────────
+# ─── 11. DRM master is only boGDan (no X11/Wayland) ─────────────
 
-section "11. DRM Master is Only PiCast (No X11/Wayland)"
+section "11. DRM Master is Only boGDan (No X11/Wayland)"
 
 if pgrep -x Xorg &>/dev/null; then
-    fail "Xorg is running — DRM master may be held by X11, not PiCast"
+    fail "Xorg is running — DRM master may be held by X11, not boGDan"
 else
     pass "Xorg is not running"
 fi
 
 if pgrep -x Xwayland &>/dev/null; then
-    fail "Xwayland is running — DRM master may be held by Wayland, not PiCast"
+    fail "Xwayland is running — DRM master may be held by Wayland, not boGDan"
 else
     pass "Xwayland is not running"
 fi
@@ -568,8 +568,8 @@ if [[ -e /dev/dri/card0 ]]; then
         drm_holder=$(fuser /dev/dri/card0 2>/dev/null || true)
         if [[ -n "$drm_holder" ]]; then
             holder_name=$(ps -o comm= -p "$(echo "$drm_holder" | awk '{print $1}')" 2>/dev/null || true)
-            if [[ "$holder_name" == "picast" ]]; then
-                pass "PiCast holds DRM master on /dev/dri/card0"
+            if [[ "$holder_name" == "bogdan" ]]; then
+                pass "boGDan holds DRM master on /dev/dri/card0"
             elif [[ -n "$holder_name" ]]; then
                 info "DRM master on /dev/dri/card0 is held by: ${holder_name}"
             fi
@@ -587,7 +587,7 @@ fi
 
 section "12. Systemd Service Hardening"
 
-SERVICE_PATHS=("/etc/systemd/system/picast.service" "/lib/systemd/system/picast.service")
+SERVICE_PATHS=("/etc/systemd/system/bogdan.service" "/lib/systemd/system/bogdan.service")
 service_found=false
 
 for svc in "${SERVICE_PATHS[@]}"; do
@@ -623,11 +623,11 @@ for svc in "${SERVICE_PATHS[@]}"; do
             fi
         done
 
-        # Check User=picast
-        if grep -qE '^\s*User=picast' "$svc" 2>/dev/null; then
-            pass "Service runs as User=picast"
+        # Check User=bogdan
+        if grep -qE '^\s*User=bogdan' "$svc" 2>/dev/null; then
+            pass "Service runs as User=bogdan"
         else
-            fail "Service does NOT set User=picast"
+            fail "Service does NOT set User=bogdan"
         fi
 
         # Check SupplementaryGroups
@@ -642,7 +642,7 @@ for svc in "${SERVICE_PATHS[@]}"; do
 done
 
 if [[ "$service_found" == "false" ]]; then
-    skip "PiCast systemd service file not found at ${SERVICE_PATHS[*]}"
+    skip "boGDan systemd service file not found at ${SERVICE_PATHS[*]}"
 fi
 
 # ─── Report ──────────────────────────────────────────────────────

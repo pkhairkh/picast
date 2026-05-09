@@ -1,10 +1,10 @@
-# picast-protocols
+# bogdan-protocols
 
-Exposes PiCast on the local network through three protocol servers that sender applications (browser extension, phone app, DLNA controller) can use to discover and control the receiver. This crate is the **network-facing boundary** of PiCast — it translates external wire formats (HTTP JSON, WebSocket JSON, UPnP SOAP) into calls on `SessionManager`, ensuring that every protocol sees a consistent view of playback state.
+Exposes boGDan on the local network through three protocol servers that sender applications (browser extension, phone app, DLNA controller) can use to discover and control the receiver. This crate is the **network-facing boundary** of boGDan — it translates external wire formats (HTTP JSON, WebSocket JSON, UPnP SOAP) into calls on `SessionManager`, ensuring that every protocol sees a consistent view of playback state.
 
 ## Purpose
 
-The protocols crate implements all three control interfaces that external senders use to interact with PiCast: a RESTful HTTP API for programmatic control, a WebSocket channel for real-time bidirectional communication, and a UPnP/DLNA MediaRenderer for compatibility with VLC, Home Assistant, and Android DLNA apps. All three servers share a single `Arc<SessionManager>` and delegate every operation to it, ensuring that state changes from any protocol are immediately visible to clients on all protocols. The crate handles JSON serialization, CORS headers, WebSocket frame management, SSDP multicast, UPnP SOAP XML parsing and generation, and connection lifecycle management.
+The protocols crate implements all three control interfaces that external senders use to interact with boGDan: a RESTful HTTP API for programmatic control, a WebSocket channel for real-time bidirectional communication, and a UPnP/DLNA MediaRenderer for compatibility with VLC, Home Assistant, and Android DLNA apps. All three servers share a single `Arc<SessionManager>` and delegate every operation to it, ensuring that state changes from any protocol are immediately visible to clients on all protocols. The crate handles JSON serialization, CORS headers, WebSocket frame management, SSDP multicast, UPnP SOAP XML parsing and generation, and connection lifecycle management.
 
 ## Public API
 
@@ -70,7 +70,7 @@ The protocols crate implements all three control interfaces that external sender
 
 | Dependency | Why |
 |------------|-----|
-| `picast-session` | `Arc<SessionManager>` is the sole business-logic dependency; all commands are forwarded to it |
+| `bogdan-session` | `Arc<SessionManager>` is the sole business-logic dependency; all commands are forwarded to it |
 | `hyper` | HTTP server implementation with `service_fn` for per-connection handling |
 | `tokio-tungstenite` | WebSocket server; upgrade from raw TCP, split into sender/receiver tasks |
 | `roxmltree` | Parsing UPnP SOAP XML request bodies from DLNA controllers |
@@ -84,7 +84,7 @@ The protocols crate implements all three control interfaces that external sender
 
 Implement the five endpoints defined in `docs/protocols/http-api.md`. Use `hyper::service::service_fn` for each connection. Route with a simple match on `(method, path)` — no framework needed. Return `ApiResponse<T>` as JSON with appropriate HTTP status codes (200, 400, 404, 409, 500). Add CORS headers (`Access-Control-Allow-Origin: *`) to every response for browser extension compatibility.
 
-**Testing strategy**: Unit-test each handler with a mock `SessionManager` using the `ResolverTrait`, `PlaybackTrait`, `DisplayTrait`, `TorTrait` trait objects from `picast-session`. Use `hyper::Request::builder()` to construct test requests and assert on status code and response body.
+**Testing strategy**: Unit-test each handler with a mock `SessionManager` using the `ResolverTrait`, `PlaybackTrait`, `DisplayTrait`, `TorTrait` trait objects from `bogdan-session`. Use `hyper::Request::builder()` to construct test requests and assert on status code and response body.
 
 ### 2. WebSocket (`WebSocketServer`)
 
@@ -106,7 +106,7 @@ Three sub-components:
 
 ## Key Constraints
 
-- **Single DRM master**: only one process can be DRM master at a time. The HTTP server must not attempt to open `/dev/dri/card0`; that belongs to `picast-display`. The protocols crate only interacts with the display through `SessionManager` → `DisplayTrait`.
+- **Single DRM master**: only one process can be DRM master at a time. The HTTP server must not attempt to open `/dev/dri/card0`; that belongs to `bogdan-display`. The protocols crate only interacts with the display through `SessionManager` → `DisplayTrait`.
 
 - **Blocking calls**: `yt-dlp` invocations from the resolver are blocking and must not be called on the tokio runtime directly. Use `tokio::task::spawn_blocking` or ensure `SessionManager` already wraps resolver calls appropriately.
 

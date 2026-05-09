@@ -1,10 +1,10 @@
 # V4L2 M2M Pipeline Details
 
-The BCM2711 exposes its hardware video decoders through the V4L2 Memory-to-Memory (M2M) API. This document covers the stateful vs stateless API models, device nodes, buffer queue workflow, DMA-BUF export, format negotiation, resolution change handling, and performance benchmarks. Understanding this pipeline is essential for implementing the `PlaybackEngine` in `picast-playback`.
+The BCM2711 exposes its hardware video decoders through the V4L2 Memory-to-Memory (M2M) API. This document covers the stateful vs stateless API models, device nodes, buffer queue workflow, DMA-BUF export, format negotiation, resolution change handling, and performance benchmarks. Understanding this pipeline is essential for implementing the `PlaybackEngine` in `bogdan-playback`.
 
 ## Stateful vs Stateless API
 
-The V4L2 specification defines two API models for codec hardware. The BCM2711 uses both — the stateful model for H.264 (the primary PiCast decode path) and the stateless model for HEVC (deferred to v2). Understanding the difference is critical because they require fundamentally different userspace code.
+The V4L2 specification defines two API models for codec hardware. The BCM2711 uses both — the stateful model for H.264 (the primary boGDan decode path) and the stateless model for HEVC (deferred to v2). Understanding the difference is critical because they require fundamentally different userspace code.
 
 | Aspect | Stateful (M2M) | Stateless (Request API) |
 |--------|----------------|------------------------|
@@ -14,19 +14,19 @@ The V4L2 specification defines two API models for codec hardware. The BCM2711 us
 | Complexity for host | Simple — just feed bytes | Complex — must parse bitstream, manage DPB, provide per-slice params |
 | BCM2711 support | **H.264 (bcm2835-codec)** | HEVC (rpivid, experimental) |
 | GStreamer element | `v4l2h264dec` | `v4l2slh265dec` |
-| PiCast v1 status | **Primary decode path** | Not used (deferred to v2) |
+| boGDan v1 status | **Primary decode path** | Not used (deferred to v2) |
 
-### Why Stateful is Preferred for PiCast
+### Why Stateful is Preferred for boGDan
 
-The stateful API is dramatically simpler to implement. The application merely feeds compressed bytes into the OUTPUT queue and retrieves decoded frames from the CAPTURE queue. The driver handles all internal state management, reference frame tracking, and B-frame reordering. For a streaming media player like PiCast — where latency tolerance is high (100ms+ is acceptable) and implementation simplicity is valued — the stateful model is the clear choice. The stateless model would require PiCast to implement a full HEVC bitstream parser in Rust, which is a substantial development effort for no functional benefit in v1.
+The stateful API is dramatically simpler to implement. The application merely feeds compressed bytes into the OUTPUT queue and retrieves decoded frames from the CAPTURE queue. The driver handles all internal state management, reference frame tracking, and B-frame reordering. For a streaming media player like boGDan — where latency tolerance is high (100ms+ is acceptable) and implementation simplicity is valued — the stateful model is the clear choice. The stateless model would require boGDan to implement a full HEVC bitstream parser in Rust, which is a substantial development effort for no functional benefit in v1.
 
 ## Device Nodes
 
 ```
 /dev/video10  ← bcm2835-codec: H.264 decode (OUTPUT + CAPTURE, M2M single device)
-/dev/video11  ← bcm2835-codec: H.264 encode (not used by PiCast)
+/dev/video11  ← bcm2835-codec: H.264 encode (not used by boGDan)
 /dev/video12  ← bcm2835-codec: ISP (color space conversion, SAND→NV12 for future HEVC)
-/dev/video20  ← bcm2835-codec: Deinterlace (not used by PiCast)
+/dev/video20  ← bcm2835-codec: Deinterlace (not used by boGDan)
 /dev/media0   ← Media controller (pipeline topology enumeration)
 ```
 
@@ -183,7 +183,7 @@ ioctl(drm_fd, DRM_IOCTL_MODE_ADDFB2, &fb);
 // fb.fb_id is the DRM framebuffer ID, assigned to a plane via atomic commit
 ```
 
-### Complete Zero-Copy Flow in PiCast
+### Complete Zero-Copy Flow in boGDan
 
 ```
 yt-dlp resolution ──▶ GStreamer souphttpsrc (Tor SOCKS5)
@@ -226,7 +226,7 @@ v4l2-ctl -d /dev/video10 --list-formats-ext --set-fmt-video=pixelformat=NV12
 
 ### Format Selection Priority
 
-PiCast's format selection follows a strict priority order, enforced by the yt-dlp format string:
+boGDan's format selection follows a strict priority order, enforced by the yt-dlp format string:
 
 1. **H.264** → Hardware decode via V4L2 M2M (`v4l2h264dec`), zero-copy to kmssink
 2. **VP9** → Software decode via GStreamer `avdec_vp9` or `libvpx` (limited to ~720p30, ~70% CPU)
@@ -252,7 +252,7 @@ In DRM, NV12 is represented as a single framebuffer object with two planes refer
 
 | Resolution | Codec | Decode Method | Framerate | CPU Usage | Power | Notes |
 |-----------|-------|--------------|-----------|-----------|-------|-------|
-| 1080p | H.264 | Hardware (V4L2 M2M) | 30 fps | ~5% | 3.5 W | PiCast primary path |
+| 1080p | H.264 | Hardware (V4L2 M2M) | 30 fps | ~5% | 3.5 W | boGDan primary path |
 | 1080p | H.264 | Hardware (V4L2 M2M) | 60 fps | ~8% | 3.8 W | Highest H.264 rate |
 | 1080p | H.264 | Software (avdec_h264) | 30 fps | ~90% | 6.5 W | Fallback only |
 | 720p | VP9 | Software (avdec_vp9) | 30 fps | ~70% | 5.5 W | yt-dlp fallback format |
@@ -260,7 +260,7 @@ In DRM, NV12 is represented as a single framebuffer object with two planes refer
 | 480p | H.264 | Hardware (V4L2 M2M) | 30 fps | ~3% | 3.3 W | ABR fallback tier |
 | 4K | HEVC | Hardware (rpivid) | 30 fps | ~5%* | 4.0 W | *Requires SAND→NV12 conversion, breaks zero-copy |
 
-**Conclusion**: Always prefer H.264 hardware decode via V4L2 M2M. The yt-dlp format selection string in `picast-resolver` prioritizes H.264 (`avc1`) over VP9 for this reason. The difference between 5% CPU (hardware) and 90% CPU (software) is the difference between a usable appliance and an overheating, stuttering device.
+**Conclusion**: Always prefer H.264 hardware decode via V4L2 M2M. The yt-dlp format selection string in `bogdan-resolver` prioritizes H.264 (`avc1`) over VP9 for this reason. The difference between 5% CPU (hardware) and 90% CPU (software) is the difference between a usable appliance and an overheating, stuttering device.
 
 ## Troubleshooting
 

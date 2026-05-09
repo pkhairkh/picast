@@ -1,5 +1,5 @@
 #![cfg(feature = "hw")]
-//! PiCast Playback Events
+//! boGDan Playback Events
 //!
 //! Defines the event types emitted by the playback engine during
 //! pipeline operation. Events are delivered through an `mpsc` channel

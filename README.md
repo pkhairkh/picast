@@ -1,24 +1,26 @@
-# PiCast
+# boGDan
 
-[![CI](https://github.com/pkhairkh/picast/actions/workflows/ci.yml/badge.svg)](https://github.com/pkhairkh/picast/actions/workflows/ci.yml)
+[![CI](https://github.com/pkhairkh/bogdan/actions/workflows/ci.yml/badge.svg)](https://github.com/pkhairkh/bogdan/actions/workflows/ci.yml)
 [![License: MIT](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
-[![Rust 1.75+](https://img.shields.io/badge/rust-1.75%2B-orange.svg)](https://www.rust-lang.org/)
+[![Rust 1.88+](https://img.shields.io/badge/rust-1.88%2B-orange.svg)](https://www.rust-lang.org/)
 
-**Tor-routed, zero-copy media casting appliance for Raspberry Pi 4B+**
+**Privacy-first Tor-routed media casting appliance for Raspberry Pi 4B+**
 
-PiCast turns your Raspberry Pi 4 into a privacy-focused media receiver that fetches and plays video through the Tor network, using the Pi's dedicated H.264 hardware decoder with a zero-copy DMA-BUF pipeline directly to HDMI — no display server, no browser, no DRM, just pure hardware-accelerated playback on your TV at ~3% CPU and ~5W.
+boGDan turns your Raspberry Pi 4 into a privacy-focused media receiver. All content resolution and media fetching routes through the Tor network — your ISP cannot see what you watch. Video is decoded by the Pi's H.264 hardware decoder and displayed on your TV via HDMI through a zero-copy DMA-BUF pipeline, with no display server, no browser, and no DRM stack.
+
+The boGCast protocol provides the communication layer between senders and the receiver, supporting HTTP REST, WebSocket, and UPnP/DLNA interfaces.
 
 ## Quick Start
 
 ```bash
-curl -sSL https://raw.githubusercontent.com/pkhairkh/picast/main/scripts/setup.sh | sudo bash
+curl -sSL https://raw.githubusercontent.com/pkhairkh/bogdan/main/scripts/setup.sh | sudo bash
 ```
 
-This one command installs all dependencies, builds PiCast, configures Tor and firewall rules, and installs the systemd service. After it completes:
+This installs all dependencies, builds boGDan with hardware acceleration, configures Tor and firewall rules, and installs the systemd service. Then:
 
-1. **Install the browser extension** — [Chrome Web Store](#) or [Firefox Add-ons](#) (Manifest V3)
-2. **Cast your first video** — open a YouTube video, click the PiCast extension icon, then press **Cast**
-3. Your TV connected to the Pi starts playing within seconds
+1. **Install the browser extension** — [Chrome](#) or [Firefox](#) (Manifest V3)
+2. **Cast a video** — open a video page, click the boGDan extension icon, press **Cast**
+3. Your TV starts playing within seconds
 
 ## Hardware Requirements
 
@@ -30,72 +32,94 @@ This one command installs all dependencies, builds PiCast, configures Tor and fi
 | Network | Ethernet (Wi-Fi not recommended) |
 | Power | 5 V / 3 A USB-C |
 
-## What PiCast Does
+## What boGDan Does
 
-- Resolves video URLs from 1,800+ sites via **yt-dlp** through Tor
-- Fetches media streams through **Tor SOCKS5** with per-domain circuit isolation
-- Decodes H.264 in hardware using **V4L2 M2M** at 1080p60
-- Displays on HDMI via **DRM/KMS** zero-copy pipeline — no X11, no Wayland
-- Accepts cast commands from browser extension, VLC, DLNA apps, or HTTP API
+- **Resolves** video URLs from 1,800+ sites via custom resolvers and yt-dlp through Tor
+- **Fetches** media streams through Tor SOCKS5 with per-site circuit isolation
+- **Decodes** H.264 in hardware using V4L2 stateful M2M at up to 1080p60
+- **Displays** on HDMI via DRM/KMS zero-copy pipeline — no X11, no Wayland
+- **Accepts** cast commands from browser extension, VLC, DLNA apps, HTTP API, or WebSocket
 
-## Features
+## What boGDan Cannot Do
 
-- **Tor routing** — all resolution and fetching routes through Tor; DNS never leaks
-- **Zero-copy H.264** — DMA-BUF from V4L2 decoder through HVS to HDMI; CPU stays out of the display path
-- **No display server** — DRM/KMS direct-to-HDMI; no compositor, no browser, minimal attack surface
-- **Multi-protocol input** — HTTP API, WebSocket, UPnP/DLNA, and browser extension (Chrome & Firefox)
-- **Adaptive bitrate** — Tor-aware ABR controller monitors buffer health and switches quality automatically
-- **Subtitle support** — SRT, VTT, and auto-generated subtitles via yt-dlp
-- **Software fallback** — VP9/AV1 decoded in software (720p30) when hardware H.264 isn't available
+| Limitation | Reason |
+|---|---|
+| **DRM content** (Netflix, Disney+, etc.) | Requires Widevine CDM + Chromium — incompatible with the appliance model |
+| **Google Cast V2** | Google enforces device authentication; unofficial receivers cannot complete the handshake |
+| **HEVC/H.265 hardware decode** | The BCM2711 HEVC decoder outputs SAND format, which the HVS cannot display; requires format conversion that breaks zero-copy |
+| **Screen mirroring** | Requires a display server (X11/Wayland) to capture windows |
+| **AirPlay** | Requires FairPlay DRM for protected content |
+| **Guaranteed smooth 1080p over Tor** | Tor bandwidth is 0.5–5 Mbps; 1080p H.264 needs ~2–4 Mbps. Some CDN providers also add speed limits (`sp=380` → 380 kbps cap). Playback may stutter on high-bitrate streams. |
 
 ## Architecture
 
 ```
-Any device on LAN                    Raspberry Pi 4
-┌────────────────┐   URL via HTTP    ┌──────────────────────┐
-│ Browser        │──────────────────→│ PiCast Receiver       │
-│ Extension      │                   │                       │
-├────────────────┤   UPnP/DLNA       │  yt-dlp ──→ Tor ──→  │
-│ VLC / DLNA app │──────────────────→│  resolve stream URL   │
-├────────────────┤                   │       │               │
-│ Home Assistant │   WebSocket       │  GStreamer + V4L2 HW  │
-│ / curl         │──────────────────→│  decode → DRM/KMS     │
-└────────────────┘                   │       │               │
-                                     │  HDMI Monitor ◄───────│
-                                     └──────────────────────┘
+Sender Device                          Raspberry Pi 4
+┌──────────────┐   boGCast (HTTP)     ┌──────────────────────────────────┐
+│ Browser      │──────────────────────→│ protocols (HTTP + WS + DLNA)     │
+│ Extension    │   boGCast (WS)        │          │                       │
+├──────────────┤──────────────────────→│    session (state machine)       │
+│ VLC / DLNA   │   UPnP/DLNA           │          │                       │
+├──────────────┤──────────────────────→│  resolver (custom + yt-dlp)     │
+│ Home Asst.   │                       │          │ via Tor SOCKS5h       │
+│ / curl       │                       │          ▼                       │
+└──────────────┘                       │  playback (progressive download) │
+                                       │   appsrc ← reqwest ← SOCKS fwd  │
+                                       │      ↓                          │
+                                       │   parsebin → v4l2h264dec        │
+                                       │      → v4l2convert → kmssink    │
+                                       │      → avdec_aac → alsasink     │
+                                       │          │                      │
+                                       │  display (DRM/KMS → HDMI)      │
+                                       │  tor (C daemon, IsolateSOCKSAuth)│
+                                       └──────────────────────────────────┘
 ```
+
+The data path uses **progressive download** rather than real-time streaming. A `reqwest` HTTP/2 client fetches data from the CDN through a local SOCKS5 forwarder (which tunnels through Tor), and feeds it into a GStreamer `appsrc` element. This allows pre-buffering, throughput measurement, and CDN preflight checks before starting playback.
+
+The GStreamer pipeline uses `parsebin` for auto-detection of container and codec formats, routing video through V4L2 hardware decode (H.264) or software fallback, and audio through software decode. The video decode output flows as DMA-BUF file descriptors directly to `kmssink` for DRM/KMS display — the CPU never touches decoded pixel data.
 
 ## Configuration
 
-PiCast reads configuration from environment variables or a `.env` file:
+boGDan reads configuration from a TOML file and environment variables. Copy the example config:
+
+```bash
+sudo cp bogdan.toml.example /etc/bogdan/bogdan.toml
+```
+
+Key settings (environment variables override the config file):
 
 | Variable | Default | Description |
 |----------|---------|-------------|
-| `PICAST_HTTP_PORT` | `8585` | HTTP API listen port |
-| `PICAST_WS_PORT` | `8586` | WebSocket listen port |
-| `PICAST_TOR_MODE` | `enabled` | `enabled`, `disabled`, or `optional` |
-| `PICAST_TOR_SOCKS_PORT` | `9050` | Tor SOCKS5 proxy port |
-| `PICAST_TOR_CONTROL_PORT` | `9051` | Tor control port |
-| `PICAST_VOLUME` | `80` | Default volume (0–100) |
+| `BOGDAN_HTTP_ADDR` | `0.0.0.0:8585` | HTTP API listen address |
+| `BOGDAN_WS_ADDR` | `0.0.0.0:8586` | WebSocket listen address |
+| `BOGDAN_TOR_SOCKS` | `127.0.0.1:29050` | Tor SOCKS5 proxy address |
+| `BOGDAN_TOR_CONTROL_PORT` | `9052` | Tor control port |
+| `BOGDAN_AUDIO_DEVICE` | `` | ALSA audio device (empty = default) |
+| `BOGDAN_DLNA_NAME` | `boGDan` | DLNA friendly name on the LAN |
+| `BOGDAN_LOG_LEVEL` | `info` | Log level (trace, debug, info, warn, error) |
 
-## Troubleshooting
+TLS is supported — set `tls_cert_path` and `tls_key_path` in the config to enable HTTPS/WSS.
 
-| Problem | Solution |
-|---------|----------|
-| **No video on HDMI** | Verify `dtoverlay=vc4-kms-v3d` in `/boot/config.txt` and reboot |
-| **Tor won't connect** | Check `sudo systemctl status tor` and ensure port 9050 is open |
-| **yt-dlp fails to resolve** | Update yt-dlp: `sudo yt-dlp -U` — site extractors change frequently |
-| **High CPU during playback** | Software fallback is active; check `vc4-kms-v3d` overlay is loaded |
-| **Extension can't find Pi** | Ensure Pi and browser are on the same LAN; check `PICAST_HTTP_PORT` |
-| **Choppy playback over Tor** | Normal for high-bitrate streams; the ABR controller will downshift quality |
+## Known Issues
+
+| Problem | Workaround |
+|---------|-----------|
+| **CDN speed limit (`sp=380`)** | Some Voe CDN URLs include `sp=380` capping throughput at ~380 kbps. boGDan tries bypass URLs first (sp=99999, sp= stripped) but the CDN treats these as signature violations and returns 403. Falls back to the rate-limited URL, which may cause stuttering. |
+| **DRM master busy on restart** | If gmediarender hasn't fully released DRM master when a new session starts, the pipeline may fail to acquire it. The service restart handles this, but there can be a brief delay. |
+| **Tor circuit congestion** | Tor bandwidth varies (0.5–5 Mbps). High-bitrate streams may buffer frequently. Use the `/api/status` endpoint to monitor `bufferPercent`. |
+| **yt-dlp extractor breakage** | Site changes can break yt-dlp extractors. Update with `sudo yt-dlp -U`. |
 
 ## Development
 
 ```bash
 # Clone and build (works on x86_64 without Pi hardware)
-git clone https://github.com/pkhairkh/picast.git
-cd picast
+git clone https://github.com/pkhairkh/bogdan.git
+cd bogdan
 cargo build --workspace
+
+# Build with hardware acceleration (requires GStreamer + DRM dev libs)
+cargo build --release --features hw,hevc
 
 # Run tests
 cargo test --workspace
@@ -104,8 +128,8 @@ cargo test --workspace
 cargo clippy --workspace -- -D warnings
 cargo fmt --check
 
-# Cross-compile for Pi (requires aarch64-linux-gnu-gcc)
-cargo build --target aarch64-unknown-linux-gnu --release
+# Deploy to Pi
+./deploy.sh
 ```
 
 See [CONTRIBUTING.md](CONTRIBUTING.md) for the full development workflow.
@@ -113,33 +137,35 @@ See [CONTRIBUTING.md](CONTRIBUTING.md) for the full development workflow.
 ## Project Structure
 
 ```
-picast/
+bogdan/
 ├── src/
-│   ├── server/        Main binary + integration tests
-│   ├── protocols/     HTTP API, WebSocket, DLNA
-│   ├── session/       State machine, queue, ABR
-│   ├── resolver/      URL classification, yt-dlp subprocess
-│   ├── playback/      GStreamer pipeline management
-│   ├── display/       DRM/KMS plane control
-│   ├── tor/           SOCKS5 proxy, stream isolation
-│   └── extension/     Browser extension (Manifest V3)
+│   ├── server/        Main binary, config, startup orchestration
+│   ├── protocols/     HTTP REST API, WebSocket, DLNA (gmediarender)
+│   ├── session/       State machine, CDN retry logic, queue
+│   ├── resolver/      URL classification, custom resolvers, yt-dlp
+│   ├── playback/      Progressive download, GStreamer pipeline, SOCKS forwarder
+│   ├── display/       DRM/KMS plane control, atomic modesetting
+│   ├── tor/           SOCKS5 proxy pool, stream isolation, circuit health
+│   ├── v3d/           V3D GPU compute shader (SAND→NV12, experimental)
+│   └── extension/     Browser extension (Chrome + Firefox, Manifest V3)
 ├── config/            systemd unit, torrc, iptables rules
-├── scripts/           Setup and development scripts
-└── docs/              Per-module documentation and ADRs
+├── deploy/            Pi-specific service file, config, cert generation
+├── scripts/           Setup, smoke-test, network isolation verification
+├── packaging/         Debian package build scripts
+└── docs/              Architecture decisions, per-module documentation
 ```
 
 ## Documentation
 
 | Document | Description |
 |----------|-------------|
-| [ARCHITECTURE.md](ARCHITECTURE.md) | Complete system architecture |
-| [SPECIFICATION.md](SPECIFICATION.md) | API contracts and technical specs |
-| [DECISIONS.md](DECISIONS.md) | Architecture Decision Records |
+| [ARCHITECTURE.md](ARCHITECTURE.md) | System architecture (hardware, pipeline, protocols, Tor) |
+| [SPECIFICATION.md](SPECIFICATION.md) | API contracts, format matrix, GStreamer pipeline specs |
+| [DECISIONS.md](DECISIONS.md) | Architecture Decision Records (ADR-001 through ADR-009) |
+| [AGENT.md](AGENT.md) | AI agent onboarding and codebase navigation |
 | [CONTRIBUTING.md](CONTRIBUTING.md) | Development workflow and conventions |
 | [SECURITY.md](SECURITY.md) | Vulnerability reporting and threat model |
-| [CHANGELOG.md](CHANGELOG.md) | Version history |
-| [AGENT.md](AGENT.md) | AI agent onboarding |
-| [docs/](docs/) | Per-module deep dives |
+| [docs/](docs/) | Per-module deep dives and ADR files |
 
 ## License
 

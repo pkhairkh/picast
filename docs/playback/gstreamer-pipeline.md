@@ -1,6 +1,6 @@
 # GStreamer Pipeline Definitions
 
-This document provides detailed, element-by-element definitions of the three GStreamer pipelines used by PiCast for media playback on the Raspberry Pi 4. Each pipeline template corresponds to a different media source type: progressive download (direct MP4/MKV/WebM), HLS adaptive streaming, and media with subtitles. All pipelines use hardware-accelerated V4L2 H.264 decoding with DMA-BUF zero-copy output to the DRM/KMS display via kmssink.
+This document provides detailed, element-by-element definitions of the three GStreamer pipelines used by boGDan for media playback on the Raspberry Pi 4. Each pipeline template corresponds to a different media source type: progressive download (direct MP4/MKV/WebM), HLS adaptive streaming, and media with subtitles. All pipelines use hardware-accelerated V4L2 H.264 decoding with DMA-BUF zero-copy output to the DRM/KMS display via kmssink.
 
 ## Pipeline 1: Progressive Download (Direct MP4/MKV/WebM)
 
@@ -180,7 +180,7 @@ For YouTube auto-captions (which come as JSON3 format), yt-dlp converts them to 
 
 ### Future: OSD-Plane Subtitles
 
-The current subtitleoverlay approach breaks zero-copy because it requires reading decoded video frames into CPU memory for text compositing. A future implementation will extract subtitle data from the GStreamer pipeline via a pad probe, pass the text to the `picast-display` OSD renderer, and composite it on DRM Plane 1. This preserves zero-copy for the video path (Plane 0) while rendering subtitles on a separate overlay plane (Plane 1) via the V3D GPU.
+The current subtitleoverlay approach breaks zero-copy because it requires reading decoded video frames into CPU memory for text compositing. A future implementation will extract subtitle data from the GStreamer pipeline via a pad probe, pass the text to the `bogdan-display` OSD renderer, and composite it on DRM Plane 1. This preserves zero-copy for the video path (Plane 0) while rendering subtitles on a separate overlay plane (Plane 1) via the V3D GPU.
 
 ---
 
@@ -241,11 +241,11 @@ This reduces latency at the cost of increased buffering risk. Not recommended fo
 
 ```bash
 # Show pipeline graph as image (requires graphviz)
-GST_DEBUG_DUMP_DOT_DIR=/tmp GST_DEBUG=GST_TRACER:7 picast
-dot -Tpng /tmp/picast.*.dot > pipeline.png
+GST_DEBUG_DUMP_DOT_DIR=/tmp GST_DEBUG=GST_TRACER:7 bogdan
+dot -Tpng /tmp/bogdan.*.dot > pipeline.png
 
 # Verbose element-level logging
-GST_DEBUG=2,souphttpsrc:5,hlsdemux:5,v4l2h264dec:5,kmssink:5 picast
+GST_DEBUG=2,souphttpsrc:5,hlsdemux:5,v4l2h264dec:5,kmssink:5 bogdan
 
 # Check if V4L2 M2M elements are available
 gst-inspect-1.0 v4l2h264dec
@@ -258,5 +258,5 @@ gst-launch-1.0 souphttpsrc location=<URL> ! parsebin ! v4l2h264dec io-mode=dmabu
 gst-launch-1.0 souphttpsrc location=<M3U8_URL> ! hlsdemux ! queue2 use-buffering=true ! v4l2h264dec ! kmssink driver-name=vc4
 
 # Monitor buffer fill percentage
-GST_DEBUG=queue2:5 picast 2>&1 | grep buffering
+GST_DEBUG=queue2:5 bogdan 2>&1 | grep buffering
 ```

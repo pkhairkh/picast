@@ -1,10 +1,10 @@
-# picast-display
+# bogdan-display
 
-Manages the DRM/KMS display pipeline on the Raspberry Pi 4: atomic modesetting, plane management, GBM buffer allocation for OSD overlay, and V3D GPU-accelerated text rendering. This crate owns the DRM master role and provides the display infrastructure that `picast-playback`'s `kmssink` element uses for zero-copy video output.
+Manages the DRM/KMS display pipeline on the Raspberry Pi 4: atomic modesetting, plane management, GBM buffer allocation for OSD overlay, and V3D GPU-accelerated text rendering. This crate owns the DRM master role and provides the display infrastructure that `bogdan-playback`'s `kmssink` element uses for zero-copy video output.
 
 ## Purpose
 
-The display crate provides the low-level display control layer that configures the BCM2711's Hardware Video Scaler (HVS) to composite video (from GStreamer/kmssink via DMA-BUF) and OSD overlays (rendered by V3D GPU) onto the HDMI output. This crate opens `/dev/dri/card0`, acquires DRM master privileges, discovers the connected HDMI connector and preferred mode, and programs the HVS planes via atomic modesetting. It coordinates with `picast-playback` to ensure kmssink can use the correct CRTC and plane configuration, and it manages the separate OSD overlay plane (Plane 1) for subtitle text and status indicators.
+The display crate provides the low-level display control layer that configures the BCM2711's Hardware Video Scaler (HVS) to composite video (from GStreamer/kmssink via DMA-BUF) and OSD overlays (rendered by V3D GPU) onto the HDMI output. This crate opens `/dev/dri/card0`, acquires DRM master privileges, discovers the connected HDMI connector and preferred mode, and programs the HVS planes via atomic modesetting. It coordinates with `bogdan-playback` to ensure kmssink can use the correct CRTC and plane configuration, and it manages the separate OSD overlay plane (Plane 1) for subtitle text and status indicators.
 
 ## Public API
 
@@ -17,7 +17,7 @@ The display crate provides the low-level display control layer that configures t
 | `PlaneType` | enum | `Primary`, `Overlay`, `Cursor` |
 | `DisplayError` | enum | DRM/GBM error variants: `NotMaster`, `NoConnector`, `NoMode`, `PlaneConfig`, `GbmAlloc` |
 
-Implements `picast_session::interfaces::DisplayTrait`:
+Implements `bogdan_session::interfaces::DisplayTrait`:
 
 | Method | Description |
 |--------|-------------|
@@ -42,7 +42,7 @@ Additional methods:
 
 | Dependency | Why |
 |------------|-----|
-| `picast-session` | Provides `DisplayTrait` trait definition that this crate implements |
+| `bogdan-session` | Provides `DisplayTrait` trait definition that this crate implements |
 | `drm` / `drm-ffi` | DRM ioctl wrappers for modesetting, plane configuration, framebuffer management |
 | `gbm` | GBM buffer allocation for OSD overlay (scanout + render capable) |
 | `nix` | Low-level Unix APIs: `ioctl`, `mmap`, `fcntl` for DRM FD management |
@@ -93,7 +93,7 @@ DRM Device /dev/dri/card0  (driver: vc4)
 
 ## Atomic Commit Workflow
 
-PiCast uses the DRM atomic modesetting API (`drmModeAtomicCommit`) for all display updates. Atomic commits allow multiple properties (plane framebuffers, source/destination rectangles, CRTC mode) to be changed in a single, tear-free operation that takes effect at the next vblank.
+boGDan uses the DRM atomic modesetting API (`drmModeAtomicCommit`) for all display updates. Atomic commits allow multiple properties (plane framebuffers, source/destination rectangles, CRTC mode) to be changed in a single, tear-free operation that takes effect at the next vblank.
 
 ```
 Step 1: Create atomic request
@@ -164,7 +164,7 @@ Step 8: Wait for page-flip event
 
 ## Key Constraints
 
-- **DRM master is exclusive**: if X11 or Wayland is running, PiCast cannot become DRM master. The setup script must disable the desktop autologin and ensure `picast.service` starts on `tty1` instead.
+- **DRM master is exclusive**: if X11 or Wayland is running, boGDan cannot become DRM master. The setup script must disable the desktop autologin and ensure `bogdan.service` starts on `tty1` instead.
 
 - **Plane Z-ordering**: the HVS composites planes from lowest ZPOS to highest. Video MUST be on ZPOS 0 and OSD on ZPOS 1. If the Z-order is reversed, the OSD will be hidden behind the video and invisible.
 

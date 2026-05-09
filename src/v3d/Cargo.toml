@@ -1,5 +1,5 @@
 [package]
-name = "picast-v3d"
+name = "bogdan-v3d"
 version.workspace = true
 edition.workspace = true
 description = "V3D GPU compute shader engine for SAND→NV12 near-zero-copy conversion on Raspberry Pi"

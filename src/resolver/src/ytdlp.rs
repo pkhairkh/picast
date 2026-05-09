@@ -1,4 +1,4 @@
-//! PiCast yt-dlp Subprocess Integration
+//! boGDan yt-dlp Subprocess Integration
 //!
 //! Invokes `yt-dlp` as a subprocess to resolve web page URLs
 //! (YouTube, Vimeo, etc.) into direct media stream URLs.
@@ -10,10 +10,10 @@
 //! ```sh
 //! yt-dlp --dump-json --no-download --no-warnings \
 //!   --socket-timeout 30 \
-//!   --proxy socks5h://picast-<isoid>@127.0.0.1:9050 \
+//!   --proxy socks5h://bogdan-<isoid>@127.0.0.1:9050 \
 //!   --format "bestvideo[vcodec^=avc1][height<=1080]+bestaudio/best[vcodec^=avc1][height<=1080]/best[height<=1080]" \
 //!   --write-subs --write-auto-subs --sub-langs "en,es,fr,de" --sub-format vtt \
-//!   --paths /tmp/picast-subs-XXXX \
+//!   --paths /tmp/bogdan-subs-XXXX \
 //!   <url>
 //! ```
 //!

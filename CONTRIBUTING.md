@@ -1,4 +1,4 @@
-# Contributing to PiCast
+# Contributing to boGDan
 
 Thank you for your interest in contributing! This guide covers everything you
 need to get started.
@@ -86,5 +86,5 @@ Before submitting your pull request, confirm the following:
 
 ---
 
-Questions? Open a [Discussion](https://github.com/pkhairkh/picast/discussions) or
+Questions? Open a [Discussion](https://github.com/pkhairkh/bogdan/discussions) or
 reach out in the issue tracker. Happy hacking!

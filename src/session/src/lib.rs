@@ -1,6 +1,6 @@
-//! PiCast Session Management
+//! boGDan Session Management
 //!
-//! The session layer sits at the centre of the PiCast architecture.
+//! The session layer sits at the centre of the boGDan architecture.
 //! It owns the SQLite-backed [`MediaSession`] store and coordinates the
 //! four subsystems through the trait interfaces defined in [`interfaces`].
 //!
@@ -665,7 +665,7 @@ impl SessionManager {
     /// Load a new media URL and start the resolution/playback flow.
     ///
     /// This method:
-    /// 1. Validates that no session is already active (PiCast is single-session).
+    /// 1. Validates that no session is already active (boGDan is single-session).
     /// 2. Creates a new `MediaSession` in the `Idle` state.
     /// 3. Transitions to `Resolving` and calls the resolver subsystem.
     /// 4. On successful resolution, transitions to `Buffering`, acquires
@@ -1295,7 +1295,7 @@ impl SessionManager {
 
     /// Recover sessions left in a non-idle state after a crash.
     ///
-    /// If PiCast crashes while a session is in `Playing`, `Buffering`,
+    /// If boGDan crashes while a session is in `Playing`, `Buffering`,
     /// `Resolving`, or `Seeking`, the playback pipeline is gone but
     /// the database row still exists. We reset all such sessions to
     /// `Idle` so they don't block new sessions from being created.
@@ -1528,7 +1528,7 @@ mod tests {
             Ok(true)
         }
         fn isolation_username(&self, hostname: &str) -> String {
-            picast_tor::stream_isolation_id(hostname)
+            bogdan_tor::stream_isolation_id(hostname)
         }
     }
 

@@ -212,7 +212,7 @@ This causes `hlsdemux` to switch to a different variant in the master playlist w
 
 ### Progressive (Direct MP4)
 
-For progressive (direct MP4) streams, there is no variant mechanism. The full pipeline teardown and rebuild is required. This is one of the reasons HLS is preferred over progressive download for PiCast.
+For progressive (direct MP4) streams, there is no variant mechanism. The full pipeline teardown and rebuild is required. This is one of the reasons HLS is preferred over progressive download for boGDan.
 
 ## Network Quality Estimation (Future Enhancement)
 

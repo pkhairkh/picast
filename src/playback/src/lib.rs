@@ -1,4 +1,4 @@
-//! PiCast Playback Engine
+//! boGDan Playback Engine
 //!
 //! Wraps GStreamer into a high-level playback API tailored for the
 //! Raspberry Pi 4B+. The engine manages:
@@ -12,7 +12,7 @@
 //! ## Usage
 //!
 //! ```ignore
-//! use picast_playback::{PlaybackEngine, PipelineConfig};
+//! use bogdan_playback::{PlaybackEngine, PipelineConfig};
 //!
 //! #[tokio::main]
 //! async fn main() -> Result<(), Box<dyn std::error::Error>> {
@@ -20,7 +20,7 @@
 //!     let mut engine = PlaybackEngine::new(config)?;
 //!
 //!     let mut events = engine.events();
-//!     engine.play("https://example.com/video.mp4", "https://example.com/page", "127.0.0.1:9050", "picast-abc123", vec![]).await?;
+//!     engine.play("https://example.com/video.mp4", "https://example.com/page", "127.0.0.1:9050", "bogdan-abc123", vec![]).await?;
 //!
 //!     while let Ok(event) = events.recv().await {
 //!         println!("Event: {:?}", event);
@@ -413,7 +413,7 @@ fn detect_audio_output() -> (String, String) {
     // On Raspberry Pi, Bluetooth A2DP devices do NOT auto-reconnect
     // after a reboot. The BT adapter comes up, paired devices are known,
     // but they remain disconnected until something explicitly connects.
-    // This means PiCast's audio detection finds no connected BT device
+    // This means boGDan's audio detection finds no connected BT device
     // and falls back to HDMI, even though the user's BT speaker is
     // paired and available.
     //
@@ -1679,7 +1679,7 @@ impl PlaybackEngine {
 
                             // Point to GStreamer debug log for details
                             tracing::warn!(
-                                "check GST_DEBUG_FILE, usually /run/picast/gst-debug.log under systemd, for detailed kmssink/v4l2h264dec debug output. \
+                                "check GST_DEBUG_FILE, usually /run/bogdan/gst-debug.log under systemd, for detailed kmssink/v4l2h264dec debug output. \
                                  For caps negotiation issues, set GST_DEBUG=kmssink:6,v4l2h264dec:6,h264parse:5,GST_CAPS:6,GST_PADS:5"
                             );
                         }

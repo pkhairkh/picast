@@ -1,16 +1,16 @@
 [Unit]
-Description=PiCast Media Receiver
+Description=boGDan Media Receiver
 After=network-online.target
 Wants=network-online.target
 
 [Service]
 Type=notify
-User=picast
-Group=picast
+User=bogdan
+Group=bogdan
 SupplementaryGroups=video render audio
 
 # Release the kernel framebuffer console (fbcon) from the vc4 DRM
-# device so that PiCast (and kmssink) can acquire DRM master.
+# device so that boGDan (and kmssink) can acquire DRM master.
 # On Raspberry Pi with vc4, fbcon binds to the DRM device and holds
 # DRM master, preventing other processes from acquiring it.  drmSetMaster
 # returns EBUSY even with CAP_SYS_ADMIN in current Linux kernels (6.x),
@@ -26,14 +26,14 @@ AmbientCapabilities=CAP_SYS_ADMIN
 CapabilityBoundingSet=CAP_SYS_ADMIN
 
 # Environment
-Environment=RUST_LOG=picast=info
-Environment=HOME=/var/lib/picast
-Environment=XDG_CACHE_HOME=/var/lib/picast/.cache
-Environment=PICAST_RUNTIME_DIR=/run/picast
-Environment=TMPDIR=/run/picast
+Environment=RUST_LOG=bogdan=info
+Environment=HOME=/var/lib/bogdan
+Environment=XDG_CACHE_HOME=/var/lib/bogdan/.cache
+Environment=BOGDAN_RUNTIME_DIR=/run/bogdan
+Environment=TMPDIR=/run/bogdan
 
 # Main executable
-ExecStart=/usr/local/bin/picast-server --config /etc/picast/picast.toml
+ExecStart=/usr/local/bin/bogdan-server --config /etc/bogdan/bogdan.toml
 
 # Notify systemd when ready (sd_notify support)
 NotifyAccess=all
@@ -46,16 +46,16 @@ RestartSec=5
 # If no heartbeat is received within 30s, systemd restarts the service.
 WatchdogSec=30
 
-RuntimeDirectory=picast
+RuntimeDirectory=bogdan
 RuntimeDirectoryMode=0755
-StateDirectory=picast
+StateDirectory=bogdan
 StateDirectoryMode=0755
 
 # Hardening
 NoNewPrivileges=true
 ProtectSystem=strict
 ProtectHome=true
-ReadWritePaths=/run/picast /var/lib/picast /etc/picast
+ReadWritePaths=/run/bogdan /var/lib/bogdan /etc/bogdan
 PrivateTmp=false
 ProtectKernelTunables=true
 ProtectKernelModules=true

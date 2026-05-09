@@ -1,55 +1,55 @@
 # mDNS and SSDP Discovery
 
-PiCast advertises itself on the local network using both mDNS (DNS-SD) and SSDP (UPnP) so that sender applications can discover it without manual IP configuration. The dual-discovery strategy ensures compatibility with both custom PiCast clients (which use mDNS) and standard DLNA controllers (which use SSDP).
+boGDan advertises itself on the local network using both mDNS (DNS-SD) and SSDP (UPnP) so that sender applications can discover it without manual IP configuration. The dual-discovery strategy ensures compatibility with both custom boGDan clients (which use mDNS) and standard DLNA controllers (which use SSDP).
 
 ## mDNS / DNS-SD
 
 ### Service Type
 
 ```
-_picast._tcp
+_bogcast._tcp
 ```
 
-PiCast registers this custom service type on the local network. The browser extension and native apps discover PiCast instances by browsing for `_picast._tcp`. This custom type avoids collision with other media services and allows PiCast-specific metadata to be included in TXT records.
+boGDan registers this custom service type on the local network. The browser extension and native apps discover boGDan instances by browsing for `_bogcast._tcp`. This custom type avoids collision with other media services and allows boGDan-specific metadata to be included in TXT records.
 
 ### Registration
 
 ```
-Service Name:  PiCast (<hostname>)
-Service Type:  _picast._tcp
+Service Name:  boGDan (<hostname>)
+Service Type:  _bogcast._tcp
 Domain:        local.
 Port:          8080
 ```
 
 ### TXT Records
 
-TXT records carry PiCast-specific metadata that clients use to determine capabilities and connection parameters without making additional network requests.
+TXT records carry boGDan-specific metadata that clients use to determine capabilities and connection parameters without making additional network requests.
 
 | Key | Value | Description |
 |-----|-------|-------------|
-| `ver` | `0.1.0` | PiCast software version (semver) |
+| `ver` | `0.1.0` | boGDan software version (semver) |
 | `ws` | `8081` | WebSocket port for real-time status |
 | `dlna` | `8200` | DLNA HTTP port for UPnP control |
 | `hw` | `pi4` | Hardware identifier (always `pi4` for Pi 4) |
-| `id` | `picast-001` | Unique device ID (derived from `/etc/machine-id`) |
+| `id` | `bogdan-001` | Unique device ID (derived from `/etc/machine-id`) |
 | `tor` | `1` | Tor routing enabled (1=yes, 0=no) |
 | `maxres` | `1080p` | Maximum supported resolution |
 
 ### Example mDNS Response
 
 ```
-_picast._tcp.local. PTR PiCast\032\(raspberrypi\)._picast._tcp.local.
-PiCast\032\(raspberrypi\)._picast._tcp.local. SRV 0 0 8080 raspberrypi.local.
-PiCast\032\(raspberrypi\)._picast._tcp.local. TXT "ver=0.1.0" "ws=8081" "dlna=8200" "hw=pi4" "id=picast-001" "tor=1" "maxres=1080p"
+_bogcast._tcp.local. PTR boGDan\032\(raspberrypi\)._bogcast._tcp.local.
+boGDan\032\(raspberrypi\)._bogcast._tcp.local. SRV 0 0 8080 raspberrypi.local.
+boGDan\032\(raspberrypi\)._bogcast._tcp.local. TXT "ver=0.1.0" "ws=8081" "dlna=8200" "hw=pi4" "id=bogdan-001" "tor=1" "maxres=1080p"
 raspberrypi.local. A 192.168.1.100
 ```
 
 ### Browser Extension Discovery
 
-The PiCast browser extension discovers PiCast instances using the mDNS API available in Manifest V3 extensions. The discovery flow is:
+The boGDan browser extension discovers boGDan instances using the mDNS API available in Manifest V3 extensions. The discovery flow is:
 
-1. Extension sends a PTR query for `_picast._tcp.local`.
-2. PiCast responds with its service instance name.
+1. Extension sends a PTR query for `_bogcast._tcp.local`.
+2. boGDan responds with its service instance name.
 3. Extension resolves the SRV record to get the hostname and port.
 4. Extension resolves the A record to get the IP address.
 5. Extension reads TXT records for WebSocket port and device ID.
@@ -57,17 +57,17 @@ The PiCast browser extension discovers PiCast instances using the mDNS API avail
 
 ```javascript
 // Simplified discovery in the browser extension
-const query = { name: '_picast._tcp.local', type: 'PTR' };
+const query = { name: '_bogcast._tcp.local', type: 'PTR' };
 // Result parsing: extract SRV, A, and TXT records
 ```
 
 ### Implementation Requirements
 
-PiCast's mDNS responder must:
+boGDan's mDNS responder must:
 
 1. Listen on UDP port 5353 on all interfaces.
 2. Join the mDNS multicast group `224.0.0.251` (IPv4) or `ff02::fb` (IPv6).
-3. Respond to PTR queries for `_picast._tcp.local`.
+3. Respond to PTR queries for `_bogcast._tcp.local`.
 4. Include SRV and TXT records in the response (per RFC 6763 §12).
 5. Send proactive announcements on startup and every 60 seconds thereafter.
 6. Send a goodbye (TTL=0) announcement on shutdown.
@@ -76,7 +76,7 @@ PiCast's mDNS responder must:
 
 ## SSDP (UPnP Discovery)
 
-SSDP is part of the UPnP device architecture. PiCast uses it primarily for DLNA controller discovery. The full SSDP message format is specified in `docs/protocols/dlna.md`; this document describes the service types, intervals, and network behavior.
+SSDP is part of the UPnP device architecture. boGDan uses it primarily for DLNA controller discovery. The full SSDP message format is specified in `docs/protocols/dlna.md`; this document describes the service types, intervals, and network behavior.
 
 ### Service Types Advertised
 
@@ -98,7 +98,7 @@ SSDP is part of the UPnP device architecture. PiCast uses it primarily for DLNA 
 
 ### M-SEARCH Handling
 
-PiCast listens for M-SEARCH queries on UDP port 1900 at the multicast address `239.255.255.250`. It responds only to queries that match its advertised service types:
+boGDan listens for M-SEARCH queries on UDP port 1900 at the multicast address `239.255.255.250`. It responds only to queries that match its advertised service types:
 
 ```
 M-SEARCH * HTTP/1.1
@@ -108,17 +108,17 @@ MX: 3
 ST: urn:schemas-upnp-org:device:MediaRenderer:1
 ```
 
-The `MX` header specifies the maximum wait time in seconds. PiCast responds with a random delay between 0 and MX seconds to prevent response storms when multiple devices are present on the network.
+The `MX` header specifies the maximum wait time in seconds. boGDan responds with a random delay between 0 and MX seconds to prevent response storms when multiple devices are present on the network.
 
 ---
 
 ## Dual Discovery Strategy
 
-PiCast advertises through both mDNS and SSDP because they serve different audiences:
+boGDan advertises through both mDNS and SSDP because they serve different audiences:
 
 | Protocol | Used by | Advantages | Disadvantages |
 |----------|---------|------------|---------------|
-| mDNS / DNS-SD | PiCast browser extension, native apps | Custom TXT records, lower overhead, PiCast-specific metadata | Not understood by DLNA controllers |
+| mDNS / DNS-SD | boGDan browser extension, native apps | Custom TXT records, lower overhead, boGDan-specific metadata | Not understood by DLNA controllers |
 | SSDP | DLNA controllers (VLC, BubbleUPnP) | Standard UPnP interoperability, no custom code needed | Higher overhead, slower discovery, no custom metadata |
 
 ### Network Interface Selection
@@ -127,10 +127,10 @@ On the Pi, the primary network interface is typically:
 
 | Interface | Type | Priority | Notes |
 |-----------|------|----------|-------|
-| `eth0` | Ethernet | Primary | Recommended for PiCast (stable, low latency) |
+| `eth0` | Ethernet | Primary | Recommended for boGDan (stable, low latency) |
 | `wlan0` | Wi-Fi | Secondary | Works but may have higher latency and packet loss |
 
-PiCast sends announcements on **all** interfaces that have an IPv4 address. It does not announce on `lo` (loopback). The responder enumerates interfaces at startup and re-enumerates on network configuration changes.
+boGDan sends announcements on **all** interfaces that have an IPv4 address. It does not announce on `lo` (loopback). The responder enumerates interfaces at startup and re-enumerates on network configuration changes.
 
 ### Firewall Considerations
 
@@ -150,8 +150,8 @@ See `config/iptables.rules` for the complete firewall configuration. The iptable
 
 | Problem | Cause | Fix |
 |---------|-------|-----|
-| VLC doesn't show PiCast | SSDP not responding | Check `iptables -L` allows UDP 1900; check PiCast is running |
-| Browser extension can't find PiCast | mDNS not responding | Check UDP 5353 is open; try `avahi-browse -r _picast._tcp` |
-| Discovery works on Wi-Fi but not Ethernet | Wrong interface | Check `ip addr` for active interfaces; PiCast should announce on all |
-| Multiple PiCast instances appear | Stale mDNS cache | Wait 60 seconds for cache expiry; send goodbye on shutdown |
+| VLC doesn't show boGDan | SSDP not responding | Check `iptables -L` allows UDP 1900; check boGDan is running |
+| Browser extension can't find boGDan | mDNS not responding | Check UDP 5353 is open; try `avahi-browse -r _bogcast._tcp` |
+| Discovery works on Wi-Fi but not Ethernet | Wrong interface | Check `ip addr` for active interfaces; boGDan should announce on all |
+| Multiple boGDan instances appear | Stale mDNS cache | Wait 60 seconds for cache expiry; send goodbye on shutdown |
 | SSDP responses are slow | MX delay + network latency | Normal; controllers may take 3–5 seconds to discover |

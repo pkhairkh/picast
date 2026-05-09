@@ -12,7 +12,7 @@
 
 Google Cast (Cast V2) is the protocol used by Chromecast devices. It allows users to "cast" content from Chrome browsers, YouTube apps, and other Cast-enabled applications directly to a receiver device. The protocol operates over TLS-encrypted WebSocket connections and supports both media URL relay and remote control (play, pause, seek, volume).
 
-The appeal of Cast V2 for PiCast is obvious: billions of devices support it, and users are familiar with the "cast" button in Chrome and mobile apps. Supporting Cast V2 would make PiCast instantly usable from any Cast-enabled app.
+The appeal of Cast V2 for boGDan is obvious: billions of devices support it, and users are familiar with the "cast" button in Chrome and mobile apps. Supporting Cast V2 would make boGDan instantly usable from any Cast-enabled app.
 
 However, Cast V2 has a critical limitation for unofficial receivers:
 
@@ -32,10 +32,10 @@ The Cast V2 protocol has been partially reverse-engineered by projects like [pyc
 
 ## Decision
 
-PiCast will not implement the Cast V2 protocol. The device authentication requirement makes it impossible to create a reliable, future-proof Cast V2 receiver. Instead, PiCast provides:
+boGDan will not implement the Cast V2 protocol. The device authentication requirement makes it impossible to create a reliable, future-proof Cast V2 receiver. Instead, boGDan provides:
 
 1. **DLNA MediaRenderer** (ADR-006) — Works with VLC, DLNA apps, and Home Assistant
-2. **Browser extension** — Chrome Manifest V3 extension that intercepts media URLs from web pages and sends them to PiCast via the HTTP API
+2. **Browser extension** — Chrome Manifest V3 extension that intercepts media URLs from web pages and sends them to boGDan via the HTTP API
 3. **HTTP API** — Direct URL submission for programmatic control
 
 These alternatives provide the same user experience (click a button, video plays on TV) without depending on Google's certificate infrastructure.
@@ -44,12 +44,12 @@ These alternatives provide the same user experience (click a button, video plays
 
 | Outcome | Impact |
 |---------|--------|
-| ✅ No dependency on Google certificates | PiCast is fully self-contained; no proprietary auth tokens or certificate provisioning |
+| ✅ No dependency on Google certificates | boGDan is fully self-contained; no proprietary auth tokens or certificate provisioning |
 | ✅ Stable protocol surface | DLNA and HTTP are open standards with no single-vendor control |
-| ✅ No Chrome version fragility | PiCast's browser extension uses standard webRequest API, not reverse-engineered Cast V2 |
-| ❌ No native "Cast" button integration | Users cannot use the built-in Cast button in Chrome or YouTube; must use PiCast extension or DLNA app |
-| ❌ No Cast V2 remote control | Pause/seek/volume from Cast senders won't work; PiCast provides its own control API |
-| ❌ User education required | Users familiar with Chromecast must learn the PiCast extension or DLNA workflow |
+| ✅ No Chrome version fragility | boGDan's browser extension uses standard webRequest API, not reverse-engineered Cast V2 |
+| ❌ No native "Cast" button integration | Users cannot use the built-in Cast button in Chrome or YouTube; must use boGDan extension or DLNA app |
+| ❌ No Cast V2 remote control | Pause/seek/volume from Cast senders won't work; boGDan provides its own control API |
+| ❌ User education required | Users familiar with Chromecast must learn the boGDan extension or DLNA workflow |
 
 ## Alternatives Rejected
 

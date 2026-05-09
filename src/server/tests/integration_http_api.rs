@@ -4,10 +4,10 @@
 //! manager (in-memory SQLite) and mock subsystems, verifying the
 //! REST API endpoints work correctly end-to-end.
 
-use picast_session::interfaces::{
+use bogdan_session::interfaces::{
     DisplayTrait, PlaybackTrait, ResolveInfo, ResolverTrait, TorTrait,
 };
-use picast_session::SessionManager;
+use bogdan_session::SessionManager;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use std::sync::Mutex as StdMutex;
@@ -141,7 +141,7 @@ impl TorTrait for MockTor {
         Ok(true)
     }
     fn isolation_username(&self, hostname: &str) -> String {
-        picast_tor::stream_isolation_id(hostname)
+        bogdan_tor::stream_isolation_id(hostname)
     }
 }
 
@@ -163,7 +163,7 @@ async fn start_server(
 ) -> (String, tokio::task::JoinHandle<()>) {
     let addr = format!("127.0.0.1:{}", port);
     let addr_clone = addr.clone();
-    let server = picast_protocols::HttpApiServer::new(&addr, session);
+    let server = bogdan_protocols::HttpApiServer::new(&addr, session);
     let handle = tokio::spawn(async move {
         let _ = server
             .start(async {

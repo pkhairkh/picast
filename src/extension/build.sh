@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# PiCast Browser Extension Build Script
+# boGDan Browser Extension Build Script
 #
 # Builds the extension for both Chrome and Firefox.
 # The only difference is the manifest.json file.
@@ -33,9 +33,9 @@ SHARED_FILES=(
 
 build_extension() {
   local browser="$1"
-  local target_dir="${BUILD_DIR}/picast-${browser}"
+  local target_dir="${BUILD_DIR}/bogdan-${browser}"
 
-  echo "Building PiCast extension for ${browser}..."
+  echo "Building boGDan extension for ${browser}..."
 
   rm -rf "${target_dir}"
   mkdir -p "${target_dir}"
@@ -64,7 +64,7 @@ build_extension() {
   echo "  ${#SHARED_FILES[@]} shared files"
 
   # Create zip for distribution.
-  local zip_name="picast-${browser}-v0.2.0.zip"
+  local zip_name="bogdan-${browser}-v0.2.0.zip"
   (cd "${target_dir}" && zip -q -r "${BUILD_DIR}/${zip_name}" .)
   echo "  ${zip_name}"
 

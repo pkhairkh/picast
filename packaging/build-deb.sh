@@ -1,12 +1,12 @@
 #!/usr/bin/env bash
 # ╔══════════════════════════════════════════════════════════════════╗
-# ║  PiCast Debian Package Builder                                  ║
+# ║  boGDan Debian Package Builder                                  ║
 # ║  Cross-compiles for aarch64 and builds a .deb package           ║
 # ╚══════════════════════════════════════════════════════════════════╝
 set -euo pipefail
 
 # ─── Configuration ──────────────────────────────────────────────────
-PACKAGE_NAME="picast"
+PACKAGE_NAME="bogdan"
 PACKAGE_VERSION="0.1.0"
 PACKAGE_ARCH="arm64"
 TARGET_TRIPLE="aarch64-unknown-linux-gnu"
@@ -33,7 +33,7 @@ err()  { echo -e "${RED}[ERROR]${NC} $*" >&2; exit 1; }
 info() { echo -e "${BLUE}[INFO]${NC} $*"; }
 
 # ─── Pre-flight ─────────────────────────────────────────────────────
-info "PiCast Debian Package Builder v${PACKAGE_VERSION}"
+info "boGDan Debian Package Builder v${PACKAGE_VERSION}"
 
 # Check for required tools
 for cmd in cargo dpkg-deb; do
@@ -71,7 +71,7 @@ if ! command -v aarch64-linux-gnu-gcc &>/dev/null; then
 fi
 
 # ─── Step 2: Cross-compile ─────────────────────────────────────────
-log "Cross-compiling PiCast for ${TARGET_TRIPLE}..."
+log "Cross-compiling boGDan for ${TARGET_TRIPLE}..."
 
 cd "${REPO_ROOT}"
 # shellcheck source=/dev/null
@@ -79,7 +79,7 @@ source "${HOME}/.cargo/env" 2>/dev/null || true
 
 cargo build --release --target "$TARGET_TRIPLE"
 
-BINARY_PATH="${REPO_ROOT}/target/${TARGET_TRIPLE}/release/picast"
+BINARY_PATH="${REPO_ROOT}/target/${TARGET_TRIPLE}/release/bogdan"
 if [ ! -f "$BINARY_PATH" ]; then
     err "Binary not found at ${BINARY_PATH}"
 fi
@@ -92,43 +92,43 @@ log "Creating package directory structure..."
 rm -rf "$BUILD_DIR"
 mkdir -p "$DEB_ROOT/DEBIAN"
 mkdir -p "$DEB_ROOT/usr/local/bin"
-mkdir -p "$DEB_ROOT/etc/picast"
+mkdir -p "$DEB_ROOT/etc/bogdan"
 mkdir -p "$DEB_ROOT/etc/systemd/system"
-mkdir -p "$DEB_ROOT/var/lib/picast"
-mkdir -p "$DEB_ROOT/usr/share/doc/picast"
+mkdir -p "$DEB_ROOT/var/lib/bogdan"
+mkdir -p "$DEB_ROOT/usr/share/doc/bogdan"
 
 # ─── Step 4: Copy files ────────────────────────────────────────────
 log "Installing files into package..."
 
 # Binary
-cp "$BINARY_PATH" "${DEB_ROOT}/usr/local/bin/picast-server"
-chmod 755 "${DEB_ROOT}/usr/local/bin/picast-server"
+cp "$BINARY_PATH" "${DEB_ROOT}/usr/local/bin/bogdan-server"
+chmod 755 "${DEB_ROOT}/usr/local/bin/bogdan-server"
 
 # Config files
-cp "${CONFIG_DIR}/torrc" "${DEB_ROOT}/etc/picast/torrc"
-chmod 644 "${DEB_ROOT}/etc/picast/torrc"
+cp "${CONFIG_DIR}/torrc" "${DEB_ROOT}/etc/bogdan/torrc"
+chmod 644 "${DEB_ROOT}/etc/bogdan/torrc"
 
-cp "${CONFIG_DIR}/iptables.rules" "${DEB_ROOT}/etc/picast/iptables.rules"
-chmod 644 "${DEB_ROOT}/etc/picast/iptables.rules"
+cp "${CONFIG_DIR}/iptables.rules" "${DEB_ROOT}/etc/bogdan/iptables.rules"
+chmod 644 "${DEB_ROOT}/etc/bogdan/iptables.rules"
 
 # Example TOML config (installed as the live config if not already present)
-if [ -f "${REPO_ROOT}/picast.toml.example" ]; then
-    cp "${REPO_ROOT}/picast.toml.example" "${DEB_ROOT}/etc/picast/picast.toml"
-    chmod 644 "${DEB_ROOT}/etc/picast/picast.toml"
+if [ -f "${REPO_ROOT}/bogdan.toml.example" ]; then
+    cp "${REPO_ROOT}/bogdan.toml.example" "${DEB_ROOT}/etc/bogdan/bogdan.toml"
+    chmod 644 "${DEB_ROOT}/etc/bogdan/bogdan.toml"
 fi
 
-# Systemd service (patch ExecStart to use picast-server)
-sed 's|ExecStart=/usr/local/bin/picast|ExecStart=/usr/local/bin/picast-server|' \
-    "${CONFIG_DIR}/picast.service" > "${DEB_ROOT}/etc/systemd/system/picast.service"
-chmod 644 "${DEB_ROOT}/etc/systemd/system/picast.service"
+# Systemd service (patch ExecStart to use bogdan-server)
+sed 's|ExecStart=/usr/local/bin/bogdan|ExecStart=/usr/local/bin/bogdan-server|' \
+    "${CONFIG_DIR}/bogdan.service" > "${DEB_ROOT}/etc/systemd/system/bogdan.service"
+chmod 644 "${DEB_ROOT}/etc/systemd/system/bogdan.service"
 
 # Data directory ownership will be set by postinst
 # Create a placeholder to ensure the directory is included
-touch "${DEB_ROOT}/var/lib/picast/.gitkeep"
+touch "${DEB_ROOT}/var/lib/bogdan/.gitkeep"
 
 # Copyright / license
 if [ -f "${REPO_ROOT}/LICENSE" ]; then
-    cp "${REPO_ROOT}/LICENSE" "${DEB_ROOT}/usr/share/doc/picast/copyright"
+    cp "${REPO_ROOT}/LICENSE" "${DEB_ROOT}/usr/share/doc/bogdan/copyright"
 fi
 
 # ─── Step 5: Copy debian control files ──────────────────────────────

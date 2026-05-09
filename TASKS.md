@@ -1,4 +1,4 @@
-# PiCast Task Breakdown
+# boGDan Task Breakdown
 
 **Granular, actionable tasks derived from [ROADMAP.md](ROADMAP.md).**
 Each task has a unique ID, phase, dependency, acceptance criteria, and estimated
@@ -64,13 +64,13 @@ effort. Tasks are ordered by execution sequence within each phase.
   but they must exist and pass.
 - **Acceptance:** `cargo test --workspace` runs and passes on x86_64.
 - **Key steps:**
-  1. `picast-tor`: test `SocksProxy::default()`, `SocksProxy::addr()`, `TorManager::new()` parsing
-  2. `picast-display`: test `DisplayManager::new()` with mock path, `DrmPlane`/`DrmCrtc` construction
-  3. `picast-playback`: test `PipelineConfig::default()`, `BufferHealth::default()`
-  4. `picast-resolver`: test `Resolver::classify()` for each `UrlCategory`, `ResolveResult` serialization
-  5. `picast-session`: test `MediaSession::new()`, `PlayerState` serialization, `SessionManager::new()` with in-memory SQLite
-  6. `picast-protocols`: test `HttpApiServer::new()`, `WebSocketServer::new()`, `DlnaRenderer::new()`
-  7. `picast-server`: test `AppConfig::from_env()`
+  1. `bogdan-tor`: test `SocksProxy::default()`, `SocksProxy::addr()`, `TorManager::new()` parsing
+  2. `bogdan-display`: test `DisplayManager::new()` with mock path, `DrmPlane`/`DrmCrtc` construction
+  3. `bogdan-playback`: test `PipelineConfig::default()`, `BufferHealth::default()`
+  4. `bogdan-resolver`: test `Resolver::classify()` for each `UrlCategory`, `ResolveResult` serialization
+  5. `bogdan-session`: test `MediaSession::new()`, `PlayerState` serialization, `SessionManager::new()` with in-memory SQLite
+  6. `bogdan-protocols`: test `HttpApiServer::new()`, `WebSocketServer::new()`, `DlnaRenderer::new()`
+  7. `bogdan-server`: test `AppConfig::from_env()`
 
 ### T-0.5 Conditional compilation for Pi deps ✅
 - **Crate:** playback, display
@@ -79,20 +79,20 @@ effort. Tasks are ordered by execution sequence within each phase.
 - **Description:** Gate all `gstreamer`, `drm`, `gbm`, `nix` imports behind
   `#[cfg(feature = "hw")]`. Provide stub implementations when the feature is
   off so the crate still compiles and tests pass on x86 dev machines.
-- **Acceptance:** `cargo test -p picast-playback -p picast-display` passes without `hw` feature.
+- **Acceptance:** `cargo test -p bogdan-playback -p bogdan-display` passes without `hw` feature.
 - **Key steps:**
-  1. `picast-playback/Cargo.toml`: `[features] hw = ["gstreamer", "gstreamer-video"]`
+  1. `bogdan-playback/Cargo.toml`: `[features] hw = ["gstreamer", "gstreamer-video"]`
   2. `PlaybackEngine::new()`: `#[cfg(feature = "hw")]` calls `gstreamer::init()`, else returns a mock engine
-  3. `picast-display/Cargo.toml`: `[features] hw = ["drm-rs", "gbm", "nix"]`
+  3. `bogdan-display/Cargo.toml`: `[features] hw = ["drm-rs", "gbm", "nix"]`
   4. `DisplayManager::new()`: `#[cfg(feature = "hw")]` opens real DRM device, else returns mock with default resolution
-  5. Ensure `cargo check -p picast-playback` works without `hw` feature
+  5. Ensure `cargo check -p bogdan-playback` works without `hw` feature
 
 ---
 
 ## Phase 1 — Tor Daemon Integration
 
 ### T-1.1 Tor process spawning ✅
-- **Crate:** `picast-tor`
+- **Crate:** `bogdan-tor`
 - **Depends on:** T-0.5
 - **Effort:** 1 day
 - **Description:** Implement `TorManager::ensure_running()` to spawn the `tor`
@@ -108,7 +108,7 @@ effort. Tasks are ordered by execution sequence within each phase.
   5. Set `owns_process = true` only if we spawned the process
 
 ### T-1.2 SOCKS5 connectivity verification ✅
-- **Crate:** `picast-tor`
+- **Crate:** `bogdan-tor`
 - **Depends on:** T-1.1
 - **Effort:** 0.5 day
 - **Description:** Implement a real SOCKS5 handshake test to verify the proxy
@@ -123,7 +123,7 @@ effort. Tasks are ordered by execution sequence within each phase.
   5. Return `CircuitHealth { is_healthy: true, latency_ms: Some(measured), .. }`
 
 ### T-1.3 Stream isolation via SOCKS5 username ✅
-- **Crate:** `picast-tor`
+- **Crate:** `bogdan-tor`
 - **Depends on:** T-1.2
 - **Effort:** 1 day
 - **Description:** Implement the SHA-256 hash-based stream isolation identifier.
@@ -134,13 +134,13 @@ effort. Tasks are ordered by execution sequence within each phase.
 - **Key steps:**
   1. Add `md-5` (already in deps) or use `sha2` for SHA-256 hashing
   2. `pub fn stream_isolation_id(domain: &str) -> String` → SHA-256 of domain, hex-encoded
-  3. Format: `picast-{hex_hash[:16]}`
+  3. Format: `bogdan-{hex_hash[:16]}`
   4. Expose `pub fn socks_username_for_url(&self, url: &Url) -> String`
   5. Add `socks5-proxy-username` field to `SocksProxy` config
   6. Unit test: same domain → same username; different domains → different usernames
 
 ### T-1.4 Tor process lifecycle management ✅
-- **Crate:** `picast-tor`
+- **Crate:** `bogdan-tor`
 - **Depends on:** T-1.1
 - **Effort:** 1 day
 - **Description:** Implement clean shutdown and crash recovery for the Tor child
@@ -156,7 +156,7 @@ effort. Tasks are ordered by execution sequence within each phase.
   5. `Drop` impl: try `child.start_kill()` if process still alive (sync, best-effort)
 
 ### T-1.5 Circuit health monitoring via control port ✅
-- **Crate:** `picast-tor`
+- **Crate:** `bogdan-tor`
 - **Depends on:** T-1.2
 - **Effort:** 1.5 days
 - **Description:** Connect to Tor's control port (`9051`), authenticate, and
@@ -174,7 +174,7 @@ effort. Tasks are ordered by execution sequence within each phase.
   7. `health_check()` reads from the shared state
 
 ### T-1.6 Tor integration test ✅
-- **Crate:** `picast-tor`
+- **Crate:** `bogdan-tor`
 - **Depends on:** T-1.3, T-1.4, T-1.5
 - **Effort:** 1 day
 - **Description:** End-to-end test that spawns a real Tor daemon, verifies
@@ -184,7 +184,7 @@ effort. Tasks are ordered by execution sequence within each phase.
 - **Key steps:**
   1. `#[tokio::test] async fn test_tor_lifecycle()`
   2. `TorManager::new("127.0.0.1:19050")` with non-standard port to avoid conflicts
-  3. Use a temporary torrc with `DataDirectory` in `/tmp/picast-test-*`
+  3. Use a temporary torrc with `DataDirectory` in `/tmp/bogdan-test-*`
   4. `ensure_running(60_000).await?`
   5. `health_check().await?` → verify `is_healthy`
   6. Generate stream IDs → verify determinism
@@ -195,7 +195,7 @@ effort. Tasks are ordered by execution sequence within each phase.
 ## Phase 2 — DRM/KMS Display Manager
 
 ### T-2.1 DRM device open and master acquisition
-- **Crate:** `picast-display`
+- **Crate:** `bogdan-display`
 - **Depends on:** T-0.5
 - **Effort:** 1 day
 - **Description:** Open `/dev/dri/card0`, call `drmSetMaster()`, verify the
@@ -211,7 +211,7 @@ effort. Tasks are ordered by execution sequence within each phase.
   6. `#[cfg(not(feature = "hw"))]`: return mock with default resolution
 
 ### T-2.2 Plane and CRTC enumeration
-- **Crate:** `picast-display`
+- **Crate:** `bogdan-display`
 - **Depends on:** T-2.1
 - **Effort:** 1 day
 - **Description:** Enumerate DRM planes and CRTCs. For each plane, record its
@@ -227,7 +227,7 @@ effort. Tasks are ordered by execution sequence within each phase.
   6. For each CRTC: `drmModeGetCrtc()` → `crtc_id`, `width`, `height`, `refresh_rate`
 
 ### T-2.3 HDMI connector detection and mode selection
-- **Crate:** `picast-display`
+- **Crate:** `bogdan-display`
 - **Depends on:** T-2.1
 - **Effort:** 1 day
 - **Description:** Find the connected HDMI connector, read its EDID, and select
@@ -241,7 +241,7 @@ effort. Tasks are ordered by execution sequence within each phase.
   5. Store selected connector ID and mode in `DisplayManager`
 
 ### T-2.4 Atomic modesetting implementation
-- **Crate:** `picast-display`
+- **Crate:** `bogdan-display`
 - **Depends on:** T-2.2, T-2.3
 - **Effort:** 2 days
 - **Description:** Implement `acquire()` using `drmModeAtomicCommit` to set
@@ -258,7 +258,7 @@ effort. Tasks are ordered by execution sequence within each phase.
   6. `release()`: disable planes, clear CRTC FB
 
 ### T-2.5 GBM device and surface initialization
-- **Crate:** `picast-display`
+- **Crate:** `bogdan-display`
 - **Depends on:** T-2.1
 - **Effort:** 1.5 days
 - **Description:** Initialize GBM (Generic Buffer Manager) on the DRM device.
@@ -273,7 +273,7 @@ effort. Tasks are ordered by execution sequence within each phase.
   5. Import GBM buffer into DRM: `gbm_bo_get_handle()` → `drmModeAddFB2()`
 
 ### T-2.6 Mock display mode for x86 testing ✅
-- **Crate:** `picast-display`
+- **Crate:** `bogdan-display`
 - **Depends on:** T-0.5
 - **Effort:** 0.5 day
 - **Description:** Implement `DisplayManager::new("mock")` that skips real DRM
@@ -287,7 +287,7 @@ effort. Tasks are ordered by execution sequence within each phase.
   5. `resolution()` returns `(1920, 1080)`
 
 ### T-2.7 Display integration test on Pi
-- **Crate:** `picast-display`
+- **Crate:** `bogdan-display`
 - **Depends on:** T-2.4, T-2.5
 - **Effort:** 1 day
 - **Description:** On-Pi test that opens DRM, enumerates resources, acquires
@@ -304,7 +304,7 @@ effort. Tasks are ordered by execution sequence within each phase.
 ## Phase 3 — GStreamer Playback Engine
 
 ### T-3.1 GStreamer initialization and pipeline construction ✅
-- **Crate:** `picast-playback`
+- **Crate:** `bogdan-playback`
 - **Depends on:** T-0.5, T-2.6 (for mock display)
 - **Effort:** 2 days
 - **Description:** Initialize GStreamer (`gst::init()`), construct the pipeline
@@ -322,7 +322,7 @@ effort. Tasks are ordered by execution sequence within each phase.
   7. Handle link failures gracefully
 
 ### T-3.2 Pipeline playback with direct URL
-- **Crate:** `picast-playback`
+- **Crate:** `bogdan-playback`
 - **Depends on:** T-3.1
 - **Effort:** 2 days
 - **Description:** Set a URL on `souphttpsrc`, transition pipeline to `Playing`,
@@ -337,7 +337,7 @@ effort. Tasks are ordered by execution sequence within each phase.
   5. Timeout: if not playing within 30s, return error
 
 ### T-3.3 Tor SOCKS5 proxy in souphttpsrc
-- **Crate:** `picast-playback`
+- **Crate:** `bogdan-playback`
 - **Depends on:** T-3.2, T-1.3
 - **Effort:** 1 day
 - **Description:** Configure `souphttpsrc` with SOCKS5 proxy from `TorManager`.
@@ -352,7 +352,7 @@ effort. Tasks are ordered by execution sequence within each phase.
   5. Test: verify media URL resolves through Tor (check IPs if possible)
 
 ### T-3.4 Play/Pause/Resume/Stop state transitions ✅
-- **Crate:** `picast-playback`
+- **Crate:** `bogdan-playback`
 - **Depends on:** T-3.2
 - **Effort:** 2 days
 - **Description:** Implement `pause()`, `resume()`, and `stop()` by setting
@@ -367,7 +367,7 @@ effort. Tasks are ordered by execution sequence within each phase.
   5. Add `current_state()` method returning `PlayerState`
 
 ### T-3.5 Seek implementation ✅
-- **Crate:** `picast-playback`
+- **Crate:** `bogdan-playback`
 - **Depends on:** T-3.4
 - **Effort:** 1 day
 - **Description:** Implement `seek()` using `gst_element_seek_simple()` with
@@ -380,7 +380,7 @@ effort. Tasks are ordered by execution sequence within each phase.
   4. Handle seek failures: `PlaybackError::SeekFailed`
 
 ### T-3.6 Volume control ✅
-- **Crate:** `picast-playback`
+- **Crate:** `bogdan-playback`
 - **Depends on:** T-3.1
 - **Effort:** 0.5 day
 - **Description:** Insert a `volume` element before `alsasink`. Expose
@@ -393,7 +393,7 @@ effort. Tasks are ordered by execution sequence within each phase.
   4. `get_volume()` reads the property back
 
 ### T-3.7 Buffer health monitoring ✅
-- **Crate:** `picast-playback`
+- **Crate:** `bogdan-playback`
 - **Depends on:** T-3.2
 - **Effort:** 1.5 days
 - **Description:** Listen for `GST_MESSAGE_BUFFERING` from `queue2`. Parse
@@ -410,7 +410,7 @@ effort. Tasks are ordered by execution sequence within each phase.
   6. Resume playback when `percent >= 80` (high threshold)
 
 ### T-3.8 Software decode fallback ✅
-- **Crate:** `picast-playback`
+- **Crate:** `bogdan-playback`
 - **Depends on:** T-3.2
 - **Effort:** 1.5 days
 - **Description:** If `v4l2h264dec` fails to negotiate (not available, wrong
@@ -427,7 +427,7 @@ effort. Tasks are ordered by execution sequence within each phase.
   5. Limit fallback to 720p30: add caps filter `video/x-raw, width<=1280, height<=720`
 
 ### T-3.9 Pipeline error recovery ✅
-- **Crate:** `picast-playback`
+- **Crate:** `bogdan-playback`
 - **Depends on:** T-3.4
 - **Effort:** 1 day
 - **Description:** Handle `GST_MESSAGE_ERROR` and `GST_MESSAGE_WARNING` on the
@@ -443,7 +443,7 @@ effort. Tasks are ordered by execution sequence within each phase.
   5. On `GST_MESSAGE_WARNING`: log with `tracing::warn!`
 
 ### T-3.10 Position and duration queries ✅
-- **Crate:** `picast-playback`
+- **Crate:** `bogdan-playback`
 - **Depends on:** T-3.4
 - **Effort:** 0.5 day
 - **Description:** Implement `position_ms()` and add `duration_ms()` method.
@@ -459,7 +459,7 @@ effort. Tasks are ordered by execution sequence within each phase.
 ## Phase 4 — Content Resolver (yt-dlp)
 
 ### T-4.1 yt-dlp subprocess invocation ✅
-- **Crate:** `picast-resolver`
+- **Crate:** `bogdan-resolver`
 - **Depends on:** T-1.3 (for stream isolation)
 - **Effort:** 1 day
 - **Description:** Implement `Resolver::resolve()` to spawn `yt-dlp -J <url>`
@@ -475,7 +475,7 @@ effort. Tasks are ordered by execution sequence within each phase.
   5. Map exit codes: 0 = success, 1 = no video found, other = network error
 
 ### T-4.2 yt-dlp JSON output parsing ✅
-- **Crate:** `picast-resolver`
+- **Crate:** `bogdan-resolver`
 - **Depends on:** T-4.1
 - **Effort:** 1.5 days
 - **Description:** Parse yt-dlp's JSON info dict. Extract: `url`, `formats`,
@@ -490,7 +490,7 @@ effort. Tasks are ordered by execution sequence within each phase.
   5. If merged format: yt-dlp returns `url` pointing to `manifest_url` — may need HLS/DASH handling
 
 ### T-4.3 Format selection: force H.264 ✅
-- **Crate:** `picast-resolver`
+- **Crate:** `bogdan-resolver`
 - **Depends on:** T-4.1
 - **Effort:** 0.5 day
 - **Description:** Pass `--format` flag to yt-dlp to force H.264 video selection.
@@ -503,7 +503,7 @@ effort. Tasks are ordered by execution sequence within each phase.
   4. Log a warning if forced to use non-H.264 codec
 
 ### T-4.4 Tor SOCKS5h proxy routing for yt-dlp ✅
-- **Crate:** `picast-resolver`
+- **Crate:** `bogdan-resolver`
 - **Depends on:** T-4.1, T-1.3
 - **Effort:** 1 day
 - **Description:** Configure yt-dlp to route through Tor SOCKS proxy with
@@ -511,13 +511,13 @@ effort. Tasks are ordered by execution sequence within each phase.
 - **Acceptance:** yt-dlp requests appear on Tor circuits; DNS doesn't leak.
 - **Key steps:**
   1. Get `SocksProxy` from `TorManager`
-  2. Generate stream isolation ID: `picast-<sha256(domain)>`
-  3. `--proxy socks5h://picast-{hash}@127.0.0.1:9050/`
+  2. Generate stream isolation ID: `bogdan-<sha256(domain)>`
+  3. `--proxy socks5h://bogdan-{hash}@127.0.0.1:9050/`
   4. `socks5h` (h = remote DNS) ensures DNS goes through Tor, not local resolver
   5. Test: resolve a URL, check Tor control port for circuit with matching username
 
 ### T-4.5 Resolution cache with TTL ✅ (upgraded to SQLite)
-- **Crate:** `picast-resolver`
+- **Crate:** `bogdan-resolver`
 - **Depends on:** T-4.2
 - **Effort:** 1.5 days
 - **Description:** Add a SQLite-backed cache for resolved URLs. Avoids repeated
@@ -535,7 +535,7 @@ effort. Tasks are ordered by execution sequence within each phase.
   6. WAL mode enabled for concurrent read access
 
 ### T-4.6 Subtitle extraction ✅
-- **Crate:** `picast-resolver`
+- **Crate:** `bogdan-resolver`
 - **Depends on:** T-4.1
 - **Effort:** 1 day
 - **Description:** Configure yt-dlp to extract available subtitles. Parse
@@ -545,11 +545,11 @@ effort. Tasks are ordered by execution sequence within each phase.
   1. `--write-subs --sub-langs "en,es,fr,de" --sub-format vtt`
   2. Parse `subtitles` field from yt-dlp JSON: map of language code → subtitle URL list
   3. Add `available_subtitles: Vec<String>` to `ResolveResult`
-  4. Download subtitle files to `/tmp/picast-subs/{session_id}/`
+  4. Download subtitle files to `/tmp/bogdan-subs/{session_id}/`
   5. Clean up subtitle files on session stop
 
 ### T-4.7 Direct media passthrough ✅
-- **Crate:** `picast-resolver`
+- **Crate:** `bogdan-resolver`
 - **Depends on:** T-0.5
 - **Effort:** 0.5 day
 - **Description:** URLs classified as `DirectMedia` or `HlsManifest` or
@@ -563,7 +563,7 @@ effort. Tasks are ordered by execution sequence within each phase.
   4. Only `WebPage` category triggers yt-dlp resolution
 
 ### T-4.8 Error handling and timeout ✅
-- **Crate:** `picast-resolver`
+- **Crate:** `bogdan-resolver`
 - **Depends on:** T-4.1
 - **Effort:** 0.5 day
 - **Description:** Map yt-dlp exit codes and stderr to `ResolveError` variants.
@@ -577,7 +577,7 @@ effort. Tasks are ordered by execution sequence within each phase.
   5. Binary not found → `ResolveError::TorUnavailable("yt-dlp not installed")` (or new variant)
 
 ### T-4.9 Resolver integration test ✅
-- **Crate:** `picast-resolver`
+- **Crate:** `bogdan-resolver`
 - **Depends on:** T-4.3, T-4.4, T-4.5
 - **Effort:** 1 day
 - **Description:** End-to-end test: resolve URLs of each category, verify
@@ -600,7 +600,7 @@ effort. Tasks are ordered by execution sequence within each phase.
 ## Phase 5 — Session Manager
 
 ### T-5.1 Trait-object wiring ✅
-- **Crate:** `picast-session`
+- **Crate:** `bogdan-session`
 - **Depends on:** T-1.3, T-2.6, T-3.4, T-4.2
 - **Effort:** 1 day
 - **Description:** Replace `Arc<()>` stubs in `SessionManager` with real
@@ -615,7 +615,7 @@ effort. Tasks are ordered by execution sequence within each phase.
   4. Write test: create mock implementations, verify wiring
 
 ### T-5.2 Load flow: resolve → create session → play ✅
-- **Crate:** `picast-session`
+- **Crate:** `bogdan-session`
 - **Depends on:** T-5.1
 - **Effort:** 2 days
 - **Description:** Implement `load()` to: (1) call `resolver.resolve()`,
@@ -633,7 +633,7 @@ effort. Tasks are ordered by execution sequence within each phase.
   7. Return `session.id`
 
 ### T-5.3 State machine implementation ✅
-- **Crate:** `picast-session`
+- **Crate:** `bogdan-session`
 - **Depends on:** T-5.2
 - **Effort:** 2 days
 - **Description:** Implement the 7-state state machine with valid transitions
@@ -648,7 +648,7 @@ effort. Tasks are ordered by execution sequence within each phase.
   5. Broadcast: `watch_tx.send(current_state)?`
 
 ### T-5.4 Play/Pause/Stop/Seek/SetVolume delegation ✅
-- **Crate:** `picast-session`
+- **Crate:** `bogdan-session`
 - **Depends on:** T-5.3
 - **Effort:** 1.5 days
 - **Description:** Implement each command method: validate state, delegate to
@@ -662,7 +662,7 @@ effort. Tasks are ordered by execution sequence within each phase.
   5. `set_volume()`: any state → `self.playback.set_volume()` → update `volume` in SQLite
 
 ### T-5.5 Watch channel for state broadcasting ✅
-- **Crate:** `picast-session`
+- **Crate:** `bogdan-session`
 - **Depends on:** T-5.3
 - **Effort:** 0.5 day
 - **Description:** Add `tokio::sync::watch` channel to `SessionManager`. Protocol
@@ -675,7 +675,7 @@ effort. Tasks are ordered by execution sequence within each phase.
   4. Protocol handlers: `tokio::spawn(async { while rx.changed().await.is_ok() { ... } })`
 
 ### T-5.6 Session cleanup and persistence ✅
-- **Crate:** `picast-session`
+- **Crate:** `bogdan-session`
 - **Depends on:** T-5.2
 - **Effort:** 1 day
 - **Description:** On startup, clean up stale sessions (>24h). On stop,
@@ -690,7 +690,7 @@ effort. Tasks are ordered by execution sequence within each phase.
   4. On process start: check if any session is in `Playing` → set to `Idle` (crash recovery)
 
 ### T-5.7 Thread safety for concurrent access ✅
-- **Crate:** `picast-session`
+- **Crate:** `bogdan-session`
 - **Depends on:** T-5.4
 - **Effort:** 0.5 day
 - **Description:** Ensure `SessionManager` is safe for concurrent access from
@@ -709,7 +709,7 @@ effort. Tasks are ordered by execution sequence within each phase.
 ## Phase 6 — Protocol Servers
 
 ### T-6.1 HTTP API: POST /api/cast ✅
-- **Crate:** `picast-protocols`
+- **Crate:** `bogdan-protocols`
 - **Depends on:** T-5.2
 - **Effort:** 1 day
 - **Description:** Implement the `/api/cast` endpoint using `hyper`. Parse JSON
@@ -724,7 +724,7 @@ effort. Tasks are ordered by execution sequence within each phase.
   5. Handle: `400` (bad URL), `409` (session active), `422` (resolution failed), `503` (pipeline error)
 
 ### T-6.2 HTTP API: POST /api/stop ✅
-- **Crate:** `picast-protocols`
+- **Crate:** `bogdan-protocols`
 - **Depends on:** T-5.4
 - **Effort:** 0.5 day
 - **Description:** Implement `/api/stop`. Stop current session, release resources.
@@ -736,7 +736,7 @@ effort. Tasks are ordered by execution sequence within each phase.
   4. `404` if no active session
 
 ### T-6.3 HTTP API: POST /api/pause ✅
-- **Crate:** `picast-protocols`
+- **Crate:** `bogdan-protocols`
 - **Depends on:** T-5.4
 - **Effort:** 0.5 day
 - **Description:** Implement `/api/pause` to toggle pause state.
@@ -748,7 +748,7 @@ effort. Tasks are ordered by execution sequence within each phase.
   3. `409` if no active session
 
 ### T-6.4 HTTP API: POST /api/seek ✅
-- **Crate:** `picast-protocols`
+- **Crate:** `bogdan-protocols`
 - **Depends on:** T-5.4
 - **Effort:** 0.5 day
 - **Description:** Implement `/api/seek` with absolute and relative modes.
@@ -761,7 +761,7 @@ effort. Tasks are ordered by execution sequence within each phase.
   5. `session.seek(id, position_ms).await?`
 
 ### T-6.5 HTTP API: GET /api/status ✅
-- **Crate:** `picast-protocols`
+- **Crate:** `bogdan-protocols`
 - **Depends on:** T-5.4
 - **Effort:** 1 day
 - **Description:** Implement `/api/status` returning full session state as JSON.
@@ -775,7 +775,7 @@ effort. Tasks are ordered by execution sequence within each phase.
   5. When idle: return `{"sessionId": null, "status": "idle"}`
 
 ### T-6.6 HTTP API: POST /api/volume ✅
-- **Crate:** `picast-protocols`
+- **Crate:** `bogdan-protocols`
 - **Depends on:** T-5.4
 - **Effort:** 0.5 day
 - **Description:** Implement `/api/volume` to set volume and mute state.
@@ -786,7 +786,7 @@ effort. Tasks are ordered by execution sequence within each phase.
   3. `session.set_volume(id, (level * 100.0) as u8).await?`
 
 ### T-6.7 CORS headers for browser extension ✅
-- **Crate:** `picast-protocols`
+- **Crate:** `bogdan-protocols`
 - **Depends on:** T-6.1
 - **Effort:** 0.5 day
 - **Description:** Add `Access-Control-Allow-Origin: *` and other CORS headers
@@ -799,7 +799,7 @@ effort. Tasks are ordered by execution sequence within each phase.
   4. Apply to all `/api/*` routes
 
 ### T-6.8 WebSocket server ✅
-- **Crate:** `picast-protocols`
+- **Crate:** `bogdan-protocols`
 - **Depends on:** T-5.5
 - **Effort:** 3 days
 - **Description:** Implement WebSocket server on port 8586 using `tokio-tungstenite`.
@@ -816,7 +816,7 @@ effort. Tasks are ordered by execution sequence within each phase.
   7. Ping/pong every 30s; disconnect unresponsive clients after 10s
 
 ### T-6.9 WebSocket: RESOLVE_PROGRESS messages ✅
-- **Crate:** `picast-protocols`
+- **Crate:** `bogdan-protocols`
 - **Depends on:** T-6.8, T-4.1
 - **Effort:** 1 day
 - **Description:** During yt-dlp resolution, send periodic `RESOLVE_PROGRESS`
@@ -831,17 +831,17 @@ effort. Tasks are ordered by execution sequence within each phase.
   5. Also send `RESOLVE_PROGRESS` via HTTP (polling) as fallback
 
 ### T-6.10 DLNA via gmediarender ✅
-- **Crate:** `picast-protocols`
+- **Crate:** `bogdan-protocols`
 - **Depends on:** T-5.4
 - **Effort:** 3 days
 - **Description:** Spawn `gmediarender` as a subprocess with a custom GStreamer
-  pipeline string that matches PiCast's V4L2 + kmssink configuration. Monitor
+  pipeline string that matches boGDan's V4L2 + kmssink configuration. Monitor
   state changes and synchronize with `SessionManager`.
-  **Implemented:** gmediarender subprocess spawned with PiCast GStreamer pipeline, SSDP discovery working, session sync via D-Bus monitoring.
-- **Acceptance:** VLC discovers PiCast as a renderer; casting a URL from VLC
+  **Implemented:** gmediarender subprocess spawned with boGDan GStreamer pipeline, SSDP discovery working, session sync via D-Bus monitoring.
+- **Acceptance:** VLC discovers boGDan as a renderer; casting a URL from VLC
   plays video on the Pi's HDMI output.
 - **Key steps:**
-  1. Spawn `gmediarender -f "PiCast" --gstout-audiosink=alsasink --gstout-videosink=kmssink`
+  1. Spawn `gmediarender -f "boGDan" --gstout-audiosink=alsasink --gstout-videosink=kmssink`
   2. Wait for SSDP advertisement
   3. Monitor D-Bus or GStreamer bus for state changes
   4. On `SetAVTransportURI`: extract URL, call `session.load()`
@@ -849,7 +849,7 @@ effort. Tasks are ordered by execution sequence within each phase.
   6. Handle gmediarender crashes: restart subprocess
 
 ### T-6.11 HTTP API integration tests ✅
-- **Crate:** `picast-protocols`
+- **Crate:** `bogdan-protocols`
 - **Depends on:** T-6.1 through T-6.7
 - **Effort:** 1 day
 - **Description:** Integration tests using `reqwest` against a real HTTP server
@@ -869,12 +869,12 @@ effort. Tasks are ordered by execution sequence within each phase.
 ## Phase 7 — Server Orchestration
 
 ### T-7.1 Real component initialization ✅
-- **Crate:** `picast-server`
+- **Crate:** `bogdan-server`
 - **Depends on:** T-1.4, T-2.4, T-3.4, T-4.2, T-5.4, T-6.1
 - **Effort:** 1 day
 - **Description:** Replace all `Arc::new(())` stubs in `main.rs` with real
   component construction. Handle errors with clear diagnostics.
-- **Acceptance:** `picast-server` binary starts and initializes all subsystems.
+- **Acceptance:** `bogdan-server` binary starts and initializes all subsystems.
 - **Key steps:**
   1. `TorManager::new(&config.tor_socks)` → `ensure_running()`
   2. `DisplayManager::new("/dev/dri/card0")`
@@ -886,7 +886,7 @@ effort. Tasks are ordered by execution sequence within each phase.
   8. `DlnaRenderer::new(&config.dlna_name, session.clone())`
 
 ### T-7.2 Task spawning and concurrent execution ✅
-- **Crate:** `picast-server`
+- **Crate:** `bogdan-server`
 - **Depends on:** T-7.1
 - **Effort:** 1 day
 - **Description:** Spawn each protocol server as a `tokio::spawn` task. All
@@ -900,7 +900,7 @@ effort. Tasks are ordered by execution sequence within each phase.
   5. Broadcast shutdown to all tasks
 
 ### T-7.3 Graceful shutdown sequence ✅
-- **Crate:** `picast-server`
+- **Crate:** `bogdan-server`
 - **Depends on:** T-7.2
 - **Effort:** 1 day
 - **Description:** On SIGINT/SIGTERM: stop playback → release display → kill
@@ -915,7 +915,7 @@ effort. Tasks are ordered by execution sequence within each phase.
   6. Force kill any remaining tasks after timeout
 
 ### T-7.4 Startup ordering validation ✅
-- **Crate:** `picast-server`
+- **Crate:** `bogdan-server`
 - **Depends on:** T-7.1
 - **Effort:** 0.5 day
 - **Description:** Enforce sequential startup: Tor → Display → Playback →
@@ -930,7 +930,7 @@ effort. Tasks are ordered by execution sequence within each phase.
   4. Each failure: `tracing::error!()` with actionable message
 
 ### T-7.5 Health check endpoint ✅
-- **Crate:** `picast-server`
+- **Crate:** `bogdan-server`
 - **Depends on:** T-7.1
 - **Effort:** 0.5 day
 - **Description:** Add `GET /api/health` endpoint that returns status of all
@@ -943,12 +943,12 @@ effort. Tasks are ordered by execution sequence within each phase.
   3. Return `200 OK` if all healthy, `503` if any degraded
 
 ### T-7.6 Configuration file support ✅
-- **Crate:** `picast-server`
+- **Crate:** `bogdan-server`
 - **Depends on:** T-0.1
 - **Effort:** 1 day
 - **Description:** Add TOML config file support alongside env vars. Search
-  `/etc/picast/picast.conf`, `~/.config/picast/picast.conf`, `./picast.conf`.
-- **Acceptance:** `picast.conf` settings override defaults; env vars override config file.
+  `/etc/bogdan/bogdan.conf`, `~/.config/bogdan/bogdan.conf`, `./bogdan.conf`.
+- **Acceptance:** `bogdan.conf` settings override defaults; env vars override config file.
 - **Key steps:**
   1. Add `toml` dependency
   2. Define `Config` struct with `Deserialize`
@@ -956,15 +956,15 @@ effort. Tasks are ordered by execution sequence within each phase.
   4. Validate on startup: ports in range, paths exist, etc.
 
 ### T-7.7 End-to-end smoke test on Pi
-- **Crate:** `picast-server`
+- **Crate:** `bogdan-server`
 - **Depends on:** T-7.3, T-7.4
 - **Effort:** 1 day
-- **Description:** Full integration test on Raspberry Pi: boot → start PiCast →
+- **Description:** Full integration test on Raspberry Pi: boot → start boGDan →
   cast YouTube URL → verify HDMI output → stop → clean shutdown.
 - **Acceptance:** Video appears on HDMI; API responds correctly; shutdown is clean.
 - **Key steps:**
-  1. Build `picast-server` for aarch64
-  2. Copy to Pi, run with `./picast-server`
+  1. Build `bogdan-server` for aarch64
+  2. Copy to Pi, run with `./bogdan-server`
   3. `curl POST /api/cast -d '{"url":"https://www.youtube.com/watch?v=dQw4w9WgXcQ"}'`
   4. Verify video on HDMI monitor
   5. `curl POST /api/pause`, `/api/seek`, `/api/stop`
@@ -979,7 +979,7 @@ effort. Tasks are ordered by execution sequence within each phase.
 - **Depends on:** nothing
 - **Effort:** 0.5 day
 - **Description:** Create `icon16.png`, `icon48.png`, `icon128.png` for the
-  browser extension. Use a simple, recognizable PiCast logo.
+  browser extension. Use a simple, recognizable boGDan logo.
   **Implemented:** 16/48/128px PNG icons placed in src/extension/icons/.
 - **Acceptance:** Icons appear in Chrome/Firefox extension management UI.
 - **Key steps:**
@@ -1031,7 +1031,7 @@ effort. Tasks are ordered by execution sequence within each phase.
   button for each. Show URL type (direct, HLS, page) and confidence level.
   **Implemented:** popup queries background for media queue, renders list with type badges and cast buttons.
 - **Acceptance:** Popup displays list of detected media; clicking "Cast" sends
-  URL to PiCast server.
+  URL to boGDan server.
 - **Key steps:**
   1. Query background: `chrome.runtime.sendMessage({ type: 'GET_MEDIA_QUEUE', tabId })`
   2. Render list with type badges and cast buttons
@@ -1043,7 +1043,7 @@ effort. Tasks are ordered by execution sequence within each phase.
 - **Depends on:** T-8.4
 - **Effort:** 1 day
 - **Description:** Add play/pause, stop, seek bar, and volume slider to the
-  popup. All controls wired to the PiCast HTTP API.
+  popup. All controls wired to the boGDan HTTP API.
   **Implemented:** play/pause, stop, seek bar, and volume slider wired to HTTP API.
 - **Acceptance:** Popup controls work: pause pauses, stop stops, seek bar seeks.
 - **Key steps:**
@@ -1057,13 +1057,13 @@ effort. Tasks are ordered by execution sequence within each phase.
 - **Crate:** `src/extension/`
 - **Depends on:** T-8.5
 - **Effort:** 1 day
-- **Description:** Connect popup to PiCast's WebSocket server for real-time
+- **Description:** Connect popup to boGDan's WebSocket server for real-time
   status updates (position, buffer %, state changes). Update UI without polling.
   **Implemented:** WebSocket connection for live position, buffer %, and state updates with reconnect backoff.
 - **Acceptance:** Popup shows live position counter and buffer percentage during
   playback without page refresh.
 - **Key steps:**
-  1. `new WebSocket('ws://picast.local:8586/ws')` on popup open
+  1. `new WebSocket('ws://bogdan.local:8586/ws')` on popup open
   2. Handle `MEDIA_STATUS` messages: update position, state, buffer
   3. Handle `RESOLVE_PROGRESS` messages: show "Resolving..." with phase
   4. Handle `ERROR` messages: show error notification
@@ -1080,7 +1080,7 @@ effort. Tasks are ordered by execution sequence within each phase.
   updates API calls.
 - **Key steps:**
   1. `chrome.storage.local.set/get` for all settings
-  2. Pi address: text input (default: `picast.local`)
+  2. Pi address: text input (default: `bogdan.local`)
   3. Port: number input (default: `8585`)
   4. Tor mode: dropdown (`full`, `resolution-only`, `off`)
   5. Auto-detect: toggle (automatically detect media on page load)
@@ -1096,7 +1096,7 @@ effort. Tasks are ordered by execution sequence within each phase.
 - **Acceptance:** Extension loads in Chrome via developer mode; loads in Firefox
   via `about:debugging`.
 - **Key steps:**
-  1. Chrome: `zip -r picast-chrome.zip src/extension/*` (excluding Firefox-specific files)
+  1. Chrome: `zip -r bogdan-chrome.zip src/extension/*` (excluding Firefox-specific files)
   2. Firefox: create `manifest-firefox.json`, adjust permissions, zip
   3. Test load in both browsers
   4. Create `scripts/build-extension.sh` for automated packaging
@@ -1109,10 +1109,10 @@ effort. Tasks are ordered by execution sequence within each phase.
 - **Description:** Handle API unreachable, timeout, and server error cases
   gracefully in the extension UI.
   **Implemented:** graceful error display for unreachable server, timeouts, and retry with exponential backoff.
-- **Acceptance:** When PiCast server is unreachable, popup shows "PiCast not
+- **Acceptance:** When boGDan server is unreachable, popup shows "boGDan not
   found" instead of a blank or error state.
 - **Key steps:**
-  1. Catch `fetch()` errors → show "PiCast not found at [address]:[port]"
+  1. Catch `fetch()` errors → show "boGDan not found at [address]:[port]"
   2. Timeout after 5s → show "Connection timed out"
   3. Retry with exponential backoff (1s, 2s, 4s, max 30s)
   4. Show last known status when offline
@@ -1130,12 +1130,12 @@ effort. Tasks are ordered by execution sequence within each phase.
   crates. ≥60% for `playback`, `display` (harder to test without hardware).
 - **Acceptance:** `cargo tarpaulin --workspace` reports ≥75% average coverage.
 - **Key steps:**
-  1. `picast-tor`: test all `TorError` variants, `SocksProxy` methods, stream ID generation
-  2. `picast-resolver`: test `classify()` exhaustively, cache TTL, error mapping
-  3. `picast-session`: test state machine transitions (valid and invalid), persistence, watch channel
-  4. `picast-playback`: test `PipelineConfig` serialization, `BufferHealth` defaults
-  5. `picast-display`: test mock mode, `DrmPlane`/`DrmCrtc` construction
-  6. `picast-protocols`: test HTTP request/response types, WebSocket message parsing
+  1. `bogdan-tor`: test all `TorError` variants, `SocksProxy` methods, stream ID generation
+  2. `bogdan-resolver`: test `classify()` exhaustively, cache TTL, error mapping
+  3. `bogdan-session`: test state machine transitions (valid and invalid), persistence, watch channel
+  4. `bogdan-playback`: test `PipelineConfig` serialization, `BufferHealth` defaults
+  5. `bogdan-display`: test mock mode, `DrmPlane`/`DrmCrtc` construction
+  6. `bogdan-protocols`: test HTTP request/response types, WebSocket message parsing
 
 ### T-9.2 Integration test: full playback flow ✅
 - **Crate:** `tests/`
@@ -1162,7 +1162,7 @@ effort. Tasks are ordered by execution sequence within each phase.
   Tor connectivity, HDMI output, API responses, clean shutdown.
 - **Acceptance:** `./scripts/smoke-test.sh` exits 0 on a Pi 4 with all hardware connected.
 - **Key steps:**
-  1. Start `picast-server`
+  1. Start `bogdan-server`
   2. Wait for `/api/health` → 200 OK
   3. Verify Tor: `curl --socks5 127.0.0.1:9050 https://check.torproject.org/`
   4. Cast test URL → verify `202 Accepted`
@@ -1180,7 +1180,7 @@ effort. Tasks are ordered by execution sequence within each phase.
   playback; DNS queries only to Tor's DNSPort.
 - **Key steps:**
   1. Apply `config/iptables.rules`
-  2. Start PiCast and play a video
+  2. Start boGDan and play a video
   3. `tcpdump -i eth0 not port 9050 and not port 53` → should be empty
   4. Verify DNS goes through Tor: `dig +short @127.0.0.1 -p 5353 google.com`
   5. Test that direct HTTP fails: `curl --noproxy '*' http://example.com` → timeout
@@ -1193,8 +1193,8 @@ effort. Tasks are ordered by execution sequence within each phase.
   Target: <10 MB/hour leak rate.
 - **Acceptance:** RSS growth < 80 MB over 8 hours; no GStreamer pipeline leaks.
 - **Key steps:**
-  1. Start PiCast, cast a long video
-  2. Log RSS every 60s: `ps -o rss= -p $(pidof picast-server)`
+  1. Start boGDan, cast a long video
+  2. Log RSS every 60s: `ps -o rss= -p $(pidof bogdan-server)`
   3. After 8 hours: calculate leak rate
   4. Monitor GStreamer: `GST_TRACE=1` to track buffer allocations
   5. If leak detected: use `valgrind --leak-check=full` on x86 build
@@ -1209,8 +1209,8 @@ effort. Tasks are ordered by execution sequence within each phase.
 - **Acceptance:** After 100 cycles: RSS < 2× initial, open fds < 100, SQLite < 1 MB.
 - **Key steps:**
   1. Script: `for i in $(seq 1 100); do curl POST /api/cast; sleep 5; curl POST /api/stop; sleep 1; done`
-  2. Before/after: `lsof -p $(pidof picast-server) | wc -l` → fd count
-  3. Before/after: `du -h /var/lib/picast/sessions.db`
+  2. Before/after: `lsof -p $(pidof bogdan-server) | wc -l` → fd count
+  3. Before/after: `du -h /var/lib/bogdan/sessions.db`
   4. Monitor RSS trend
 
 ### T-9.7 Security audit checklist ✅
@@ -1225,8 +1225,8 @@ effort. Tasks are ordered by execution sequence within each phase.
   1. Verify: all outbound via Tor SOCKS (iptables + tcpdump)
   2. Verify: DNS queries only to Tor DNSPort
   3. Verify: stream isolation (different domains → different circuits)
-  4. Verify: DRM master is only PiCast (no X11/Wayland)
-  5. Verify: process runs as `picast` user, not root (DRM via group membership)
+  4. Verify: DRM master is only boGDan (no X11/Wayland)
+  5. Verify: process runs as `bogdan` user, not root (DRM via group membership)
   6. Verify: no unnecessary listening ports (only 8585, 8586, 49152, 9050)
   7. Verify: systemd service has `ProtectSystem`, `NoNewPrivileges`, etc.
 
@@ -1255,18 +1255,18 @@ effort. Tasks are ordered by execution sequence within each phase.
 - **Depends on:** T-7.3
 - **Effort:** 1 day
 - **Description:** Rewrite `scripts/setup.sh` for one-command install on
-  fresh Raspberry Pi OS. Install all system deps, build PiCast, configure
+  fresh Raspberry Pi OS. Install all system deps, build boGDan, configure
   Tor, iptables, and systemd.
 - **Acceptance:** On a fresh Pi OS Lite image, `curl -sSL setup.sh | bash`
-  results in a running PiCast service.
+  results in a running boGDan service.
 - **Key steps:**
   1. `apt install build-essential libgstreamer1.0-dev ... tor yt-dlp`
   2. `cargo build --release --target aarch64-unknown-linux-gnu`
-  3. Copy binary to `/usr/local/bin/picast-server`
-  4. Install `config/picast.service` → `systemctl enable picast`
+  3. Copy binary to `/usr/local/bin/bogdan-server`
+  4. Install `config/bogdan.service` → `systemctl enable bogdan`
   5. Install `config/torrc` → `systemctl restart tor`
   6. Install `config/iptables.rules` → apply on boot
-  7. Create `picast` user, add to `video` and `render` groups
+  7. Create `bogdan` user, add to `video` and `render` groups
 
 ### T-10.2 Debian package ✅
 - **Crate:** `scripts/`
@@ -1274,40 +1274,40 @@ effort. Tasks are ordered by execution sequence within each phase.
 - **Effort:** 2 days
 - **Description:** Build a `.deb` package containing the binary, configs,
   systemd service, and postinst scripts for auto-configuration.
-- **Acceptance:** `dpkg -i picast_0.1.0_arm64.deb` installs and starts PiCast.
+- **Acceptance:** `dpkg -i bogdan_0.1.0_arm64.deb` installs and starts boGDan.
 - **Key steps:**
   1. Create `debian/` directory structure
   2. `DEBIAN/control`: Package, Version, Architecture, Depends, Description
   3. `DEBIAN/postinst`: add user, enable service, apply iptables
   4. `DEBIAN/prerm`: stop service
-  5. Build: `dpkg-deb --build picast_0.1.0`
+  5. Build: `dpkg-deb --build bogdan_0.1.0`
   6. Test on fresh Pi OS
 
 ### T-10.3 Pre-built SD card image
 - **Crate:** `scripts/`
 - **Depends on:** T-10.2
 - **Effort:** 2 days
-- **Description:** Create a flash-and-boot Raspberry Pi OS image with PiCast
+- **Description:** Create a flash-and-boot Raspberry Pi OS image with boGDan
   pre-installed. Compatible with Raspberry Pi Imager.
-- **Acceptance:** Flash image to SD card → boot Pi → PiCast is running.
+- **Acceptance:** Flash image to SD card → boot Pi → boGDan is running.
 - **Key steps:**
   1. Start with Raspberry Pi OS Lite (64-bit) base image
   2. Use `pi-gen` or manual `chroot` to customize
-  3. Install PiCast .deb package
+  3. Install boGDan .deb package
   4. Disable desktop: `systemctl set-default multi-user.target`
-  5. Enable: `picast.service`, `tor.service`
-  6. Set hostname: `picast`
-  7. Compress: `xz -z picast.img`
+  5. Enable: `bogdan.service`, `tor.service`
+  6. Set hostname: `bogdan`
+  7. Compress: `xz -z bogdan.img`
   8. Test: flash → boot → verify API responds
 
 ### T-10.4 README.md rewrite ✅
 - **Crate:** root
 - **Depends on:** T-10.1
 - **Effort:** 0.5 day
-- **Description:** Rewrite README as a quick start guide: what PiCast is,
+- **Description:** Rewrite README as a quick start guide: what boGDan is,
   hardware requirements, one-command install, extension install, cast first
   video.
-- **Acceptance:** A new user can go from "never heard of PiCast" to "watching
+- **Acceptance:** A new user can go from "never heard of boGDan" to "watching
   a casted video" using only the README.
 - **Key steps:**
   1. One-paragraph description
@@ -1325,13 +1325,13 @@ effort. Tasks are ordered by execution sequence within each phase.
   troubleshooting (Tor won't start, no video, no audio), FAQ.
 - **Acceptance:** Common issues have documented solutions.
 - **Key steps:**
-  1. Configuration: `picast.conf` format and all options
+  1. Configuration: `bogdan.conf` format and all options
   2. Tor: checking circuit status, bridge configuration, bandwidth tips
   3. Display: selecting resolution, multi-monitor (unsupported), EDID issues
   4. Playback: codec support, subtitle configuration, ABR behavior
   5. Extension: installing, configuring Pi address, permissions
   6. DLNA: discovering from VLC, Home Assistant, Android
-  7. Troubleshooting: `journalctl -u picast`, `GST_DEBUG`, `tor-log`
+  7. Troubleshooting: `journalctl -u bogdan`, `GST_DEBUG`, `tor-log`
 
 ### T-10.6 Security hardening guide
 - **Crate:** `docs/`
@@ -1339,15 +1339,15 @@ effort. Tasks are ordered by execution sequence within each phase.
 - **Effort:** 0.5 day
 - **Description:** Write `docs/SECURITY.md` documenting the security model,
   iptables rules, Tor configuration, and physical security recommendations.
-- **Acceptance:** Security reviewer can verify PiCast's security properties
+- **Acceptance:** Security reviewer can verify boGDan's security properties
   using this document.
 - **Key steps:**
-  1. Threat model: what PiCast defends against and what it doesn't
+  1. Threat model: what boGDan defends against and what it doesn't
   2. iptables rules explanation (line by line)
   3. Tor configuration: circuit isolation, DNS leak prevention
-  4. Process privileges: `picast` user, group memberships, capabilities
+  4. Process privileges: `bogdan` user, group memberships, capabilities
   5. Physical security: SD card encryption, UART disabled, GPIO locked
-  6. Update policy: Tor updates, yt-dlp updates, PiCast updates
+  6. Update policy: Tor updates, yt-dlp updates, boGDan updates
 
 ### T-10.7 Release checklist and GitHub Release
 - **Crate:** root
@@ -1358,7 +1358,7 @@ effort. Tasks are ordered by execution sequence within each phase.
 - **Acceptance:** GitHub Release page has all artifacts with checksums and
   release notes.
 - **Key steps:**
-  1. Tag: `git tag v1.0.0 -m "PiCast v1.0.0 release"`
+  1. Tag: `git tag v1.0.0 -m "boGDan v1.0.0 release"`
   2. Build: binary, .deb, SD image, extension zip
   3. Checksums: `sha256sum * > SHA256SUMS`
   4. Release notes: features, known issues, upgrade instructions

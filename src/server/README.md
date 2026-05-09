@@ -1,10 +1,10 @@
-# picast-server
+# bogdan-server
 
-The main binary entry point for the PiCast appliance. It orchestrates subsystem initialization, configuration loading, signal handling, and graceful shutdown. This crate does not contain business logic — it wires together the other six crates and drives the application lifecycle.
+The main binary entry point for the boGDan appliance. It orchestrates subsystem initialization, configuration loading, signal handling, and graceful shutdown. This crate does not contain business logic — it wires together the other six crates and drives the application lifecycle.
 
 ## Purpose
 
-PiCast server is the executable harness that bootstraps all PiCast subsystems (Tor, display, playback, resolver, session, protocols) in the correct dependency order, spawns their async tasks, and waits for a shutdown signal. It is the single process that runs on the Raspberry Pi as a systemd service (`picast.service`), started directly on `tty1` by autologin — no display server, no window manager, no desktop environment. The server process holds DRM master privileges for the duration of its lifetime, and if it crashes, systemd restarts it within seconds.
+boGDan server is the executable harness that bootstraps all boGDan subsystems (Tor, display, playback, resolver, session, protocols) in the correct dependency order, spawns their async tasks, and waits for a shutdown signal. It is the single process that runs on the Raspberry Pi as a systemd service (`bogdan.service`), started directly on `tty1` by autologin — no display server, no window manager, no desktop environment. The server process holds DRM master privileges for the duration of its lifetime, and if it crashes, systemd restarts it within seconds.
 
 ## Public API
 
@@ -13,32 +13,32 @@ This crate produces a single binary, not a library. There are no public structs 
 | Item | Kind | Description |
 |------|------|-------------|
 | `AppConfig` | struct | Configuration loaded from environment variables with sensible defaults |
-| `AppConfig::from_env()` | method | Reads `PICAST_HTTP_ADDR`, `PICAST_WS_ADDR`, `PICAST_DLNA_NAME`, `PICAST_TOR_SOCKS` |
+| `AppConfig::from_env()` | method | Reads `BOGDAN_HTTP_ADDR`, `BOGDAN_WS_ADDR`, `BOGDAN_DLNA_NAME`, `BOGDAN_TOR_SOCKS` |
 | `init_tracing()` | function | Sets up `tracing-subscriber` with `env-filter` for `RUST_LOG` control |
 
 ### Environment Variables
 
 | Variable | Default | Description |
 |----------|---------|-------------|
-| `PICAST_HTTP_ADDR` | `0.0.0.0:8080` | HTTP REST API listen address |
-| `PICAST_WS_ADDR` | `0.0.0.0:8081` | WebSocket listen address |
-| `PICAST_DLNA_NAME` | `PiCast` | Friendly name for DLNA/SSDP announcements |
-| `PICAST_TOR_SOCKS` | `127.0.0.1:9050` | Tor SOCKS5 proxy address |
-| `PICAST_DB_PATH` | `/var/lib/picast/sessions.db` | SQLite database path |
-| `RUST_LOG` | `info` | Tracing filter (e.g. `picast_resolver=debug`) |
+| `BOGDAN_HTTP_ADDR` | `0.0.0.0:8080` | HTTP REST API listen address |
+| `BOGDAN_WS_ADDR` | `0.0.0.0:8081` | WebSocket listen address |
+| `BOGDAN_DLNA_NAME` | `boGDan` | Friendly name for DLNA/SSDP announcements |
+| `BOGDAN_TOR_SOCKS` | `127.0.0.1:9050` | Tor SOCKS5 proxy address |
+| `BOGDAN_DB_PATH` | `/var/lib/bogdan/sessions.db` | SQLite database path |
+| `RUST_LOG` | `info` | Tracing filter (e.g. `bogdan_resolver=debug`) |
 
 ## Dependencies
 
-The server crate depends on **every other PiCast crate** because it is responsible for constructing and wiring them together:
+The server crate depends on **every other boGDan crate** because it is responsible for constructing and wiring them together:
 
 | Dependency | Why |
 |------------|-----|
-| `picast-tor` | Starts the Tor daemon first; all subsequent network operations depend on it |
-| `picast-display` | Opens `/dev/dri/card0`, acquires DRM master, configures HVS planes |
-| `picast-playback` | Initializes GStreamer; requires display handle for kmssink |
-| `picast-resolver` | URL classification and yt-dlp subprocess; requires Tor SOCKS address |
-| `picast-session` | Central coordinator; receives Arc references to all four subsystems |
-| `picast-protocols` | HTTP, WebSocket, and DLNA servers; receives Arc<SessionManager> |
+| `bogdan-tor` | Starts the Tor daemon first; all subsequent network operations depend on it |
+| `bogdan-display` | Opens `/dev/dri/card0`, acquires DRM master, configures HVS planes |
+| `bogdan-playback` | Initializes GStreamer; requires display handle for kmssink |
+| `bogdan-resolver` | URL classification and yt-dlp subprocess; requires Tor SOCKS address |
+| `bogdan-session` | Central coordinator; receives Arc references to all four subsystems |
+| `bogdan-protocols` | HTTP, WebSocket, and DLNA servers; receives Arc<SessionManager> |
 | `tokio` | Async runtime (multi-thread) |
 | `tracing` + `tracing-subscriber` | Structured logging |
 | `anyhow` | Top-level error handling |
@@ -102,15 +102,15 @@ The subsystems MUST be initialized in this exact order due to hard dependencies:
 
 - **DRM master is exclusive** — the server process must be the only DRM master. If X11 or Wayland is running, `drmSetMaster()` will fail with EPERM. The systemd unit file must not start a desktop session.
 
-- **Single process model** — PiCast runs as one process (plus the Tor child). Do not split into multiple daemons or microservices. The zero-copy DMA-BUF pipeline requires the GStreamer process and the DRM master to be the same process.
+- **Single process model** — boGDan runs as one process (plus the Tor child). Do not split into multiple daemons or microservices. The zero-copy DMA-BUF pipeline requires the GStreamer process and the DRM master to be the same process.
 
-- **No forking** — the tokio runtime must not fork. The Tor daemon is spawned as a child process via `tokio::process::Command`, which is safe because the child is a completely separate executable (not a forked copy of PiCast).
+- **No forking** — the tokio runtime must not fork. The Tor daemon is spawned as a child process via `tokio::process::Command`, which is safe because the child is a completely separate executable (not a forked copy of boGDan).
 
 - **Signal handling** — both SIGINT and SIGTERM must trigger graceful shutdown. The server runs under systemd, which sends SIGTERM on `systemctl stop`. A SIGINT handler is needed for interactive testing.
 
 - **GStreamer threading** — GStreamer creates its own threads internally. All GStreamer calls from the tokio runtime must be serialized (e.g., via a `Mutex`). The server must not call GStreamer methods from multiple tokio tasks concurrently.
 
-- **Process user** — PiCast should run as a dedicated `picast` user, not root. The `picast` user needs membership in the `video` group (for `/dev/dri/card0` access) and `audio` group (for ALSA). The systemd unit uses `User=picast` and `Group=picast`.
+- **Process user** — boGDan should run as a dedicated `bogdan` user, not root. The `bogdan` user needs membership in the `video` group (for `/dev/dri/card0` access) and `audio` group (for ALSA). The systemd unit uses `User=bogdan` and `Group=bogdan`.
 
 - **Boot time** — the server should reach "ready" state (all subsystems initialized, all servers listening) within 10 seconds on a Pi 4 with warm Tor cache. Cold boot with Tor consensus download may take 30–60 seconds.
 
@@ -120,7 +120,7 @@ The subsystems MUST be initialized in this exact order due to hard dependencies:
 |----------|----------|
 | Main entry point | `src/server/src/main.rs` |
 | Cargo.toml | `src/server/Cargo.toml` |
-| Systemd unit file | `config/picast.service` |
+| Systemd unit file | `config/bogdan.service` |
 | Architecture overview | `ARCHITECTURE.md` §2 (System Overview) |
 | ADR-001: No Display Server | `DECISIONS.md` / `SPECIFICATION.md` §1.1 |
 | Startup sequence | `SPECIFICATION.md` §4 (Operational Configuration) |

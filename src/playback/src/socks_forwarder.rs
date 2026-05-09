@@ -13,10 +13,10 @@
 //!
 //! ```text
 //! souphttpsrc ──CONNECT──► local:PORT ──SOCKS5h──► tor:9050 ──► CDN
-//!                            (this code)    username=picast-HASH
+//!                            (this code)    username=bogdan-HASH
 //! ```
 //!
-//! The resolver (yt-dlp / reqwest) also uses `socks5h://picast-HASH@127.0.0.1:9050`
+//! The resolver (yt-dlp / reqwest) also uses `socks5h://bogdan-HASH@127.0.0.1:9050`
 //! with the SAME username. Tor's `IsolateSOCKSAuth` maps identical usernames
 //! to the same circuit, so both resolution and fetch exit through the same IP.
 //!
@@ -50,7 +50,7 @@ impl SocksForwarder {
     ///
     /// - `socks_addr`: Tor SOCKS5 address (e.g. "127.0.0.1:9050")
     /// - `isolation_username`: SOCKS5 username for Tor circuit isolation
-    ///   (e.g. "picast-a804e89b1ec4a1d7"). Same username = same circuit
+    ///   (e.g. "bogdan-a804e89b1ec4a1d7"). Same username = same circuit
     ///   = same exit IP as the resolver.
     ///
     /// Returns the forwarder with its local address. Set souphttpsrc's
@@ -298,7 +298,7 @@ async fn handle_connect(
     //
     // Without this optimization, the forwarder becomes a throughput bottleneck:
     // the browser streams fluently through Tor because it uses large read
-    // buffers, but PiCast's souphttpsrc receives data in tiny 8 KB chunks
+    // buffers, but boGDan's souphttpsrc receives data in tiny 8 KB chunks
     // through the forwarder, causing buffer underruns and low FPS.
     let (cr, cw) = client.into_split();
     let (rr, rw) = remote.into_split();

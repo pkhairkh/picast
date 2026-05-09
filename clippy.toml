@@ -1,4 +1,4 @@
-# PiCast — Clippy Lint Configuration
+# boGDan — Clippy Lint Configuration
 # See: https://doc.rust-lang.org/clippy/configuration.html
 
 cognitive-complexity-threshold = 30

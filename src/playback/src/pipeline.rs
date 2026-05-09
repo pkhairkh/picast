@@ -1,5 +1,5 @@
 #![cfg(feature = "hw")]
-//! PiCast GStreamer Pipeline Construction
+//! boGDan GStreamer Pipeline Construction
 //!
 //! Builds and manages the GStreamer pipeline for H.264/HEVC video playback
 //! with V4L2 hardware decode and direct DRM/KMS output on Raspberry Pi 4B+.
@@ -58,7 +58,7 @@ use crate::{BufferHealth, DownloadProgress, PipelineConfig, PlaybackError};
 use gstreamer::prelude::*;
 use gstreamer::{Element, ElementFactory, Pipeline, State};
 #[cfg(feature = "hevc")]
-use picast_v3d::V3dComputeEngine;
+use bogdan_v3d::V3dComputeEngine;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 
@@ -1314,7 +1314,7 @@ impl GstPipeline {
     /// to enable the Pi zero-copy decode path.  With dmabuf, decoded
     /// frames stay in GPU/DMA memory and are passed directly to kmssink
     /// without copying through CPU/system memory.  This is the single
-    /// most important property for PiCast's performance on Pi 4 —
+    /// most important property for boGDan's performance on Pi 4 —
     /// without it, `mmap` mode forces frames through system memory,
     /// which causes high CPU usage and frequent dropped buffers.
     #[allow(dead_code)]

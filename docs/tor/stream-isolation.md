@@ -1,10 +1,10 @@
 # Tor Stream Isolation
 
-PiCast uses Tor's `IsolateSOCKSAuth` feature to ensure that different websites use independent Tor circuits, preventing cross-site correlation attacks. This document describes the isolation mechanism, the SOCKS5 username hashing scheme, circuit lifecycle management, and the security properties it provides.
+boGDan uses Tor's `IsolateSOCKSAuth` feature to ensure that different websites use independent Tor circuits, preventing cross-site correlation attacks. This document describes the isolation mechanism, the SOCKS5 username hashing scheme, circuit lifecycle management, and the security properties it provides.
 
 ## Why Stream Isolation Matters
 
-Without stream isolation, all of PiCast's traffic — YouTube, Vimeo, Twitch, and every other site — would share the same Tor exit relay. An observer controlling the exit relay (or performing traffic analysis on the exit relay's upstream) could correlate visits to different sites and build a profile of the user's viewing habits. Stream isolation prevents this by ensuring each site's traffic exits through a different circuit.
+Without stream isolation, all of boGDan's traffic — YouTube, Vimeo, Twitch, and every other site — would share the same Tor exit relay. An observer controlling the exit relay (or performing traffic analysis on the exit relay's upstream) could correlate visits to different sites and build a profile of the user's viewing habits. Stream isolation prevents this by ensuring each site's traffic exits through a different circuit.
 
 ### Threat Model Without Isolation
 
@@ -34,11 +34,11 @@ SocksPort 9050 IsolateSOCKSAuth
 
 When this flag is enabled, Tor maps SOCKS5 connections with different username/password combinations to separate circuits. Connections with the same username/password share a circuit. This is specified in the Tor manual as: "Isolate SOCKS authentication based on the username and password. Different SOCKS authentication values will result in different circuits."
 
-The key insight is that the SOCKS5 username/password fields are used purely for circuit routing — they are not transmitted to the destination server. They are visible only on the loopback interface between PiCast and the local Tor daemon. This means we can encode site identity in the username field without any privacy risk.
+The key insight is that the SOCKS5 username/password fields are used purely for circuit routing — they are not transmitted to the destination server. They are visible only on the loopback interface between boGDan and the local Tor daemon. This means we can encode site identity in the username field without any privacy risk.
 
 ## SOCKS5 Username Hashing Scheme
 
-PiCast derives a unique SOCKS5 username from each site's hostname using SHA-256 hashing. The same hostname always produces the same username, ensuring consistent circuit assignment. Different hostnames produce different usernames, ensuring separate circuits.
+boGDan derives a unique SOCKS5 username from each site's hostname using SHA-256 hashing. The same hostname always produces the same username, ensuring consistent circuit assignment. Different hostnames produce different usernames, ensuring separate circuits.
 
 ### Algorithm
 
@@ -47,7 +47,7 @@ PiCast derives a unique SOCKS5 username from each site's hostname using SHA-256 
 2. Compute SHA-256 hash of the hostname bytes
 3. Take the first 8 bytes (64 bits) of the hash
 4. Hex-encode to produce a 16-character username string
-5. Use the constant password "picast-isolation"
+5. Use the constant password "bogcast-isolation"
 ```
 
 ### Implementation
@@ -63,7 +63,7 @@ fn socks5_credentials(site_host: &str) -> (String, String) {
 
     // First 8 bytes → 16 hex characters
     let username = hex::encode(&hash[..8]);
-    let password = "picast-isolation".to_string();
+    let password = "bogcast-isolation".to_string();
 
     (username, password)
 }
@@ -73,10 +73,10 @@ fn socks5_credentials(site_host: &str) -> (String, String) {
 
 | Site Host | SHA-256 (first 16 hex) | SOCKS5 Username | Password | Circuit |
 |-----------|------------------------|-----------------|----------|---------|
-| youtube.com | `7d2d3e1f4a5b6c8d...` | `7d2d3e1f4a5b6c8d` | `picast-isolation` | Circuit A |
-| vimeo.com | `9e8f7a6b5c4d3e2f...` | `9e8f7a6b5c4d3e2f` | `picast-isolation` | Circuit B |
-| twitch.tv | `a1b2c3d4e5f6a7b8...` | `a1b2c3d4e5f6a7b8` | `picast-isolation` | Circuit C |
-| youtube.com | `7d2d3e1f4a5b6c8d...` | `7d2d3e1f4a5b6c8d` | `picast-isolation` | Circuit A (reused!) |
+| youtube.com | `7d2d3e1f4a5b6c8d...` | `7d2d3e1f4a5b6c8d` | `bogcast-isolation` | Circuit A |
+| vimeo.com | `9e8f7a6b5c4d3e2f...` | `9e8f7a6b5c4d3e2f` | `bogcast-isolation` | Circuit B |
+| twitch.tv | `a1b2c3d4e5f6a7b8...` | `a1b2c3d4e5f6a7b8` | `bogcast-isolation` | Circuit C |
+| youtube.com | `7d2d3e1f4a5b6c8d...` | `7d2d3e1f4a5b6c8d` | `bogcast-isolation` | Circuit A (reused!) |
 
 ### Properties of the Hashing Scheme
 
@@ -84,13 +84,13 @@ fn socks5_credentials(site_host: &str) -> (String, String) {
 
 2. **Collision-resistant**: SHA-256 truncated to 64 bits has a collision probability of approximately 1 in 4.3 billion (birthday bound). In practice, with ~1,800 media sites supported by yt-dlp, the probability of two sites sharing a circuit is negligible.
 
-3. **No side-channel leakage**: The username is derived from the hostname but does not reveal the hostname. An observer who sees the username `7d2d3e1f4a5b6c8d` on the loopback interface cannot determine that it corresponds to `youtube.com` without brute-forcing the hash. Since the username is only visible on the loopback interface (between PiCast and the local Tor daemon), there is no network-side leakage.
+3. **No side-channel leakage**: The username is derived from the hostname but does not reveal the hostname. An observer who sees the username `7d2d3e1f4a5b6c8d` on the loopback interface cannot determine that it corresponds to `youtube.com` without brute-forcing the hash. Since the username is only visible on the loopback interface (between boGDan and the local Tor daemon), there is no network-side leakage.
 
-4. **Subdomain handling**: PiCast uses the registered domain (e.g., `youtube.com` not `www.youtube.com` or `m.youtube.com`) for hashing. This ensures all subdomains of the same site share a circuit. The `url` crate's `domain()` method provides the registered domain via the public suffix list.
+4. **Subdomain handling**: boGDan uses the registered domain (e.g., `youtube.com` not `www.youtube.com` or `m.youtube.com`) for hashing. This ensures all subdomains of the same site share a circuit. The `url` crate's `domain()` method provides the registered domain via the public suffix list.
 
 ## SOCKS5 Handshake with Authentication
 
-When PiCast establishes a connection through the Tor SOCKS5 proxy with stream isolation, it performs the full SOCKS5 authentication handshake as specified in RFC 1928 and RFC 1929:
+When boGDan establishes a connection through the Tor SOCKS5 proxy with stream isolation, it performs the full SOCKS5 authentication handshake as specified in RFC 1928 and RFC 1929:
 
 ```
 1. Client sends greeting:
@@ -111,7 +111,7 @@ When PiCast establishes a connection through the Tor SOCKS5 proxy with stream is
    +----+------+----------+------+----------+
    |VER | ULEN |  UNAME   | PLEN |  PASSWD  |
    +----+------+----------+------+----------+
-   | 01 |  16  | 7d2d3e...|  16  | picast...|
+   | 01 |  16  | 7d2d3e...|  16  | bogdan...|
    +----+------+----------+------+----------+
 
 4. Server responds:
@@ -141,13 +141,13 @@ When PiCast establishes a connection through the Tor SOCKS5 proxy with stream is
 
 ### Critical: ATYP=0x03 (Domain Name)
 
-Step 5 uses ATYP=0x03 (domain name) instead of ATYP=0x01 (IPv4 address). This tells the Tor SOCKS5 proxy to resolve the hostname itself (through the Tor network), rather than having PiCast resolve it locally. This is the DNS leak prevention mechanism — at no point does PiCast's system resolver ever see the destination hostname.
+Step 5 uses ATYP=0x03 (domain name) instead of ATYP=0x01 (IPv4 address). This tells the Tor SOCKS5 proxy to resolve the hostname itself (through the Tor network), rather than having boGDan resolve it locally. This is the DNS leak prevention mechanism — at no point does boGDan's system resolver ever see the destination hostname.
 
 ## Circuit Lifecycle
 
 ### Circuit Creation
 
-When PiCast connects to a new site (e.g., `vimeo.com` for the first time), the SOCKS5 handshake with the site-specific username triggers Tor to build a new circuit:
+When boGDan connects to a new site (e.g., `vimeo.com` for the first time), the SOCKS5 handshake with the site-specific username triggers Tor to build a new circuit:
 
 1. Tor selects an entry guard (from the configured 3 long-lived guards)
 2. Tor selects a middle relay (random)
@@ -186,11 +186,11 @@ YouTube and other sites may rate-limit IP addresses that make too many requests.
 
 ## Future: arti Migration
 
-The C Tor daemon's `IsolateSOCKSAuth` feature is the reason PiCast uses C Tor instead of the Rust-based arti client (ADR-004). When arti adds equivalent per-username circuit isolation support, PiCast can migrate to arti for the following benefits:
+The C Tor daemon's `IsolateSOCKSAuth` feature is the reason boGDan uses C Tor instead of the Rust-based arti client (ADR-004). When arti adds equivalent per-username circuit isolation support, boGDan can migrate to arti for the following benefits:
 
 - In-process Tor client (no child process management, no IPC)
 - Tokio-native async API (no SOCKS5 handshake implementation needed)
 - Rust memory safety (no C buffer overflow vulnerabilities)
 - Smaller attack surface (no separate process with root privileges)
 
-Until arti supports this feature, the C Tor daemon with `IsolateSOCKSAuth` remains the only viable option for PiCast's stream isolation requirements.
+Until arti supports this feature, the C Tor daemon with `IsolateSOCKSAuth` remains the only viable option for boGDan's stream isolation requirements.

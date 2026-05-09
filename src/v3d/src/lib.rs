@@ -1,4 +1,4 @@
-//! PiCast V3D Compute Shader Engine — SAND128→NV12 Near-Zero-Copy Conversion
+//! boGDan V3D Compute Shader Engine — SAND128→NV12 Near-Zero-Copy Conversion
 //!
 //! This module implements a GPU-based format conversion pipeline that transforms
 //! HEVC decoder output from Broadcom's SAND128 column-tiled format (V4L2
@@ -451,7 +451,7 @@ void main() {
 ///
 /// The engine is `!Send` and `!Sync` because EGL/GL contexts are thread-local.
 /// All conversion operations must be performed on the thread that created the
-/// engine. In PiCast, this is the GStreamer streaming thread that processes
+/// engine. In boGDan, this is the GStreamer streaming thread that processes
 /// decoded video buffers.
 pub struct V3dComputeEngine {
     /// EGL display connection.
@@ -841,7 +841,7 @@ impl Drop for V3dComputeEngine {
 /// Dynamic loader for EGL and GLES libraries.
 ///
 /// We load `libEGL.so` and `libGLESv2.so` at runtime instead of linking
-/// against them at compile time. This allows PiCast to build on systems
+/// against them at compile time. This allows boGDan to build on systems
 /// without EGL/GLES development headers, and to gracefully handle the case
 /// where V3D is not available (e.g. running on a non-Pi system).
 struct EglLoader {
@@ -965,7 +965,7 @@ fn unmap_dmabuf(ptr: *mut u8, size: usize) {
 fn allocate_dmabuf(size: usize) -> Result<RawFd, V3dError> {
     // Create an anonymous memory file
     let fd = unsafe {
-        let name = std::ffi::CString::new("picast-nv12").unwrap_or_default();
+        let name = std::ffi::CString::new("bogdan-nv12").unwrap_or_default();
         libc::memfd_create(name.as_ptr(), libc::MFD_CLOEXEC)
     };
 

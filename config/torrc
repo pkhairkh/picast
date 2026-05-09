@@ -1,4 +1,4 @@
-# /etc/tor/torrc — PiCast Configuration
+# /etc/tor/torrc — boGDan Configuration
 # See DECISIONS.md ADR-004 for rationale on using C Tor daemon over arti
 
 ## ─── SOCKS Ports ───────────────────────────────────────────
@@ -10,8 +10,8 @@ SocksPort 9050 IsolateSOCKSAuth
 # Used by GStreamer when per-IP isolation is preferred
 SocksPort 9051 IsolateDestAddr
 
-# Port 29050: PiCast-exclusive SOCKS5 port with per-site isolation.
-# Isolates PiCast's Tor circuits from other SOCKS users on the system
+# Port 29050: boGDan-exclusive SOCKS5 port with per-site isolation.
+# Isolates boGDan's Tor circuits from other SOCKS users on the system
 # so that video streaming traffic gets dedicated circuits and does not
 # compete with (or get throttled by) other Tor traffic.
 SocksPort 29050 IsolateSOCKSAuth
@@ -30,7 +30,7 @@ NewCircuitPeriod 120
 StrictNodes 0
 
 ## ─── Control Port ──────────────────────────────────────────
-# Control port for PiCast's TorManager (circuit health, NEWNYM).
+# Control port for boGDan's TorManager (circuit health, NEWNYM).
 # Cookie authentication is required — no password-based auth.
 # Restricted to localhost only.
 ControlPort 9052
@@ -59,9 +59,9 @@ MaxClientCircuitsPending 32
 # Prefer faster nodes for streaming
 PathsNeededToBuildCircuits 0.75
 
-## ─── PiCast Streaming Notes ──────────────────────────────────
+## ─── boGDan Streaming Notes ──────────────────────────────────
 # IsolateSOCKSAuth on port 9050 means each unique SOCKS5 username
-# gets its own circuit. PiCast hashes the hostname to produce the
+# gets its own circuit. boGDan hashes the hostname to produce the
 # username, so different websites never share a circuit.
 # Port 9051 uses IsolateDestAddr for GStreamer's souphttpsrc which
 # does not support username-based isolation.

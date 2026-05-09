@@ -1,17 +1,17 @@
 [package]
-name = "picast-playback"
+name = "bogdan-playback"
 version.workspace = true
 edition.workspace = true
-description = "GStreamer playback engine with V4L2 H.264/H.265 hardware decode for PiCast"
+description = "GStreamer playback engine with V4L2 H.264/H.265 hardware decode for boGDan"
 
 [features]
 default = []
-hw = ["gstreamer", "picast-display/hw", "picast-v3d/hw"]
+hw = ["gstreamer", "bogdan-display/hw", "bogdan-v3d/hw"]
 hevc = []  # Enable HEVC/H.265 decode support (requires V3D compute shader for SAND→NV12)
 
 [dependencies]
-picast-display = { path = "../display", default-features = false }
-picast-v3d = { path = "../v3d", default-features = false }
+bogdan-display = { path = "../display", default-features = false }
+bogdan-v3d = { path = "../v3d", default-features = false }
 gstreamer = { version = "0.23", optional = true }
 # gstreamer-app = { version = "0.23", optional = true }    # Future: for AppSink/AppSrc
 # gstreamer-video = { version = "0.23", optional = true }  # Future: for video caps helpers

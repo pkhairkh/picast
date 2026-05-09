@@ -1,4 +1,4 @@
-//! PiCast Resolver Cache
+//! boGDan Resolver Cache
 //!
 //! SQLite-backed cache for resolved URLs. Prevents duplicate
 //! resolution of the same URL within a configurable TTL window.

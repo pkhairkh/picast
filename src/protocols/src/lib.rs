@@ -1,7 +1,7 @@
-//! PiCast Protocols
+//! boGDan Protocols
 //!
 //! Exposes the three network-facing servers that external controllers use
-//! to interact with PiCast:
+//! to interact with boGDan:
 //!
 //! - **HTTP API** – REST-like control surface (`/api/cast`, `/api/pause`, `/api/status`, etc.).
 //! - **WebSocket** – low-latency bidirectional event stream for real-time UIs.

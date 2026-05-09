@@ -1,4 +1,4 @@
-# PiCast — Architecture Decision Records
+# boGDan — Architecture Decision Records
 
 > This file consolidates all key architectural decisions. Each ADR follows the
 > Context → Decision → Consequences → Alternatives format with a status badge.
@@ -11,11 +11,11 @@
 
 ### Context
 
-A display server (X11, Wayland) provides window management, input handling, and compositor services. These are useful for desktop environments but add overhead, complexity, and attack surface. PiCast has a single fullscreen video output and no local input devices.
+A display server (X11, Wayland) provides window management, input handling, and compositor services. These are useful for desktop environments but add overhead, complexity, and attack surface. boGDan has a single fullscreen video output and no local input devices.
 
 ### Decision
 
-PiCast opens `/dev/dri/card0` directly, calls `drmSetMaster()` to become the DRM master, and programs the HVS planes via `drmModeAtomicCommit()`. No display server process runs on the system. This is the same approach used by Kodi on LibreELEC.
+boGDan opens `/dev/dri/card0` directly, calls `drmSetMaster()` to become the DRM master, and programs the HVS planes via `drmModeAtomicCommit()`. No display server process runs on the system. This is the same approach used by Kodi on LibreELEC.
 
 ### Consequences
 
@@ -25,7 +25,7 @@ PiCast opens `/dev/dri/card0` directly, calls `drmSetMaster()` to become the DRM
 | ✅ Latency | Zero compositor scheduling overhead |
 | ✅ Security | Reduced attack surface (no X11 IPC, no Wayland protocol) |
 | ✅ Power | Lower CPU/GPU utilization |
-| ❌ No GUI apps | Cannot run terminal, file manager alongside PiCast |
+| ❌ No GUI apps | Cannot run terminal, file manager alongside boGDan |
 | ❌ Debugging | Requires SSH; no on-screen terminal |
 | ❌ Crash recovery | Display left in undefined state until service restarts |
 
@@ -49,7 +49,7 @@ Chromium can render web pages with DRM (Widevine CDM), execute JavaScript for co
 
 ### Decision
 
-PiCast does not use any browser engine. Content resolution is performed by yt-dlp (Python subprocess). Media playback uses GStreamer with V4L2 hardware decode. DRM content is out of scope for v1.
+boGDan does not use any browser engine. Content resolution is performed by yt-dlp (Python subprocess). Media playback uses GStreamer with V4L2 hardware decode. DRM content is out of scope for v1.
 
 ### Consequences
 
@@ -82,7 +82,7 @@ Both GStreamer and mpv can play video on Pi 4. mpv is simpler to configure and h
 
 ### Decision
 
-PiCast uses GStreamer as the playback engine with `v4l2h264dec` for hardware decode and `kmssink` for DRM/KMS direct display. mpv's `--vo=drm` backend does not support hardware-accelerated decode on Pi 4 (only software-decoded frames), and its `--hwdec=v4l2m2m` with `--vo=gpu` produces blue screen issues on Wayland and X11 alike.
+boGDan uses GStreamer as the playback engine with `v4l2h264dec` for hardware decode and `kmssink` for DRM/KMS direct display. mpv's `--vo=drm` backend does not support hardware-accelerated decode on Pi 4 (only software-decoded frames), and its `--hwdec=v4l2m2m` with `--vo=gpu` produces blue screen issues on Wayland and X11 alike.
 
 ### Consequences
 
@@ -115,7 +115,7 @@ arti is the Tor Project's Rust-based Tor client, production-ready for HTTP CONNE
 
 ### Decision
 
-PiCast uses the C Tor daemon. The decisive factor is `IsolateSOCKSAuth` support: the C daemon's `SocksPort` directive with `IsolateSOCKSAuth` enables per-site circuit isolation based on SOCKS5 username, which is critical for PiCast's stream isolation strategy. arti does not yet support equivalent fine-grained isolation control.
+boGDan uses the C Tor daemon. The decisive factor is `IsolateSOCKSAuth` support: the C daemon's `SocksPort` directive with `IsolateSOCKSAuth` enables per-site circuit isolation based on SOCKS5 username, which is critical for boGDan's stream isolation strategy. arti does not yet support equivalent fine-grained isolation control.
 
 ### Consequences
 
@@ -147,7 +147,7 @@ The Google Cast V2 protocol would enable the Pi to appear in Chrome's native cas
 
 ### Decision
 
-PiCast does not implement the Cast V2 receiver. Google enforces device authentication in the Cast SDK: sender devices verify receiver certificates during the TLS handshake, and only Google-approved (certified) receivers pass authentication. No Pi-based project has reliably bypassed this across Chrome updates.
+boGDan does not implement the Cast V2 receiver. Google enforces device authentication in the Cast SDK: sender devices verify receiver certificates during the TLS handshake, and only Google-approved (certified) receivers pass authentication. No Pi-based project has reliably bypassed this across Chrome updates.
 
 ### Consequences
 
@@ -174,11 +174,11 @@ PiCast does not implement the Cast V2 receiver. Google enforces device authentic
 
 ### Context
 
-PiCast needs to interoperate with existing media ecosystems without requiring users to install custom software. The UPnP/DLNA MediaRenderer standard is the most widely supported protocol for network media playback.
+boGDan needs to interoperate with existing media ecosystems without requiring users to install custom software. The UPnP/DLNA MediaRenderer standard is the most widely supported protocol for network media playback.
 
 ### Decision
 
-PiCast bundles gmediarender (gmrender-resurrect), a mature, lightweight DLNA MediaRenderer implementation that uses GStreamer as its playback backend. gmediarender is modified to use PiCast's custom GStreamer pipeline (V4L2 + kmssink) instead of the default playbin.
+boGDan bundles gmediarender (gmrender-resurrect), a mature, lightweight DLNA MediaRenderer implementation that uses GStreamer as its playback backend. gmediarender is modified to use boGDan's custom GStreamer pipeline (V4L2 + kmssink) instead of the default playbin.
 
 ### Consequences
 
@@ -209,7 +209,7 @@ DRM-protected content (Netflix, Disney+, Amazon Prime, Hulu) accounts for a sign
 
 ### Decision
 
-DRM content is explicitly out of scope for PiCast v1. The primary use case is casting from open video platforms (YouTube, Vimeo, Twitch, PeerTube, Odysee, direct media URLs), none of which use DRM. Widevine L3 on ARM is software decryption, which is slow and unreliable on the Pi 4's CPU.
+DRM content is explicitly out of scope for boGDan v1. The primary use case is casting from open video platforms (YouTube, Vimeo, Twitch, PeerTube, Odysee, direct media URLs), none of which use DRM. Widevine L3 on ARM is software decryption, which is slow and unreliable on the Pi 4's CPU.
 
 ### Consequences
 
@@ -228,18 +228,18 @@ DRM content is explicitly out of scope for PiCast v1. The primary use case is ca
 
 ### Context
 
-yt-dlp is a Python application. It can be used as a Python library (`import yt_dlp`) or invoked as a subprocess. Using it as a library would allow tighter integration, but at the cost of coupling the PiCast process to Python's runtime.
+yt-dlp is a Python application. It can be used as a Python library (`import yt_dlp`) or invoked as a subprocess. Using it as a library would allow tighter integration, but at the cost of coupling the boGDan process to Python's runtime.
 
 ### Decision
 
-PiCast invokes yt-dlp as a subprocess (`tokio::process::Command`) and parses its JSON output. This isolation ensures that yt-dlp's Python runtime cannot affect the PiCast main process. If yt-dlp hangs, it can be killed with a timeout without affecting the playback engine.
+boGDan invokes yt-dlp as a subprocess (`tokio::process::Command`) and parses its JSON output. This isolation ensures that yt-dlp's Python runtime cannot affect the boGDan main process. If yt-dlp hangs, it can be killed with a timeout without affecting the playback engine.
 
 ### Consequences
 
 | Effect | Detail |
 |--------|--------|
-| ✅ Process isolation | yt-dlp crashes don't affect PiCast |
-| ✅ Independent updates | Update yt-dlp without rebuilding PiCast |
+| ✅ Process isolation | yt-dlp crashes don't affect boGDan |
+| ✅ Independent updates | Update yt-dlp without rebuilding boGDan |
 | ✅ Simple errors | Exit code + stderr for error handling |
 | ❌ Startup overhead | 5-15 second Python interpreter startup |
 | ❌ JSON overhead | Serialization for large format lists |

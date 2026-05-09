@@ -1,6 +1,6 @@
 # DRM/KMS Programming Guide
 
-This document describes how PiCast programs the Direct Rendering Manager (DRM) and Kernel Mode Setting (KMS) subsystem on the Raspberry Pi 4 for video display and OSD overlay. It covers device opening, master acquisition, resource enumeration, atomic modesetting, framebuffer management, double buffering, and the complete atomic commit workflow with all property values.
+This document describes how boGDan programs the Direct Rendering Manager (DRM) and Kernel Mode Setting (KMS) subsystem on the Raspberry Pi 4 for video display and OSD overlay. It covers device opening, master acquisition, resource enumeration, atomic modesetting, framebuffer management, double buffering, and the complete atomic commit workflow with all property values.
 
 ## Opening the DRM Device
 
@@ -28,11 +28,11 @@ let drm_file = OpenOptions::new()
 drm::control::Device::set_master(&drm_file)?;
 ```
 
-**Important**: If X11 or Wayland is running, they already hold DRM master and `set_master()` will fail with EPERM. PiCast requires exclusive access to the display. The systemd unit file must not start a desktop session — the `autologin` service should launch `picastd` directly on `tty1`.
+**Important**: If X11 or Wayland is running, they already hold DRM master and `set_master()` will fail with EPERM. boGDan requires exclusive access to the display. The systemd unit file must not start a desktop session — the `autologin` service should launch `bogdand` directly on `tty1`.
 
 ### DRM Master Lifetime
 
-PiCast holds the DRM master privilege for its entire process lifetime. If the process crashes, systemd restarts it, and it re-acquires DRM master on the next `open()` + `set_master()`. There is no other process competing for DRM master in the PiCast appliance configuration.
+boGDan holds the DRM master privilege for its entire process lifetime. If the process crashes, systemd restarts it, and it re-acquires DRM master on the next `open()` + `set_master()`. There is no other process competing for DRM master in the boGDan appliance configuration.
 
 ## Resource Enumeration
 
@@ -95,7 +95,7 @@ for conn_handle in res.connectors() {
 
 ## Atomic Modesetting
 
-Atomic modesetting is the modern DRM API that allows setting multiple properties (CRTC mode, plane framebuffer, plane position, alpha blending) in a single, flicker-free commit that takes effect at the next vertical blank (vblank). This is essential for PiCast because it prevents tearing between video and OSD plane updates.
+Atomic modesetting is the modern DRM API that allows setting multiple properties (CRTC mode, plane framebuffer, plane position, alpha blending) in a single, flicker-free commit that takes effect at the next vertical blank (vblank). This is essential for boGDan because it prevents tearing between video and OSD plane updates.
 
 ### Complete Atomic Commit Workflow
 
@@ -253,10 +253,10 @@ let fb = drm_file.add_framebuffer(&buffer, 32)?;
 | `CRTC_W` | range | Destination rectangle width (pixels) | Can be larger than source for HVS upscaling |
 | `CRTC_H` | range | Destination rectangle height (pixels) | HVS handles scaling automatically |
 | `type` | enum | Plane type: Primary(0), Overlay(1), Cursor(2) | Read-only; set by driver |
-| `zpos` | range | Z-ordering | Lower = behind. PiCast: video=0, OSD=1 |
+| `zpos` | range | Z-ordering | Lower = behind. boGDan: video=0, OSD=1 |
 | `alpha` | range | Per-plane alpha (0–255) | 0=transparent, 255=opaque |
 | `pixel_blend_mode` | enum | 0=None, 1=Pre-multiplied, 2=Coverage | Use Pre-multiplied (1) for proper alpha blending |
-| `rotation` | bitmask | 1=Rotate-0, 2=Rotate-90, 4=Rotate-180, 8=Rotate-270 | Not used by PiCast (always Rotate-0) |
+| `rotation` | bitmask | 1=Rotate-0, 2=Rotate-90, 4=Rotate-180, 8=Rotate-270 | Not used by boGDan (always Rotate-0) |
 
 ## Coordinate System
 

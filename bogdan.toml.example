@@ -1,13 +1,13 @@
-# PiCast Configuration File
+# boGDan Configuration File
 #
 # Copy to one of these locations:
-#   ./picast.toml
-#   /etc/picast/picast.toml
-#   /usr/local/etc/picast/picast.toml
+#   ./bogdan.toml
+#   /etc/bogdan/bogdan.toml
+#   /usr/local/etc/bogdan/bogdan.toml
 #
-# Or set PICAST_CONFIG=/path/to/picast.toml
+# Or set BOGDAN_CONFIG=/path/to/bogdan.toml
 #
-# Environment variables (PICAST_*) override config file values.
+# Environment variables (BOGDAN_*) override config file values.
 
 [server]
 # HTTP REST API listen address.
@@ -15,11 +15,11 @@ http_addr = "0.0.0.0:8585"
 # WebSocket server listen address.
 ws_addr = "0.0.0.0:8586"
 # Session database path (SQLite).
-db_path = "/var/lib/picast/sessions.db"
+db_path = "/var/lib/bogdan/sessions.db"
 # TLS certificate path (PEM). Set both cert and key to enable HTTPS/WSS.
-tls_cert_path = "/etc/picast/tls/picast.pem"
+tls_cert_path = "/etc/bogdan/tls/bogdan.pem"
 # TLS private key path (PEM). Set both cert and key to enable HTTPS/WSS.
-tls_key_path = "/etc/picast/tls/picast-key.pem"
+tls_key_path = "/etc/bogdan/tls/bogdan-key.pem"
 
 [tor]
 # Tor SOCKS5 proxy address.
@@ -40,12 +40,12 @@ drm_device = ""
 #   "plughw:1,0"  — HDMI 0 (vc4hdmi0)
 #   "plughw:2,0"  — HDMI 1 (vc4hdmi1)
 # Use "plughw" (not "hw") so ALSA can convert formats.
-# Override with PICAST_AUDIO_DEVICE env var.
+# Override with BOGDAN_AUDIO_DEVICE env var.
 audio_device = ""
 
 [dlna]
 # Friendly name advertised on the local network via SSDP.
-friendly_name = "PiCast"
+friendly_name = "boGDan"
 # DLNA renderer listen port.
 port = 49152
 

@@ -1,14 +1,14 @@
-# PiCast — Agent Context
+# boGDan — Agent Context
 
-> **This file is the primary entry point for any AI agent working on PiCast.**
+> **This file is the primary entry point for any AI agent working on boGDan.**
 > Read this file first. It defines the project, its conventions, and how to navigate the codebase.
 > If you are an autonomous coding agent, follow the workflows in § Agent Workflows precisely.
 
 ---
 
-## What Is PiCast?
+## What Is boGDan?
 
-PiCast is a **Tor-routed, zero-copy media casting appliance** for the Raspberry Pi 4B+.
+boGDan is a **Tor-routed, zero-copy media casting appliance** for the Raspberry Pi 4B+.
 It turns any HDMI-connected display into a network media receiver where:
 
 - All content resolution (yt-dlp) and media fetching routes through **Tor**
@@ -43,40 +43,42 @@ Sender Device                    Pi 4 (Receiver)
 
 | Crate | Path | Responsibility | Depends On |
 |-------|------|----------------|------------|
-| `picast-server` | `src/server/` | Main binary, ties all crates together | all |
-| `picast-protocols` | `src/protocols/` | HTTP API, WebSocket, DLNA responder | session |
-| `picast-session` | `src/session/` | State machine, queue, ABR controller | resolver, playback |
-| `picast-resolver` | `src/resolver/` | URL classification, yt-dlp subprocess, format selection | tor |
-| `picast-playback` | `src/playback/` | GStreamer pipeline management, buffer monitoring | display |
-| `picast-display` | `src/display/` | DRM/KMS plane control, atomic modesetting | — |
-| `picast-tor` | `src/tor/` | SOCKS5 proxy pool, stream isolation, circuit health | — |
+| `bogdan-server` | `src/server/` | Main binary, config, ties all crates together | all |
+| `bogdan-protocols` | `src/protocols/` | HTTP API, WebSocket, DLNA responder | session |
+| `bogdan-session` | `src/session/` | State machine, CDN retry logic, queue | resolver, playback |
+| `bogdan-resolver` | `src/resolver/` | URL classification, custom resolvers, yt-dlp | tor, session |
+| `bogdan-playback` | `src/playback/` | Progressive download, GStreamer pipeline, SOCKS forwarder | display, v3d |
+| `bogdan-display` | `src/display/` | DRM/KMS plane control, atomic modesetting | — |
+| `bogdan-v3d` | `src/v3d/` | V3D GPU compute shader (SAND→NV12 for HEVC) | — |
+| `bogdan-tor` | `src/tor/` | SOCKS5 proxy pool, stream isolation, circuit health | — |
 
 ### Dependency Graph (build order)
 
 ```
-picast-tor ──────┐
-picast-display ──┤
-                 ├──► picast-resolver ──┐
-                 │                      ├──► picast-session ──► picast-protocols ──► picast-server
-                 └──► picast-playback ──┘
+bogdan-tor ──────┐
+bogdan-display ──┤
+bogdan-v3d ──────┤
+                 ├──► bogdan-resolver ──┐
+                 │                      ├──► bogdan-session ──► bogdan-protocols ──► bogdan-server
+                 └──► bogdan-playback ──┘
 ```
 
-Leaf crates (`picast-tor`, `picast-display`) have zero internal dependencies and can be
-implemented in parallel. Mid-layer crates (`picast-resolver`, `picast-playback`) depend
-on one leaf each. `picast-session` is the integration point. `picast-protocols` wraps
-session for the network. `picast-server` is the binary entry point.
+Leaf crates (`bogdan-tor`, `bogdan-display`, `bogdan-v3d`) have zero internal dependencies and can be
+implemented in parallel. Mid-layer crates (`bogdan-resolver`, `bogdan-playback`) depend
+on leaf crates. `bogdan-session` is the integration point. `bogdan-protocols` wraps
+session for the network. `bogdan-server` is the binary entry point.
 
 ---
 
 ## Key Technical Constraints
 
-1. **H.264 only for v1** — The HEVC decoder outputs SAND format (NC12/NC30) which the HVS cannot display. Force `bestvideo[vcodec^=avc1]` in yt-dlp.
+1. **H.264 primary, HEVC experimental** — The HEVC decoder outputs SAND format (NC12/NC30) which the HVS cannot display natively. The `v3d` crate implements a GPU compute shader for SAND→NV12 conversion (behind `hevc` feature flag). For v1, prefer H.264 via `bestvideo[vcodec^=avc1]` in yt-dlp.
 2. **No Cast V2** — Google enforces device authentication; unofficial receivers cannot appear in Chrome's native cast menu.
 3. **No DRM** — Widevine L3 on ARM is unreliable. DRM content is explicitly out of scope.
-4. **Tor bandwidth is 500Kbps–5Mbps** — Default to 720p max; use 50MB buffer (queue2); ABR monitors GStreamer buffer fill level.
+4. **Tor bandwidth is 500Kbps–5Mbps** — Some CDNs also impose speed limits (`sp=380` → 380 kbps cap). Progressive download via appsrc pre-buffers data. Playback may stutter when CDN rate limit is below video bitrate.
 5. **Zero-copy is sacred** — Never `.map()` a DMA-BUF into userspace. Pass file descriptors only. If you copy, you've failed.
 6. **DRM/KMS direct** — No X11, no Wayland, no compositor. The app is DRM master. Use `drmModeAtomicCommit()` for all plane updates.
-7. **Process isolation for yt-dlp** — yt-dlp runs as a subprocess (`tokio::process::Command`), never as an embedded Python library. Kill it with timeout if it hangs.
+7. **Process isolation for yt-dlp** — yt-dlp runs as a subprocess (`tokio::process::Command`), never as an embedded Python library. Kill it with timeout if it hangs. However, custom resolvers (Voe, etc.) use reqwest via Tor directly — no yt-dlp subprocess for known domains.
 8. **No `unsafe` without justification** — Any `unsafe` block must have a `// SAFETY:` comment explaining why it is sound.
 9. **No `unwrap()` in production code** — Use `?`, `.ok_or(...)`, or explicit error handling. `unwrap()` is acceptable in `#[test]` only.
 
@@ -90,8 +92,8 @@ session for the network. `picast-server` is the binary entry point.
 | `SPECIFICATION.md` | API contracts, format matrix, GStreamer pipelines, config specs |
 | `DECISIONS.md` | Architecture Decision Records (ADR-001 through ADR-009) |
 | `docs/decisions/` | Individual ADR files with full context and rationale |
-| `docs/ROADMAP.md` | Version milestones v0.1.0 through v2.0.0 |
-| `docs/GLOSSARY.md` | Technical term definitions with PiCast-specific context |
+| `ROADMAP.md` | Version milestones v0.1.0 through v2.0.0 |
+| `docs/GLOSSARY.md` | Technical term definitions with boGDan-specific context |
 | `docs/hardware/` | BCM2711 deep dives, V4L2 pipeline details, HVS internals |
 | `docs/protocols/` | HTTP API, WebSocket, DLNA, discovery specs |
 | `docs/playback/` | GStreamer pipeline configs, ABR controller, DRM/KMS |
@@ -264,13 +266,13 @@ Each crate in `src/` is designed to be implementable by a **single agent session
 
 | Phase | Crate | Why This Order |
 |-------|-------|---------------|
-| 1 | `picast-tor` | Leaf crate, no dependencies, well-scoped |
-| 1 | `picast-display` | Leaf crate, no dependencies, DRM/KMS focused |
-| 2 | `picast-resolver` | Depends only on `picast-tor`, URL logic is self-contained |
-| 2 | `picast-playback` | Depends only on `picast-display`, GStreamer pipeline logic |
-| 3 | `picast-session` | Integrates resolver + playback + display + tor |
-| 4 | `picast-protocols` | HTTP/WS/DLNA layer over session |
-| 5 | `picast-server` | Binary that wires everything together |
+| 1 | `bogdan-tor` | Leaf crate, no dependencies, well-scoped |
+| 1 | `bogdan-display` | Leaf crate, no dependencies, DRM/KMS focused |
+| 2 | `bogdan-resolver` | Depends only on `bogdan-tor`, URL logic is self-contained |
+| 2 | `bogdan-playback` | Depends only on `bogdan-display`, GStreamer pipeline logic |
+| 3 | `bogdan-session` | Integrates resolver + playback + display + tor |
+| 4 | `bogdan-protocols` | HTTP/WS/DLNA layer over session |
+| 5 | `bogdan-server` | Binary that wires everything together |
 
 Phases can run in parallel within the same phase number.
 
@@ -282,7 +284,7 @@ A good agent task is:
 
 - "Implement `HttpApiServer::handle_cast()` in `src/protocols/` per the spec in `docs/protocols/http-api.md`"
 - "Add `TorManager::ensure_running()` that checks SOCKS reachability and spawns Tor if needed"
-- "Write integration tests for URL classification in `picast-resolver`"
+- "Write integration tests for URL classification in `bogdan-resolver`"
 
 A bad task is:
 
@@ -294,7 +296,7 @@ A bad task is:
 
 ## Project Conventions
 
-- **Language**: Rust (edition 2021, MSRV 1.70+)
+- **Language**: Rust (edition 2021, MSRV 1.88+)
 - **Async runtime**: tokio (multi-thread)
 - **Error handling**: thiserror for crate errors, anyhow for application-level
 - **Logging**: tracing + tracing-subscriber (NOT log/env_logger)

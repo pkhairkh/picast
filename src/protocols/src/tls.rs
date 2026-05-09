@@ -1,4 +1,4 @@
-//! TLS configuration for PiCast HTTPS/WSS servers.
+//! TLS configuration for boGDan HTTPS/WSS servers.
 //!
 //! Loads PEM certificate and key files and creates a `tokio-rustls`
 //! `TlsAcceptor` that both the HTTP and WebSocket servers share.

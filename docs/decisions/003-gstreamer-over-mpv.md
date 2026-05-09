@@ -10,12 +10,12 @@
 
 ## Context
 
-PiCast needs a media playback framework that can:
+boGDan needs a media playback framework that can:
 
 1. **Hardware-decode H.264** on Pi 4 via V4L2 Memory-to-Memory (M2M) API
 2. **Zero-copy display** via DRM/KMS atomic modesetting with DMA-BUF passing
 3. **Adaptive bitrate (ABR)** over Tor SOCKS5 — Tor circuits have unpredictable bandwidth (0.5–5 Mbps), requiring runtime quality switching
-4. **Pipeline control** — PiCast needs programmatic control over buffer sizes, queue thresholds, and sink configuration for Tor-specific optimization
+4. **Pipeline control** — boGDan needs programmatic control over buffer sizes, queue thresholds, and sink configuration for Tor-specific optimization
 
 The two primary candidates for Linux media playback are **GStreamer** and **mpv** (libmpv). Both are mature, well-maintained, and support a wide range of codecs.
 
@@ -34,13 +34,13 @@ GStreamer is a pipeline-based framework where every element is composable:
 
 - **V4L2 M2M integration**: The `v4l2h264dec` element in GStreamer has been tested and proven on Pi 4. It correctly negotiates DMA-BUF output and handles format conversion.
 - **kmssink**: The `kmssink` element performs DRM atomic modesetting, importing DMA-BUFs directly into DRM planes. This is the zero-copy path from decoder to display.
-- **queue2 ABR**: GStreamer's `queue2` element supports byte/time limits and buffering messages. PiCast can use these signals to implement adaptive bitrate: when `queue2` reports low buffering, request a lower-quality stream from yt-dlp.
+- **queue2 ABR**: GStreamer's `queue2` element supports byte/time limits and buffering messages. boGDan can use these signals to implement adaptive bitrate: when `queue2` reports low buffering, request a lower-quality stream from yt-dlp.
 - **Pad probes**: GStreamer allows attaching pad probes for buffer inspection, timing analysis, and dynamic pipeline reconfiguration — all without modifying GStreamer source.
 - **Rust bindings**: The `gstreamer` crate provides idiomatic Rust bindings with full pipeline construction and bus message handling.
 
 ## Decision
 
-PiCast uses GStreamer as its media playback framework. The `picast-playback` crate constructs the following pipeline:
+boGDan uses GStreamer as its media playback framework. The `bogdan-playback` crate constructs the following pipeline:
 
 ```
 souphttpsrc location=<url> proxy-id=<tor-socks5> !
@@ -74,4 +74,4 @@ souphttpsrc location=<url> proxy-id=<tor-socks5> !
 |-------------|---------------------|
 | **mpv** | No V4L2 M2M hardware decode on Pi 4; `--vo=drm` is software blit only; no kmssink equivalent; no runtime ABR; pipeline is not programmatically composable |
 | **FFmpeg + custom DRM sink** | Would require writing a custom DRM/KMS sink from scratch; FFmpeg's V4L2 M2M wrapper has DMA-BUF export issues on Pi 4; no built-in ABR; reinventing GStreamer's pipeline management |
-| **Kodi as media library** | Kodi is a full media center application, not a library; it includes GUI, skin engine, and addon system — massive overhead for PiCast's use case; no programmatic Rust API; cannot be embedded as a crate |
+| **Kodi as media library** | Kodi is a full media center application, not a library; it includes GUI, skin engine, and addon system — massive overhead for boGDan's use case; no programmatic Rust API; cannot be embedded as a crate |

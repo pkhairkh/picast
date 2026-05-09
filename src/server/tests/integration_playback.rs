@@ -1,11 +1,11 @@
 //! Playback integration tests.
 //!
 //! These tests verify default configurations and error types exposed
-//! by the `picast_playback` crate.
+//! by the `bogdan_playback` crate.
 
 mod common;
 
-use picast_playback::{BufferHealth, PipelineConfig, PlaybackError};
+use bogdan_playback::{BufferHealth, PipelineConfig, PlaybackError};
 
 /// Verify that [`PipelineConfig::default`] returns the expected
 /// Raspberry Pi–oriented defaults.

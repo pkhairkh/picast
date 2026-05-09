@@ -1,6 +1,6 @@
-# PiCast Browser Extension
+# boGDan Browser Extension
 
-Cast any web video to your PiCast receiver on Raspberry Pi — all traffic routed through Tor for privacy.
+Cast any web video to your boGDan receiver on Raspberry Pi — all traffic routed through Tor for privacy.
 
 ## Installation
 
@@ -9,23 +9,23 @@ Cast any web video to your PiCast receiver on Raspberry Pi — all traffic route
 1. Run `bash build.sh chrome` to create the Chrome build
 2. Open `chrome://extensions/`
 3. Enable "Developer mode"
-4. Click "Load unpacked" → select `build/picast-chrome/`
+4. Click "Load unpacked" → select `build/bogdan-chrome/`
 
 ### Firefox
 
 1. Run `bash build.sh firefox` to create the Firefox build
 2. Open `about:debugging#/runtime/this-firefox`
-3. Click "Load Temporary Add-on" → select `build/picast-firefox/manifest.json`
+3. Click "Load Temporary Add-on" → select `build/bogdan-firefox/manifest.json`
 
 **Note:** Firefox temporary add-ons are removed when the browser closes. For permanent installation, the extension must be signed by Mozilla (see [Signing](#signing)).
 
 ## Features
 
-- **One-click casting**: Click the PiCast icon to cast the current tab's URL
+- **One-click casting**: Click the boGDan icon to cast the current tab's URL
 - **Media detection**: Automatically detects video/audio elements and HLS/DASH manifest URLs on the page
 - **Playback controls**: Pause, resume, stop, seek, and volume control from the popup
 - **Real-time status**: WebSocket connection for instant playback state updates
-- **mDNS discovery**: Auto-discovers PiCast devices on the local network
+- **mDNS discovery**: Auto-discovers boGDan devices on the local network
 - **Tor routing**: All traffic routed through Tor for privacy (configurable)
 - **Cross-browser**: Works on both Chrome and Firefox with Manifest V3
 
@@ -33,10 +33,10 @@ Cast any web video to your PiCast receiver on Raspberry Pi — all traffic route
 
 ```
 ┌─────────────────┐     ┌──────────────────┐     ┌─────────────┐
-│  Content Script  │────▶│  Service Worker   │────▶│ PiCast HTTP │
+│  Content Script  │────▶│  Service Worker   │────▶│ boGDan HTTP │
 │  (detector.js)   │     │  (service-worker) │     │ API :8585   │
 │  Media detection │     │  URL interception │     ├─────────────┤
-│  MSE monitoring  │     │  Cast/control     │────▶│ PiCast WS   │
+│  MSE monitoring  │     │  Cast/control     │────▶│ boGDan WS   │
 └─────────────────┘     │  WebSocket client  │     │ :8586/ws    │
                         │  Badge management  │     └─────────────┘
 ┌─────────────────┐     └──────────────────┘
@@ -52,7 +52,7 @@ Cast any web video to your PiCast receiver on Raspberry Pi — all traffic route
 | Permission | Purpose |
 |------------|---------|
 | `activeTab` | Get the URL of the currently active tab |
-| `storage` | Persist settings (PiCast address, Tor mode) |
+| `storage` | Persist settings (boGDan address, Tor mode) |
 | `webRequest` | Intercept media URLs (HLS/DASH/direct) from network requests |
 | `dns` (Firefox) | mDNS service discovery |
 
@@ -71,19 +71,19 @@ bash build.sh chrome
 bash build.sh firefox
 ```
 
-Output: `build/picast-chrome/` and `build/picast-firefox/`
+Output: `build/bogdan-chrome/` and `build/bogdan-firefox/`
 
 ## Signing
 
 ### Chrome Web Store
 
 1. Create a developer account at https://chrome.google.com/webstore/devconsole
-2. Zip the `build/picast-chrome/` directory
+2. Zip the `build/bogdan-chrome/` directory
 3. Upload and submit for review
 
 ### Firefox Add-ons (AMO)
 
 1. Create an account at https://addons.mozilla.org/developers/
-2. Zip the `build/picast-firefox/` directory
+2. Zip the `build/bogdan-firefox/` directory
 3. Submit for signing and review
 4. For self-distribution, use the "On your own" option to get a signed XPI

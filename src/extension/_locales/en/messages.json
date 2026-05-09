@@ -1,14 +1,14 @@
 {
   "extensionName": {
-    "message": "PiCast",
+    "message": "boGDan",
     "description": "Name of the extension"
   },
   "extensionDescription": {
-    "message": "Cast any web video to your PiCast receiver on Raspberry Pi — all traffic routed through Tor for privacy",
+    "message": "Cast any web video to your boGDan receiver on Raspberry Pi — all traffic routed through Tor for privacy",
     "description": "Description of the extension"
   },
   "actionTitle": {
-    "message": "Cast to PiCast",
+    "message": "Cast to boGDan",
     "description": "Tooltip for the browser action button"
   }
 }

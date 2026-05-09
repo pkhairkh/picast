@@ -1,5 +1,5 @@
 /**
- * PiCast Content Script: Media Detector
+ * boGDan Content Script: Media Detector
  *
  * Runs on all pages at `document_idle`. Detects media elements
  * (<video>, <audio>) and MSE (Media Source Extensions) usage,

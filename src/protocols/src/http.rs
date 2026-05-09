@@ -1,7 +1,7 @@
-//! PiCast HTTP REST API Server
+//! boGDan HTTP REST API Server
 //!
 //! Provides a REST-like control surface for external clients
-//! (browser extension, curl, scripts) to interact with PiCast.
+//! (browser extension, curl, scripts) to interact with boGDan.
 //!
 //! ## Endpoints
 //!
@@ -21,7 +21,7 @@ use anyhow::Result;
 use http_body_util::Full;
 use hyper::body::Incoming;
 use hyper::{Method, Request, Response, StatusCode};
-use picast_session::{MediaSession, SessionManager};
+use bogdan_session::{MediaSession, SessionManager};
 use serde::{Deserialize, Serialize};
 use std::sync::Arc;
 use tokio_rustls::TlsAcceptor;
@@ -283,10 +283,10 @@ async fn handle_request(
                 },
                 Err(e) => {
                     let (code, msg) = match &e {
-                        picast_session::SessionError::AlreadyActive => {
+                        bogdan_session::SessionError::AlreadyActive => {
                             (StatusCode::CONFLICT, e.to_string())
                         },
-                        picast_session::SessionError::ResolutionFailed(_) => {
+                        bogdan_session::SessionError::ResolutionFailed(_) => {
                             (StatusCode::UNPROCESSABLE_ENTITY, e.to_string())
                         },
                         _ => (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()),
@@ -350,7 +350,7 @@ async fn handle_request(
                 Ok(()) => json_response(StatusCode::OK, &serde_json::json!({"volume": volume})),
                 Err(e) => {
                     let status = match &e {
-                        picast_session::SessionError::NoActiveSession => StatusCode::CONFLICT,
+                        bogdan_session::SessionError::NoActiveSession => StatusCode::CONFLICT,
                         _ => StatusCode::INTERNAL_SERVER_ERROR,
                     };
                     error_response(status, &e.to_string())

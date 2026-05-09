@@ -1,4 +1,4 @@
-# /etc/iptables/rules.v4 — PiCast Firewall Configuration
+# /etc/iptables/rules.v4 — boGDan Firewall Configuration
 # See SPECIFICATION.md §7 for network security rationale
 #
 # Apply with: sudo iptables-restore < config/iptables.rules
@@ -21,15 +21,15 @@
 -A INPUT -s 192.168.0.0/16 -p icmp --icmp-type 8 -j ACCEPT
 -A INPUT -s 10.0.0.0/8 -p icmp --icmp-type 8 -j ACCEPT
 
-# PiCast HTTP API (port 8585) — LAN only
+# boGDan HTTP API (port 8585) — LAN only
 -A INPUT -s 192.168.0.0/16 -p tcp --dport 8585 -j ACCEPT
 -A INPUT -s 10.0.0.0/8 -p tcp --dport 8585 -j ACCEPT
 
-# PiCast WebSocket (port 8586) — LAN only
+# boGDan WebSocket (port 8586) — LAN only
 -A INPUT -s 192.168.0.0/16 -p tcp --dport 8586 -j ACCEPT
 -A INPUT -s 10.0.0.0/8 -p tcp --dport 8586 -j ACCEPT
 
-# PiCast DLNA MediaRenderer (port 49152) — LAN only
+# boGDan DLNA MediaRenderer (port 49152) — LAN only
 -A INPUT -s 192.168.0.0/16 -p tcp --dport 49152 -j ACCEPT
 -A INPUT -s 10.0.0.0/8 -p tcp --dport 49152 -j ACCEPT
 

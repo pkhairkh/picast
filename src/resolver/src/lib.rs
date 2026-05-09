@@ -1,4 +1,4 @@
-//! PiCast URL Resolver
+//! boGDan URL Resolver
 //!
 //! Takes a user-supplied URL and resolves it to a direct, playable
 //! media URL. The resolver can:
@@ -31,7 +31,7 @@ pub use classifier::UrlCategory;
 use async_trait::async_trait;
 use cache::ResolveCache;
 use classifier::classify_url;
-use picast_session::interfaces::{ResolveInfo, ResolverTrait};
+use bogdan_session::interfaces::{ResolveInfo, ResolverTrait};
 use serde::{Deserialize, Serialize};
 use std::sync::Arc;
 use thiserror::Error;
@@ -117,9 +117,9 @@ pub struct ResolveResult {
 /// # Examples
 ///
 /// ```
-/// assert_eq!(picast_resolver::mime_from_extension("video.mp4"), Some("video/mp4".to_string()));
-/// assert_eq!(picast_resolver::mime_from_extension("video.mp4?token=abc"), Some("video/mp4".to_string()));
-/// assert_eq!(picast_resolver::mime_from_extension("unknown.xyz"), None);
+/// assert_eq!(bogdan_resolver::mime_from_extension("video.mp4"), Some("video/mp4".to_string()));
+/// assert_eq!(bogdan_resolver::mime_from_extension("video.mp4?token=abc"), Some("video/mp4".to_string()));
+/// assert_eq!(bogdan_resolver::mime_from_extension("unknown.xyz"), None);
 /// ```
 pub fn mime_from_extension(path: &str) -> Option<String> {
     // Strip query string
@@ -147,7 +147,7 @@ pub fn mime_from_extension(path: &str) -> Option<String> {
 
 /// The main resolver that orchestrates URL resolution.
 ///
-/// Holds a reference to the [`picast_tor::TorManager`] so it can route
+/// Holds a reference to the [`bogdan_tor::TorManager`] so it can route
 /// `.onion` requests (or any request the user tags as "anonymous")
 /// through the Tor SOCKS proxy. Results are cached to prevent duplicate
 /// resolution of the same URL.
@@ -157,19 +157,19 @@ pub fn mime_from_extension(path: &str) -> Option<String> {
 /// SQLite file so that resolved URLs survive restarts.
 pub struct Resolver {
     /// Reference to the Tor subsystem for anonymous resolution.
-    tor: Arc<picast_tor::TorManager>,
+    tor: Arc<bogdan_tor::TorManager>,
     /// Cache of resolved URLs (in-memory or file-backed).
     cache: Arc<Mutex<ResolveCache>>,
 }
 
 impl Resolver {
     /// Create a new resolver with the given Tor manager (in-memory cache).
-    pub fn new(tor: Arc<picast_tor::TorManager>) -> Self {
+    pub fn new(tor: Arc<bogdan_tor::TorManager>) -> Self {
         Self { tor, cache: Arc::new(Mutex::new(ResolveCache::new())) }
     }
 
     /// Create a new resolver with a custom cache TTL.
-    pub fn with_cache_ttl(tor: Arc<picast_tor::TorManager>, ttl: std::time::Duration) -> Self {
+    pub fn with_cache_ttl(tor: Arc<bogdan_tor::TorManager>, ttl: std::time::Duration) -> Self {
         Self { tor, cache: Arc::new(Mutex::new(ResolveCache::with_ttl(ttl))) }
     }
 
@@ -179,14 +179,14 @@ impl Resolver {
     /// resolved URLs survive server restarts. This avoids re-resolving
     /// every URL through Tor/yt-dlp on every boot, which would be
     /// slow and waste bandwidth.
-    pub fn with_persistent_cache(tor: Arc<picast_tor::TorManager>, path: &std::path::Path) -> Self {
+    pub fn with_persistent_cache(tor: Arc<bogdan_tor::TorManager>, path: &std::path::Path) -> Self {
         Self { tor, cache: Arc::new(Mutex::new(ResolveCache::with_path(path))) }
     }
 
     /// Create a new resolver with a persistent file-backed cache and
     /// custom TTL.
     pub fn with_persistent_cache_and_ttl(
-        tor: Arc<picast_tor::TorManager>,
+        tor: Arc<bogdan_tor::TorManager>,
         path: &std::path::Path,
         ttl: std::time::Duration,
     ) -> Self {
@@ -297,7 +297,7 @@ impl Resolver {
                 // in the list still get the Voe resolver tried first.
                 if let Some(host) = parsed.host_str() {
                     let socks_addr = self.tor.socks_addr();
-                    let isolation = picast_tor::TorManager::isolation_username(host);
+                    let isolation = bogdan_tor::TorManager::isolation_username(host);
                     let socks5_proxy = if !socks_addr.is_empty() {
                         Some(format!("socks5h://{}@{}", isolation, socks_addr))
                     } else {
@@ -462,7 +462,7 @@ impl Resolver {
     /// Web page resolution via yt-dlp through Tor.
     async fn resolve_webpage(&self, url: &str) -> Result<ResolveResult, ResolveError> {
         let socks_addr = self.tor.socks_addr();
-        let isolation = picast_tor::TorManager::isolation_username(
+        let isolation = bogdan_tor::TorManager::isolation_username(
             Url::parse(url)
                 .ok()
                 .and_then(|u| u.host_str().map(|h| h.to_owned()))
@@ -476,7 +476,7 @@ impl Resolver {
     /// Onion URL resolution — always through Tor, always via yt-dlp.
     async fn resolve_onion(&self, url: &str) -> Result<ResolveResult, ResolveError> {
         let socks_addr = self.tor.socks_addr();
-        let isolation = picast_tor::TorManager::isolation_username(
+        let isolation = bogdan_tor::TorManager::isolation_username(
             Url::parse(url)
                 .ok()
                 .and_then(|u| u.host_str().map(|h| h.to_owned()))
@@ -525,7 +525,7 @@ mod tests {
     use super::*;
 
     fn resolver() -> Resolver {
-        let tor = Arc::new(picast_tor::TorManager::new("127.0.0.1:9050"));
+        let tor = Arc::new(bogdan_tor::TorManager::new("127.0.0.1:9050"));
         Resolver::new(tor)
     }
 

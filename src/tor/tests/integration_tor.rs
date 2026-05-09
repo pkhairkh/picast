@@ -7,11 +7,11 @@
 //! `tor-test` feature is enabled:
 //!
 //! ```sh
-//! cargo test -p picast-tor --features tor-test -- --nocapture
+//! cargo test -p bogdan-tor --features tor-test -- --nocapture
 //! ```
 
 #[cfg(feature = "tor-test")]
-use picast_tor::TorManager;
+use bogdan_tor::TorManager;
 
 /// Full lifecycle test: create → ensure_running → health_check → stream IDs → shutdown.
 #[tokio::test]

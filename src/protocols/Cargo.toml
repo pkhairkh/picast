@@ -1,11 +1,11 @@
 [package]
-name = "picast-protocols"
+name = "bogdan-protocols"
 version.workspace = true
 edition.workspace = true
-description = "HTTP REST API, WebSocket, and DLNA protocol servers for PiCast"
+description = "HTTP REST API, WebSocket, and DLNA protocol servers for boGDan"
 
 [dependencies]
-picast-session = { path = "../session" }
+bogdan-session = { path = "../session" }
 hyper = { version = "1", features = ["server", "http1"] }
 hyper-util = { version = "0.1", features = ["tokio"] }
 http-body-util = "0.1"

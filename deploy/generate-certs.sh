@@ -1,38 +1,38 @@
 #!/usr/bin/env bash
-# PiCast TLS Certificate Generator
+# boGDan TLS Certificate Generator
 #
 # Generates a private CA + server certificate for HTTPS/WSS on the
-# PiCast receiver. Using a CA chain (instead of a bare self-signed
+# boGDan receiver. Using a CA chain (instead of a bare self-signed
 # server cert) allows the CA to be imported into the browser's trust
 # store ONCE — after that, every server cert signed by that CA is
 # trusted automatically, regardless of hostname or port.
 #
 # This avoids the per-host:port exception dance that Firefox requires
 # for bare self-signed certs (you'd need separate exceptions for
-# picast.local:8585, picast.local:8586, 192.168.x.x:8585, etc.).
+# bogdan.local:8585, bogdan.local:8586, 192.168.x.x:8585, etc.).
 #
 # Usage:
 #   sudo ./generate-certs.sh                    # auto-detect IP
 #   sudo ./generate-certs.sh 192.168.1.100      # specify IP
 #
-# Generated files in /etc/picast/tls/:
-#   ca.pem           — PiCast CA certificate (import this into browsers)
-#   ca-key.pem       — PiCast CA private key (keep secret!)
-#   picast.pem       — Server certificate (PEM, used by picast-server)
-#   picast-key.pem   — Server private key (PEM, used by picast-server)
+# Generated files in /etc/bogdan/tls/:
+#   ca.pem           — boGDan CA certificate (import this into browsers)
+#   ca-key.pem       — boGDan CA private key (keep secret!)
+#   bogdan.pem       — Server certificate (PEM, used by bogdan-server)
+#   bogdan-key.pem   — Server private key (PEM, used by bogdan-server)
 #
 # After generating:
-#   1. sudo systemctl restart picast
+#   1. sudo systemctl restart bogdan
 #   2. Import ca.pem into your browser's trusted root CAs
-#   3. The PiCast extension can now connect via HTTPS/WSS
+#   3. The boGDan extension can now connect via HTTPS/WSS
 
 set -euo pipefail
 
-CERT_DIR="/etc/picast/tls"
+CERT_DIR="/etc/bogdan/tls"
 CA_CERT="${CERT_DIR}/ca.pem"
 CA_KEY="${CERT_DIR}/ca-key.pem"
-SRV_CERT="${CERT_DIR}/picast.pem"
-SRV_KEY="${CERT_DIR}/picast-key.pem"
+SRV_CERT="${CERT_DIR}/bogdan.pem"
+SRV_KEY="${CERT_DIR}/bogdan-key.pem"
 VALIDITY_DAYS=3650   # 10 years
 
 # Determine the Pi's LAN IP
@@ -47,9 +47,9 @@ else
     fi
 fi
 
-echo "PiCast TLS Certificate Generator"
+echo "boGDan TLS Certificate Generator"
 echo "================================"
-echo "  mDNS name : picast.local"
+echo "  mDNS name : bogdan.local"
 echo "  LAN IP    : ${PI_IP}"
 echo "  Output dir: ${CERT_DIR}"
 echo "  Validity  : ${VALIDITY_DAYS} days"
@@ -58,7 +58,7 @@ echo
 # Create output directory
 mkdir -p "${CERT_DIR}"
 
-# ── Step 1: Generate the PiCast CA ──────────────────────────────────
+# ── Step 1: Generate the boGDan CA ──────────────────────────────────
 #
 # This CA certificate will be imported into browsers as a trusted root.
 # Once trusted, any server cert it signs is automatically accepted.
@@ -67,13 +67,13 @@ if [ -f "${CA_CERT}" ] && [ -f "${CA_KEY}" ]; then
     echo "CA certificate already exists — reusing ${CA_CERT}"
     echo "  (delete ${CA_CERT} and ${CA_KEY} to regenerate)"
 else
-    echo "Generating PiCast CA certificate..."
+    echo "Generating boGDan CA certificate..."
     openssl req -x509 -newkey rsa:4096 \
         -keyout "${CA_KEY}" \
         -out "${CA_CERT}" \
         -days "${VALIDITY_DAYS}" \
         -nodes \
-        -subj "/O=PiCast/CN=PiCast Local CA" \
+        -subj "/O=boGDan/CN=boGDan Local CA" \
         -addext "basicConstraints = critical, CA:TRUE" \
         -addext "keyUsage = critical, keyCertSign, cRLSign" \
         -addext "subjectKeyIdentifier = hash"
@@ -85,7 +85,7 @@ echo
 
 # ── Step 2: Generate the server CSR ─────────────────────────────────
 #
-# The server cert is signed by the PiCast CA (not self-signed).
+# The server cert is signed by the boGDan CA (not self-signed).
 # It includes SANs for all hostnames and IPs that clients will use.
 
 echo "Generating server certificate signing request..."
@@ -94,7 +94,7 @@ echo "Generating server certificate signing request..."
 CSR_CONFIG=$(mktemp)
 cat > "${CSR_CONFIG}" <<EOF
 [v3_req]
-subjectAltName      = DNS:picast.local, DNS:localhost, IP:${PI_IP}, IP:127.0.0.1
+subjectAltName      = DNS:bogdan.local, DNS:localhost, IP:${PI_IP}, IP:127.0.0.1
 basicConstraints    = CA:FALSE
 keyUsage            = critical, digitalSignature, keyEncipherment
 extendedKeyUsage    = serverAuth
@@ -104,15 +104,15 @@ EOF
 
 openssl req -new -newkey rsa:2048 \
     -keyout "${SRV_KEY}" \
-    -out "${CERT_DIR}/picast.csr" \
+    -out "${CERT_DIR}/bogdan.csr" \
     -nodes \
-    -subj "/O=PiCast/CN=picast.local"
+    -subj "/O=boGDan/CN=bogdan.local"
 
 # ── Step 3: Sign the server cert with the CA ────────────────────────
 
-echo "Signing server certificate with PiCast CA..."
+echo "Signing server certificate with boGDan CA..."
 openssl x509 -req \
-    -in "${CERT_DIR}/picast.csr" \
+    -in "${CERT_DIR}/bogdan.csr" \
     -CA "${CA_CERT}" \
     -CAkey "${CA_KEY}" \
     -CAcreateserial \
@@ -122,13 +122,13 @@ openssl x509 -req \
     -extensions v3_req
 
 # Clean up temp files
-rm -f "${CSR_CONFIG}" "${CERT_DIR}/picast.csr" "${CERT_DIR}/ca.srl"
+rm -f "${CSR_CONFIG}" "${CERT_DIR}/bogdan.csr" "${CERT_DIR}/ca.srl"
 
 # ── Set permissions ─────────────────────────────────────────────────
 
-chown root:picast "${CA_CERT}" "${SRV_CERT}" "${SRV_KEY}" 2>/dev/null || \
+chown root:bogdan "${CA_CERT}" "${SRV_CERT}" "${SRV_KEY}" 2>/dev/null || \
     chown root:root "${CA_CERT}" "${SRV_CERT}" "${SRV_KEY}"
-chown root:picast "${CA_KEY}" 2>/dev/null || chown root:root "${CA_KEY}"
+chown root:bogdan "${CA_KEY}" 2>/dev/null || chown root:root "${CA_KEY}"
 
 chmod 644 "${CA_CERT}" "${SRV_CERT}"
 chmod 640 "${CA_KEY}" "${SRV_KEY}"
@@ -149,14 +149,14 @@ echo "=========================================="
 echo "NEXT STEPS — IMPORTANT"
 echo "=========================================="
 echo
-echo "1. Restart PiCast:"
-echo "   sudo systemctl restart picast"
+echo "1. Restart boGDan:"
+echo "   sudo systemctl restart bogdan"
 echo
 echo "2. Import the CA into Firefox on your Mac/PC:"
 echo "   a) Copy ca.pem to your computer:"
-echo "      scp pi@${PI_IP}:/etc/picast/tls/ca.pem /tmp/picast-ca.pem"
+echo "      scp pi@${PI_IP}:/etc/bogdan/tls/ca.pem /tmp/bogdan-ca.pem"
 echo "   b) In Firefox: Settings > Privacy & Security > Certificates > View Certificates"
-echo "   c) Click 'Import...' and select /tmp/picast-ca.pem"
+echo "   c) Click 'Import...' and select /tmp/bogdan-ca.pem"
 echo "   d) Check 'Trust this CA to identify websites' and confirm"
 echo
 echo "3. Import the CA into Chrome on your Mac/PC:"
@@ -165,7 +165,7 @@ echo "          Then set trust to 'Always Trust' for SSL"
 echo "   Linux: Settings > Privacy & Security > Security > Manage certificates"
 echo "          > Authorities > Import ca.pem"
 echo
-echo "4. Test: visit https://picast.local:8585/api/health"
+echo "4. Test: visit https://bogdan.local:8585/api/health"
 echo "   — should show {\"status\":\"ok\"} without any certificate warning"
 echo
-echo "5. The PiCast browser extension can now connect via HTTPS/WSS"
+echo "5. The boGDan browser extension can now connect via HTTPS/WSS"

@@ -1,4 +1,4 @@
-# PiCast Architecture Paper v1.0
+# boGDan Architecture Paper v1.0
 
 **Tor-Routed Zero-Copy Media Casting Appliance for Raspberry Pi 4B+**
 
@@ -6,11 +6,11 @@
 
 ## 1. Executive Summary
 
-PiCast is a networked media casting appliance purpose-built for the Raspberry Pi 4B+ that routes all content through the Tor network and delivers video to HDMI via a zero-copy DMA-BUF pipeline. The system uses the BCM2711 SoC's dedicated H.264 hardware decoder, outputs decoded frames directly to DRM/KMS display planes without copying through main memory, and avoids any display server, browser, or DRM stack entirely. The result is a machine that plays 1080p60 H.264 video at approximately 3% CPU utilization and 5 watts total system power — comparable to a commercial Chromecast device, but with full Tor network isolation and no proprietary dependencies.
+boGDan is a networked media casting appliance purpose-built for the Raspberry Pi 4B+ that routes all content through the Tor network and delivers video to HDMI via a zero-copy DMA-BUF pipeline. The system uses the BCM2711 SoC's dedicated H.264 hardware decoder, outputs decoded frames directly to DRM/KMS display planes without copying through main memory, and avoids any display server, browser, or DRM stack entirely. The result is a machine that plays 1080p60 H.264 video at approximately 3% CPU utilization and 5 watts total system power — comparable to a commercial Chromecast device, but with full Tor network isolation and no proprietary dependencies.
 
-PiCast accepts media from three independent interfaces: a browser extension (Chrome/Firefox Manifest V3) that intercepts or resolves page URLs, a UPnP/DLNA MediaRenderer compatible with VLC and Home Assistant, and a simple HTTP REST API. Content resolution is handled by yt-dlp, which supports over 1,800 websites and extracts direct media URLs through the Tor SOCKS proxy. The resolved URL is then fetched and decoded by a GStreamer pipeline using `v4l2h264dec` in DMA-BUF mode, and the resulting hardware buffer is imported directly by `kmssink` into a DRM plane for HDMI scanout by the Hardware Video Scaler (HVS). The CPU is entirely uninvolved in the display data path.
+boGDan accepts media from three independent interfaces: a browser extension (Chrome/Firefox Manifest V3) that intercepts or resolves page URLs, a UPnP/DLNA MediaRenderer compatible with VLC and Home Assistant, and a simple HTTP REST API. Content resolution is handled by yt-dlp, which supports over 1,800 websites and extracts direct media URLs through the Tor SOCKS proxy. The resolved URL is then fetched and decoded by a GStreamer pipeline using `v4l2h264dec` in DMA-BUF mode, and the resulting hardware buffer is imported directly by `kmssink` into a DRM plane for HDMI scanout by the Hardware Video Scaler (HVS). The CPU is entirely uninvolved in the display data path.
 
-The architecture makes three deliberate trade-offs that define the project. First, operational security is non-negotiable: all outbound traffic traverses Tor, and DNS resolution is forced through the Tor network to prevent leakage. Second, hardware efficiency is achieved through zero-copy buffer sharing between the V4L2 decoder and the DRM compositor, eliminating an entire frame copy per display refresh. Third, software minimalism — no X11, no Wayland, no Chromium, no Widevine — produces a dramatically smaller attack surface than any Raspberry Pi desktop configuration. PiCast is an appliance, not a general-purpose computer, and every design decision flows from that premise.
+The architecture makes three deliberate trade-offs that define the project. First, operational security is non-negotiable: all outbound traffic traverses Tor, and DNS resolution is forced through the Tor network to prevent leakage. Second, hardware efficiency is achieved through zero-copy buffer sharing between the V4L2 decoder and the DRM compositor, eliminating an entire frame copy per display refresh. Third, software minimalism — no X11, no Wayland, no Chromium, no Widevine — produces a dramatically smaller attack surface than any Raspberry Pi desktop configuration. boGDan is an appliance, not a general-purpose computer, and every design decision flows from that premise.
 
 ---
 
@@ -18,19 +18,19 @@ The architecture makes three deliberate trade-offs that define the project. Firs
 
 ### 2.1 Design Philosophy
 
-PiCast is designed as an appliance, not a desktop. This distinction is not merely semantic — it governs every architectural decision in the system. A desktop must support arbitrary applications, window management, user input events, and a general-purpose display server. An appliance has a single rendering client, a fixed display output, no interactive input on the device itself, and a fully deterministic startup sequence. By committing to the appliance model, PiCast eliminates entire categories of software: no display server, no window manager, no input method framework, no session manager, no D-Bus user session bus, no PolicyKit, and no desktop environment.
+boGDan is designed as an appliance, not a desktop. This distinction is not merely semantic — it governs every architectural decision in the system. A desktop must support arbitrary applications, window management, user input events, and a general-purpose display server. An appliance has a single rendering client, a fixed display output, no interactive input on the device itself, and a fully deterministic startup sequence. By committing to the appliance model, boGDan eliminates entire categories of software: no display server, no window manager, no input method framework, no session manager, no D-Bus user session bus, no PolicyKit, and no desktop environment.
 
 Three priorities structure every decision, listed in strict order:
 
-1. **Operational Security (Tor):** Every byte that leaves the PiCast device traverses the Tor network. This is not an optional privacy feature — it is a fundamental security property. Without Tor, the user's ISP can observe every content choice, build a viewing history, and correlate it with other network activity. The Tor requirement constrains bandwidth (typically 2–4 Mbps effective throughput), which in turn constrains maximum viable resolution (720p reliable, 1080p unreliable over Tor).
+1. **Operational Security (Tor):** Every byte that leaves the boGDan device traverses the Tor network. This is not an optional privacy feature — it is a fundamental security property. Without Tor, the user's ISP can observe every content choice, build a viewing history, and correlate it with other network activity. The Tor requirement constrains bandwidth (typically 2–4 Mbps effective throughput), which in turn constrains maximum viable resolution (720p reliable, 1080p unreliable over Tor).
 
-2. **Hardware Efficiency (Zero-Copy):** The BCM2711 SoC provides dedicated hardware blocks for video decoding (H.264, HEVC) and display composition (HVS). PiCast uses these blocks in their native zero-copy mode: the V4L2 decoder outputs DMA-BUF file descriptors that the DRM/KMS subsystem imports directly into display planes. The CPU never touches a pixel of video data after decode. This is the difference between ~30% CPU (software copy path) and ~3% CPU (zero-copy path), and the difference between ~8W and ~5W power consumption.
+2. **Hardware Efficiency (Zero-Copy):** The BCM2711 SoC provides dedicated hardware blocks for video decoding (H.264, HEVC) and display composition (HVS). boGDan uses these blocks in their native zero-copy mode: the V4L2 decoder outputs DMA-BUF file descriptors that the DRM/KMS subsystem imports directly into display planes. The CPU never touches a pixel of video data after decode. This is the difference between ~30% CPU (software copy path) and ~3% CPU (zero-copy path), and the difference between ~8W and ~5W power consumption.
 
-3. **Software Minimalism (No Display Server):** Every daemon, library, and privilege boundary that runs on the device increases the attack surface. A Pi desktop running Chromium and X11 has a dramatically larger attack surface than PiCast's single-process GStreamer pipeline talking directly to DRM. The minimalism principle means PiCast does not support features that would require a display server (screen mirroring, interactive UI) or a browser (Widevine DRM, JavaScript-rendered players).
+3. **Software Minimalism (No Display Server):** Every daemon, library, and privilege boundary that runs on the device increases the attack surface. A Pi desktop running Chromium and X11 has a dramatically larger attack surface than boGDan's single-process GStreamer pipeline talking directly to DRM. The minimalism principle means boGDan does not support features that would require a display server (screen mirroring, interactive UI) or a browser (Widevine DRM, JavaScript-rendered players).
 
 ### 2.2 High-Level Data Flow
 
-The PiCast data path is a fixed pipeline with no branches, no feedback loops, and no user-selectable alternatives during playback. This rigidity is intentional — it makes the system predictable, debuggable, and secure. The pipeline stages are:
+The boGDan data path is a fixed pipeline with no branches, no feedback loops, and no user-selectable alternatives during playback. This rigidity is intentional — it makes the system predictable, debuggable, and secure. The pipeline stages are:
 
 ```
 Sender submits URL
@@ -65,7 +65,7 @@ In parallel, the V3D GPU renders any on-screen display (subtitles, status indica
 
 ### 2.3 System Boundary
 
-The following table defines what is in scope for PiCast v1.0 and what is explicitly out of scope, with rationale for each exclusion.
+The following table defines what is in scope for boGDan v1.0 and what is explicitly out of scope, with rationale for each exclusion.
 
 | Capability | In/Out | Rationale |
 |---|---|---|
@@ -91,19 +91,19 @@ The following table defines what is in scope for PiCast v1.0 and what is explici
 
 ## 3. Hardware Platform: BCM2711 SoC
 
-The Raspberry Pi 4B+ is built around the Broadcom BCM2711 SoC, a quad-core Cortex-A72 (ARMv8-A) system-on-chip. For PiCast, the general-purpose CPU cores are almost irrelevant — the system's capabilities are defined by three dedicated hardware blocks: the video decoders, the Hardware Video Scaler (HVS), and the V3D GPU. Understanding these blocks and their interconnections is essential to understanding why PiCast's pipeline is designed the way it is.
+The Raspberry Pi 4B+ is built around the Broadcom BCM2711 SoC, a quad-core Cortex-A72 (ARMv8-A) system-on-chip. For boGDan, the general-purpose CPU cores are almost irrelevant — the system's capabilities are defined by three dedicated hardware blocks: the video decoders, the Hardware Video Scaler (HVS), and the V3D GPU. Understanding these blocks and their interconnections is essential to understanding why boGDan's pipeline is designed the way it is.
 
 ### 3.1 Video Decode Blocks
 
-The BCM2711 contains two entirely separate hardware video decoder blocks, each with its own driver stack, API surface, and output format. This separation is the single most important hardware constraint in the PiCast architecture.
+The BCM2711 contains two entirely separate hardware video decoder blocks, each with its own driver stack, API surface, and output format. This separation is the single most important hardware constraint in the boGDan architecture.
 
 #### 3.1.1 H.264 Decoder (Stateful V4L2 M2M)
 
-The primary decode path for PiCast uses the BCM2711's dedicated H.264 decoder, exposed through the `bcm2835-codec` kernel driver as V4L2 memory-to-memory (M2M) devices at `/dev/video10` (decode), `/dev/video11` (encode), and `/dev/video12` (ISP). The decoder supports H.264 High Profile, Level 4.2, up to 1080p60.
+The primary decode path for boGDan uses the BCM2711's dedicated H.264 decoder, exposed through the `bcm2835-codec` kernel driver as V4L2 memory-to-memory (M2M) devices at `/dev/video10` (decode), `/dev/video11` (encode), and `/dev/video12` (ISP). The decoder supports H.264 High Profile, Level 4.2, up to 1080p60.
 
 The decoder uses the **stateful V4L2 API**: the application feeds compressed H.264 NALUs (Network Abstraction Layer Units) into the OUTPUT queue, and the driver internally manages all decoder state (sequence parameters, reference frame management, reordering). The application does not need to parse slice headers, manage reference pictures, or handle B-frame reordering — the hardware and driver handle all of this autonomously. This contrasts with the stateless API used by the HEVC decoder (see §3.1.2), where the application must parse and provide per-slice parameters.
 
-Critically, the H.264 decoder's CAPTURE queue outputs decoded frames in **NV12 format** (4:2:0, two-plane: Y plane followed by interleaved UV plane) as **DMA-BUF file descriptors**. NV12 is the native scanout format of the HVS — the Hardware Video Scaler can read NV12 buffers directly from DMA-BUF without any format conversion. This is the hardware foundation of PiCast's zero-copy pipeline: the decoder writes NV12 pixels into a DMA-BUF, and the HVS reads those same pixels from the same DMA-BUF. No copy, no conversion, no CPU involvement.
+Critically, the H.264 decoder's CAPTURE queue outputs decoded frames in **NV12 format** (4:2:0, two-plane: Y plane followed by interleaved UV plane) as **DMA-BUF file descriptors**. NV12 is the native scanout format of the HVS — the Hardware Video Scaler can read NV12 buffers directly from DMA-BUF without any format conversion. This is the hardware foundation of boGDan's zero-copy pipeline: the decoder writes NV12 pixels into a DMA-BUF, and the HVS reads those same pixels from the same DMA-BUF. No copy, no conversion, no CPU involvement.
 
 The GStreamer element `v4l2h264dec` with `io-mode=dmabuf` configures this path automatically. When the decoder produces a frame, GStreamer receives a `GstBuffer` containing a `GstMemory` backed by the DMA-BUF fd. This buffer flows downstream to `kmssink`, which calls `drmPrimeFDToHandle()` to import the DMA-BUF into a DRM framebuffer, then calls `drmModeSetPlane()` to assign it to a display plane. The entire operation occurs without mapping the buffer into the application's virtual address space.
 
@@ -124,7 +124,7 @@ The BCM2711 also contains a separate HEVC/H.265 decoder hardware block, which is
 
 In the stateless model, the application is responsible for parsing the HEVC bitstream and providing per-slice control parameters (slice header, prediction weights, reference frame lists, etc.) alongside the compressed data. The driver does not maintain internal decoder state — each request is self-describing. This requires a HEVC bitstream parser in userspace (GStreamer's `v4l2slh265dec` element), which adds complexity but provides finer control over the decode process.
 
-The upstream driver status is a critical concern. The Raspberry Pi fork maintains the `rpivid` downstream driver, which works on Raspberry Pi OS kernels but is not merged into the mainline Linux kernel. The upstream effort, `rpi-hevc-dec`, was at patch version 5 as of February 2026 and has not been merged. PiCast targets Raspberry Pi OS with its patched kernel, so the downstream driver is available, but the long-term upstream status remains uncertain.
+The upstream driver status is a critical concern. The Raspberry Pi fork maintains the `rpivid` downstream driver, which works on Raspberry Pi OS kernels but is not merged into the mainline Linux kernel. The upstream effort, `rpi-hevc-dec`, was at patch version 5 as of February 2026 and has not been merged. boGDan targets Raspberry Pi OS with its patched kernel, so the downstream driver is available, but the long-term upstream status remains uncertain.
 
 **The critical problem with the HEVC decoder is its output format.** The HEVC hardware block outputs decoded frames in **SAND column format** (also called "handed" or "tiled" format, with V4L2 pixel format codes NC12 for 8-bit and NC30 for 10-bit). SAND format stores pixel data in columns of 128-byte width, which is efficient for the decoder's internal memory access patterns but is completely incompatible with the HVS. The Hardware Video Scaler can only scan out linear NV12/P030 formats — it has no SAND deinterleaver. This means that HEVC decode output **cannot be displayed without a format conversion step**, which fundamentally breaks the zero-copy pipeline.
 
@@ -137,7 +137,7 @@ The conversion options are all problematic:
 | V3D compute shader | Unknown (unproven) | Potentially near-zero-copy | Research phase |
 | Kernel driver conversion | Depends on implementation | No (extra buffer) | Not implemented |
 
-Any conversion step requires writing from one DMA-BUF (SAND) into another DMA-BUF (NV12), consuming memory bandwidth and CPU/GPU time. For v1, PiCast avoids this entirely by forcing H.264 format selection through yt-dlp. HEVC support is deferred to v2, pending either a kernel-level SAND→NV12 conversion path or a proven V3D compute shader approach.
+Any conversion step requires writing from one DMA-BUF (SAND) into another DMA-BUF (NV12), consuming memory bandwidth and CPU/GPU time. For v1, boGDan avoids this entirely by forcing H.264 format selection through yt-dlp. HEVC support is deferred to v2, pending either a kernel-level SAND→NV12 conversion path or a proven V3D compute shader approach.
 
 | Parameter | H.264 Decoder | HEVC Decoder |
 |---|---|---|
@@ -148,31 +148,31 @@ Any conversion step requires writing from one DMA-BUF (SAND) into another DMA-BU
 | Output format | NV12 (linear) | NC12/NC30 (SAND column) |
 | HVS-compatible | Yes (direct scanout) | No (requires conversion) |
 | Zero-copy to display | Yes | No |
-| PiCast v1 support | Primary path | Not supported |
+| boGDan v1 support | Primary path | Not supported |
 
 ### 3.2 Hardware Video Scaler (HVS)
 
 The Hardware Video Scaler (HVS) is the BCM2711's dedicated display compositor, operating entirely independently of the V3D GPU. It is not a software component — it is a fixed-function hardware block that reads pixel data from DMA-BUF-backed framebuffers, performs scaling, colorspace conversion, and alpha blending across multiple input planes, and outputs the composited result to the HDMI transmitter. The HVS runs continuously, scanning out a full frame to HDMI every 16.67ms at 60Hz (or every 33.33ms at 30Hz), regardless of whether the application is actively rendering.
 
-PiCast uses the HVS in its most efficient configuration: two input planes. **Plane 0** carries the decoded video frame (NV12 DMA-BUF from the V4L2 decoder), and **Plane 1** carries the OSD overlay (AR24/XRGB8888 GBM buffer from the V3D GPU). The HVS performs hardware alpha-blending of these two planes during each scanout cycle, producing the final composited frame that appears on the HDMI output. This compositing operation consumes zero CPU time — it is entirely a hardware function.
+boGDan uses the HVS in its most efficient configuration: two input planes. **Plane 0** carries the decoded video frame (NV12 DMA-BUF from the V4L2 decoder), and **Plane 1** carries the OSD overlay (AR24/XRGB8888 GBM buffer from the V3D GPU). The HVS performs hardware alpha-blending of these two planes during each scanout cycle, producing the final composited frame that appears on the HDMI output. This compositing operation consumes zero CPU time — it is entirely a hardware function.
 
-The HVS has specific capabilities and constraints that influence PiCast's design. It supports up to 16 planes (though the vc4 DRM driver exposes fewer for practical use), each with independent source and destination rectangles, per-plane alpha, and per-pixel alpha from the framebuffer. It can perform high-quality upscaling and downscaling using built-in polyphase filters. Input formats include NV12, P030, XRGB8888, ARGB8888, and RGB565, but notably not SAND column formats.
+The HVS has specific capabilities and constraints that influence boGDan's design. It supports up to 16 planes (though the vc4 DRM driver exposes fewer for practical use), each with independent source and destination rectangles, per-plane alpha, and per-pixel alpha from the framebuffer. It can perform high-quality upscaling and downscaling using built-in polyphase filters. Input formats include NV12, P030, XRGB8888, ARGB8888, and RGB565, but notably not SAND column formats.
 
-The info-beamer blog provides the definitive public documentation of HVS behavior, including its plane priority ordering (lower-numbered planes are composited on top), its handling of partial plane updates, and the interaction between atomic modesetting commits and vblank synchronization. PiCast follows the patterns described there: Plane 0 (video) is the bottom layer, Plane 1 (OSD) is composited on top, and all plane updates are committed atomically to prevent tearing.
+The info-beamer blog provides the definitive public documentation of HVS behavior, including its plane priority ordering (lower-numbered planes are composited on top), its handling of partial plane updates, and the interaction between atomic modesetting commits and vblank synchronization. boGDan follows the patterns described there: Plane 0 (video) is the bottom layer, Plane 1 (OSD) is composited on top, and all plane updates are committed atomically to prevent tearing.
 
 ### 3.3 V3D GPU (VideoCore VI)
 
 The V3D GPU in the BCM2711 is a VideoCore VI part supporting OpenGL ES 3.1, Vulkan 1.0, and delivering approximately 24 GFLOPS of compute performance. It is critical to understand that the V3D is a **3D graphics processor**, not a video decoder. It cannot decode H.264 or HEVC bitstreams — that is the job of the dedicated decoder blocks described above.
 
-In PiCast, the V3D GPU serves a single purpose: **rendering the OSD overlay** on DRM Plane 1. This includes subtitle text rendered by Pango/Cairo via an EGL/GBM surface, and any transient status indicators (buffering animation, error messages, volume level). The GPU renders these elements into an ARGB8888 GBM buffer, which the HVS alpha-blends on top of the video plane during scanout.
+In boGDan, the V3D GPU serves a single purpose: **rendering the OSD overlay** on DRM Plane 1. This includes subtitle text rendered by Pango/Cairo via an EGL/GBM surface, and any transient status indicators (buffering animation, error messages, volume level). The GPU renders these elements into an ARGB8888 GBM buffer, which the HVS alpha-blends on top of the video plane during scanout.
 
-The V3D's compute capabilities (OpenGL ES 3.1 compute shaders, Vulkan compute) represent a potential future optimization path for the SAND→NV12 conversion problem described in §3.1.2. A compute shader could potentially transform SAND-column data into linear NV12 directly on the GPU, writing the output to a DMA-BUF that the HVS could then scan out. This would be "near-zero-copy" — the data would move from the HEVC decoder's DMA-BUF to the GPU for transformation and then to a new DMA-BUF for display, but the CPU would not be involved and the data would never enter main memory. However, this approach is unproven: the compute shader's performance characteristics, the DMA-BUF sharing semantics between the HEVC decoder and the V3D, and the latency of the conversion are all open research questions. PiCast v1 does not attempt this optimization.
+The V3D's compute capabilities (OpenGL ES 3.1 compute shaders, Vulkan compute) represent a potential future optimization path for the SAND→NV12 conversion problem described in §3.1.2. A compute shader could potentially transform SAND-column data into linear NV12 directly on the GPU, writing the output to a DMA-BUF that the HVS could then scan out. This would be "near-zero-copy" — the data would move from the HEVC decoder's DMA-BUF to the GPU for transformation and then to a new DMA-BUF for display, but the CPU would not be involved and the data would never enter main memory. However, this approach is unproven: the compute shader's performance characteristics, the DMA-BUF sharing semantics between the HEVC decoder and the V3D, and the latency of the conversion are all open research questions. boGDan v1 does not attempt this optimization.
 
 ### 3.4 Memory Architecture
 
-The BCM2711 uses LPDDR4-3200 SDRAM on a 32-bit bus, providing a theoretical peak bandwidth of approximately 12.8 GB/s (3.2 GT/s × 4 bytes per transfer). Practical sustained bandwidth is typically 4–8 GB/s, depending on access patterns, bank conflicts, and the overhead of refresh cycles. The Raspberry Pi 4B+ is available with 2GB, 4GB, or 8GB configurations; PiCast recommends 4GB as the sweet spot, providing ample space for GStreamer buffer pools, the decode pipeline's reference frame storage, and the OS while keeping cost reasonable.
+The BCM2711 uses LPDDR4-3200 SDRAM on a 32-bit bus, providing a theoretical peak bandwidth of approximately 12.8 GB/s (3.2 GT/s × 4 bytes per transfer). Practical sustained bandwidth is typically 4–8 GB/s, depending on access patterns, bank conflicts, and the overhead of refresh cycles. The Raspberry Pi 4B+ is available with 2GB, 4GB, or 8GB configurations; boGDan recommends 4GB as the sweet spot, providing ample space for GStreamer buffer pools, the decode pipeline's reference frame storage, and the OS while keeping cost reasonable.
 
-The memory bandwidth budget is directly relevant to PiCast's zero-copy design. A single 1080p60 NV12 frame occupies 3,110,400 bytes (1920 × 1080 × 1.5 bytes for 4:2:0). At 60fps, the HVS reads 186.6 MB/s just for video plane scanout. If the system performed a CPU-side frame copy (reading from the decoder's output buffer and writing to a display buffer), the total memory bandwidth for video would double to ~373 MB/s — still well within the 4–8 GB/s budget, but the copy operation consumes CPU cache capacity, pollutes L1/L2 caches, and adds scheduling latency. More importantly, the copy requires the CPU to touch every pixel, which at 1080p60 means processing 186 MB/s through the CPU's load/store units — this is the difference between ~3% CPU (zero-copy) and ~30% CPU (copy path), and the corresponding power difference of approximately 3 watts.
+The memory bandwidth budget is directly relevant to boGDan's zero-copy design. A single 1080p60 NV12 frame occupies 3,110,400 bytes (1920 × 1080 × 1.5 bytes for 4:2:0). At 60fps, the HVS reads 186.6 MB/s just for video plane scanout. If the system performed a CPU-side frame copy (reading from the decoder's output buffer and writing to a display buffer), the total memory bandwidth for video would double to ~373 MB/s — still well within the 4–8 GB/s budget, but the copy operation consumes CPU cache capacity, pollutes L1/L2 caches, and adds scheduling latency. More importantly, the copy requires the CPU to touch every pixel, which at 1080p60 means processing 186 MB/s through the CPU's load/store units — this is the difference between ~3% CPU (zero-copy) and ~30% CPU (copy path), and the corresponding power difference of approximately 3 watts.
 
 Zero-copy is therefore not merely an optimization — it is the architectural enabler that allows a 5W appliance to deliver 1080p60 playback. Without zero-copy, the CPU would spend a significant fraction of its time copying frames, raising power consumption, reducing thermal headroom, and potentially causing frame drops under load (e.g., when Tor circuit congestion causes bursty network delivery).
 
@@ -195,7 +195,7 @@ Zero-copy is therefore not merely an optimization — it is the architectural en
 
 ### 4.1 Pipeline Architecture
 
-The PiCast video pipeline consists of four stages, connected by zero-copy buffer transfers. Each stage operates on DMA-BUF file descriptors — kernel-managed handles to physically contiguous (or IOMMU-mapped) memory that can be shared between hardware devices without copying through main memory.
+The boGDan video pipeline consists of four stages, connected by zero-copy buffer transfers. Each stage operates on DMA-BUF file descriptors — kernel-managed handles to physically contiguous (or IOMMU-mapped) memory that can be shared between hardware devices without copying through main memory.
 
 **Stage 1: Network Fetch.** The `souphttpsrc` GStreamer element fetches the media stream over HTTPS, routing through the Tor SOCKS5 proxy. This stage operates on compressed data (H.264 NALUs within a container) and writes into GStreamer's `queue2` buffer, which provides burst absorption for Tor's variable-bandwidth delivery. The queue2 element can buffer up to 50MB of compressed data, providing 30–60 seconds of playback buffer at typical 720p bitrates over Tor. This stage does involve CPU-side memory copies — compressed data is received from the network stack and written into GStreamer buffers — but the data is small (compressed H.264 at 2–4 Mbps) compared to decoded video (186 MB/s for 1080p60 NV12).
 
@@ -217,7 +217,7 @@ gst-launch-1.0 \
     proxy-id="" \
     socks5-proxy-ip=127.0.0.1 \
     socks5-proxy-port=9050 \
-    socks5-proxy-username="picast-<site-hash>" \
+    socks5-proxy-username="bogdan-<site-hash>" \
   ! queue2 max-size-bytes=52428800 \
     use-buffering=true \
     buffering-threshold-high=80 \
@@ -236,9 +236,9 @@ gst-launch-1.0 \
 
 Element-by-element explanation:
 
-- **`souphttpsrc`**: HTTPS fetch via libsoup. Configured with `socks5-proxy-ip` and `socks5-proxy-port` to route through the local Tor SOCKS proxy at `127.0.0.1:9050`. The `socks5-proxy-username` field carries the stream isolation identifier (e.g., `picast-youtube-abc123`), which Tor's `IsolateSOCKSAuth` uses to assign this connection to a dedicated circuit. The `proxy-id=""` disables HTTP proxy (we use SOCKS5, not HTTP proxy).
+- **`souphttpsrc`**: HTTPS fetch via libsoup. Configured with `socks5-proxy-ip` and `socks5-proxy-port` to route through the local Tor SOCKS proxy at `127.0.0.1:9050`. The `socks5-proxy-username` field carries the stream isolation identifier (e.g., `bogdan-youtube-abc123`), which Tor's `IsolateSOCKSAuth` uses to assign this connection to a dedicated circuit. The `proxy-id=""` disables HTTP proxy (we use SOCKS5, not HTTP proxy).
 
-- **`queue2`**: Burst-absorption buffer with 50MB capacity (`max-size-bytes=52428800`). Tor's bandwidth is variable — a circuit might deliver 4 Mbps for several seconds and then stall for 500ms while a new relay is selected. The queue2 buffer absorbs these bursts, providing smooth decode input. `use-buffering=true` enables buffering messages on the GStreamer bus, which PiCast uses to display buffering state via the WebSocket channel. The high/low thresholds control when buffering starts and stops: below 10% full, the pipeline pauses; above 80% full, it resumes.
+- **`queue2`**: Burst-absorption buffer with 50MB capacity (`max-size-bytes=52428800`). Tor's bandwidth is variable — a circuit might deliver 4 Mbps for several seconds and then stall for 500ms while a new relay is selected. The queue2 buffer absorbs these bursts, providing smooth decode input. `use-buffering=true` enables buffering messages on the GStreamer bus, which boGDan uses to display buffering state via the WebSocket channel. The high/low thresholds control when buffering starts and stops: below 10% full, the pipeline pauses; above 80% full, it resumes.
 
 - **`h264parse`**: Parses the H.264 bitstream, extracting SPS/PPS NALUs and ensuring they are prepended to each keyframe (`config-interval=-1`). This is necessary because some streaming formats (notably raw H.264 over HTTP) may send SPS/PPS only once at the start, but the stateful V4L2 decoder requires them before every IDR frame to initialize correctly.
 
@@ -254,7 +254,7 @@ The OSD rendering process works as follows. A dedicated rendering thread maintai
 
 The GBM buffer for the OSD is allocated via `gbm_bo_create()` with `GBM_BO_USE_RENDERING | GBM_BO_USE_SCANOUT` flags, ensuring it can be both rendered to by the V3D and scanned out by the HVS. When a new OSD frame is ready, the application calls `drmModeAtomicCommit()` to update Plane 1's framebuffer to the new GBM buffer's DRM handle, simultaneously with any Plane 0 updates. Atomic commit ensures that the HVS updates both planes in the same vblank period, preventing visual tearing or misaligned overlay/video frames.
 
-For subtitles specifically, GStreamer's `subtitleoverlay` element can render SRT/VTT subtitles directly into the video pipeline. However, this approach requires copying the video frame (to composite the subtitle text on top of it), which breaks zero-copy. PiCast instead extracts subtitle data from the GStreamer pipeline and renders it on the separate OSD plane, preserving the zero-copy video path. The subtitle text, timing, and styling are parsed by a custom GStreamer pad probe that intercepts subtitle buffers before `subtitleoverlay` and forwards them to the OSD renderer.
+For subtitles specifically, GStreamer's `subtitleoverlay` element can render SRT/VTT subtitles directly into the video pipeline. However, this approach requires copying the video frame (to composite the subtitle text on top of it), which breaks zero-copy. boGDan instead extracts subtitle data from the GStreamer pipeline and renders it on the separate OSD plane, preserving the zero-copy video path. The subtitle text, timing, and styling are parsed by a custom GStreamer pad probe that intercepts subtitle buffers before `subtitleoverlay` and forwards them to the OSD renderer.
 
 ### 4.4 HEVC Pipeline (Deferred)
 
@@ -272,7 +272,7 @@ The conversion stage is the blocker. Three approaches have been evaluated:
 
 3. **V3D compute shader**: A Vulkan compute shader could theoretically perform the SAND→NV12 reorganization directly on the GPU, reading from the HEVC decoder's DMA-BUF and writing to a new NV12 DMA-BUF. This would be near-zero-copy (data stays in GPU-accessible memory) and zero-CPU, but the approach is unproven — no working implementation has been demonstrated, and the DMA-BUF import semantics between the rpivid driver and the V3D GPU are not guaranteed to work.
 
-GStreamer 1.26 includes work-in-progress patches for SAND format handling in the V4L2 elements, which would simplify pipeline construction but do not solve the fundamental conversion problem. For PiCast v1, HEVC is entirely deferred: yt-dlp's format selection is configured to prefer H.264 streams (`bestvideo[vcodec^=avc1]`), and the system does not attempt to play HEVC content. This limits the maximum available resolution on some platforms (YouTube, for example, offers 4K only in VP9/AV1 on many videos, with H.264 capped at 1080p), but 1080p over Tor is already at the edge of practical bandwidth.
+GStreamer 1.26 includes work-in-progress patches for SAND format handling in the V4L2 elements, which would simplify pipeline construction but do not solve the fundamental conversion problem. For boGDan v1, HEVC is entirely deferred: yt-dlp's format selection is configured to prefer H.264 streams (`bestvideo[vcodec^=avc1]`), and the system does not attempt to play HEVC content. This limits the maximum available resolution on some platforms (YouTube, for example, offers 4K only in VP9/AV1 on many videos, with H.264 capped at 1080p), but 1080p over Tor is already at the edge of practical bandwidth.
 
 ---
 
@@ -280,9 +280,9 @@ GStreamer 1.26 includes work-in-progress patches for SAND format handling in the
 
 ### 5.1 Why No Display Server
 
-PiCast does not run X11, Wayland, or any other display server. This decision is sometimes misunderstood as mere minimalism, but it is in fact a technical necessity for the zero-copy pipeline and a security advantage for the appliance model.
+boGDan does not run X11, Wayland, or any other display server. This decision is sometimes misunderstood as mere minimalism, but it is in fact a technical necessity for the zero-copy pipeline and a security advantage for the appliance model.
 
-A display server sits between rendering clients and the kernel's DRM/KMS subsystem. It owns the DRM master privilege, manages CRTC and plane assignments, and composites client buffers into the final display output. This indirection introduces several problems for PiCast:
+A display server sits between rendering clients and the kernel's DRM/KMS subsystem. It owns the DRM master privilege, manages CRTC and plane assignments, and composites client buffers into the final display output. This indirection introduces several problems for boGDan:
 
 1. **Buffer copy overhead**: A display server typically composites client surfaces into its own framebuffer before presenting to the CRTC. Even Wayland compositors that support direct scanout (weston, mutter, kwin) require explicit per-surface opt-in and have strict format/modifier constraints. The zero-copy DMA-BUF path from V4L2 decoder to DRM plane is fragile under a compositor — the compositor may decide to copy the buffer for compositing, defeating the zero-copy optimization.
 
@@ -292,13 +292,13 @@ A display server sits between rendering clients and the kernel's DRM/KMS subsyst
 
 4. **Attack surface**: A display server is a complex, privileged process that handles IPC from untrusted clients (X11), parses protocol messages, manages GPU memory, and holds DRM master privileges. CVE databases show consistent vulnerability reports for X11 servers and Wayland compositors. For an appliance with a single rendering client, the display server's entire attack surface is unnecessary.
 
-PiCast instead opens `/dev/dri/card0` directly, calls `drmSetMaster()` to acquire DRM master privileges, and programs the HVS planes directly via DRM IOCTLs. This is the same approach used by Kodi, LibreELEC, and other embedded media players. The application is the only rendering client, there are no window management decisions, and there is no input event routing (the Pi has no keyboard or mouse). The display server provides no functionality that PiCast needs.
+boGDan instead opens `/dev/dri/card0` directly, calls `drmSetMaster()` to acquire DRM master privileges, and programs the HVS planes directly via DRM IOCTLs. This is the same approach used by Kodi, LibreELEC, and other embedded media players. The application is the only rendering client, there are no window management decisions, and there is no input event routing (the Pi has no keyboard or mouse). The display server provides no functionality that boGDan needs.
 
 ### 5.2 DRM/KMS Resource Model
 
-The vc4 DRM driver exposes the BCM2711's display hardware through the standard Linux DRM/KMS API. PiCast uses the following resources:
+The vc4 DRM driver exposes the BCM2711's display hardware through the standard Linux DRM/KMS API. boGDan uses the following resources:
 
-| DRM Resource | Description | PiCast Usage |
+| DRM Resource | Description | boGDan Usage |
 |---|---|---|
 | CRTC 0 | Display controller, generates vblank events, drives HDMI | Single CRTC for HDMI output |
 | Plane 0 | Primary video plane, NV12 compatible | Decoded video from V4L2 decoder |
@@ -311,11 +311,11 @@ Buffer allocation uses two different paths for the two planes:
 
 - **Plane 1 (OSD)**: Buffers are allocated via GBM (`Generic Buffer Manager`). The application calls `gbm_bo_create()` with the desired width, height, format (ARGB8888), and usage flags (`GBM_BO_USE_RENDERING | GBM_BO_USE_SCANOUT`). GBM allocates from the same CMA pool as V4L2, ensuring the HVS can scan out the result. The EGL context renders into this GBM buffer via a `gbm_surface`, and the resulting `gbm_bo` is imported into DRM via `gbm_bo_get_handle()`.
 
-The DRM master privilege is held by the PiCast process throughout its lifetime. Since there is no display server, no other process competes for DRM master. If the PiCast process crashes, `systemd` restarts it, and it re-acquires DRM master on the next device open.
+The DRM master privilege is held by the boGDan process throughout its lifetime. Since there is no display server, no other process competes for DRM master. If the boGDan process crashes, `systemd` restarts it, and it re-acquires DRM master on the next device open.
 
 ### 5.3 Atomic Modesetting
 
-PiCast uses the DRM **atomic modesetting** API (`drmModeAtomicCommit`) for all display updates. Atomic modesetting is the modern DRM API that allows multiple properties (plane source/destination rectangles, framebuffer assignments, CRTC mode) to be changed in a single, atomic commit that takes effect at the next vblank. This is essential for tear-free display updates — without atomic commits, updating Plane 0 and Plane 1 in separate IOCTL calls could result in one frame of desynchronized display (new video frame with old OSD, or vice versa).
+boGDan uses the DRM **atomic modesetting** API (`drmModeAtomicCommit`) for all display updates. Atomic modesetting is the modern DRM API that allows multiple properties (plane source/destination rectangles, framebuffer assignments, CRTC mode) to be changed in a single, atomic commit that takes effect at the next vblank. This is essential for tear-free display updates — without atomic commits, updating Plane 0 and Plane 1 in separate IOCTL calls could result in one frame of desynchronized display (new video frame with old OSD, or vice versa).
 
 The atomic commit workflow is:
 
@@ -325,7 +325,7 @@ The atomic commit workflow is:
 4. Commit: `drmModeAtomicCommit(fd, req, DRM_MODE_ATOMIC_ALLOW_MODESET | DRM_MODE_PAGE_FLIP_EVENT, userdata)`
 5. Wait for vblank event via `drmHandleEvent()` to confirm the update has been applied
 
-The `DRM_MODE_PAGE_FLIP_EVENT` flag requests a vblank event when the commit takes effect. PiCast uses this event for vblank synchronization — the OSD renderer only updates when the previous frame has been scanned out, preventing rendering ahead of the display and wasting memory bandwidth on unseen frames.
+The `DRM_MODE_PAGE_FLIP_EVENT` flag requests a vblank event when the commit takes effect. boGDan uses this event for vblank synchronization — the OSD renderer only updates when the previous frame has been scanned out, preventing rendering ahead of the display and wasting memory bandwidth on unseen frames.
 
 For the video pipeline specifically, `kmssink` handles atomic commits internally. The element implements a `GstPadProbe` that intercepts outgoing buffers and submits them to DRM via atomic commit. The `plane-properties` setting on kmssink can be used to set the zpos and alpha values for each plane.
 
@@ -335,13 +335,13 @@ For the video pipeline specifically, `kmssink` handles atomic commits internally
 
 ### 6.1 Protocol Selection Rationale
 
-PiCast does not implement Google's Cast V2 protocol, despite it being the most widely recognized casting protocol. This is a deliberate decision based on technical constraints, not a preference for custom protocols.
+boGDan does not implement Google's Cast V2 protocol, despite it being the most widely recognized casting protocol. This is a deliberate decision based on technical constraints, not a preference for custom protocols.
 
-Cast V2 requires the receiver device to authenticate with Google's cloud infrastructure using a registered device certificate. The receiver must present a valid OAuth2 token during the handshake, which is provisioned only to devices that have completed Google's manufacturing certification process. Unofficial receivers — including PiCast — cannot obtain these credentials. Without successful authentication, the sender (Chrome browser, Android phone) will not discover or connect to the device, even if it advertises `_googlecast._tcp.local` via mDNS.
+Cast V2 requires the receiver device to authenticate with Google's cloud infrastructure using a registered device certificate. The receiver must present a valid OAuth2 token during the handshake, which is provisioned only to devices that have completed Google's manufacturing certification process. Unofficial receivers — including boGDan — cannot obtain these credentials. Without successful authentication, the sender (Chrome browser, Android phone) will not discover or connect to the device, even if it advertises `_googlecast._tcp.local` via mDNS.
 
-Some open-source projects (notably go-chromecast) have attempted to bypass the authentication requirement by reverse-engineering the protocol, but these efforts are fragile and break frequently as Google updates the protocol. The Cast V2 specification itself is proprietary and subject to change without notice. Implementing a fragile reverse-engineered protocol would violate PiCast's reliability requirement.
+Some open-source projects (notably go-chromecast) have attempted to bypass the authentication requirement by reverse-engineering the protocol, but these efforts are fragile and break frequently as Google updates the protocol. The Cast V2 specification itself is proprietary and subject to change without notice. Implementing a fragile reverse-engineered protocol would violate boGDan's reliability requirement.
 
-Instead, PiCast provides three independent interfaces that cover the same use cases without any dependency on Google infrastructure:
+Instead, boGDan provides three independent interfaces that cover the same use cases without any dependency on Google infrastructure:
 
 1. **HTTP REST API** — for programmatic control, home automation, and the browser extension
 2. **UPnP/DLNA MediaRenderer** — for compatibility with existing media apps (VLC, BubbleUPnP, Home Assistant)
@@ -351,7 +351,7 @@ These three interfaces can be used simultaneously by different senders. The HTTP
 
 ### 6.2 HTTP REST API (Port 8585)
 
-The HTTP REST API is the primary control interface for PiCast, used by the browser extension and any programmatic sender. It runs on port 8585 and accepts JSON request/response bodies.
+The HTTP REST API is the primary control interface for boGDan, used by the browser extension and any programmatic sender. It runs on port 8585 and accepts JSON request/response bodies.
 
 | Method | Endpoint | Request Body | Response | Description |
 |---|---|---|---|---|
@@ -367,27 +367,27 @@ The `/api/cast` endpoint accepts two types of URLs:
 
 - **Direct media URLs** (e.g., `https://cdn.example.com/video.mp4`): These bypass yt-dlp resolution and are passed directly to the GStreamer pipeline. The browser extension often provides pre-resolved URLs from its interception logic.
 
-The `format` field in the cast request allows the sender to suggest a preferred format (e.g., `720p`, `1080p`, `audio-only`). If omitted, PiCast uses its default format selection strategy (720p for Tor mode, 1080p for resolution-only/off mode). The `resumePosition` field supports resuming playback from a specific timestamp, used for queue entries that were previously interrupted.
+The `format` field in the cast request allows the sender to suggest a preferred format (e.g., `720p`, `1080p`, `audio-only`). If omitted, boGDan uses its default format selection strategy (720p for Tor mode, 1080p for resolution-only/off mode). The `resumePosition` field supports resuming playback from a specific timestamp, used for queue entries that were previously interrupted.
 
 All responses include the current session state, allowing the sender to confirm the command took effect without polling. For real-time status updates, the WebSocket channel (§6.4) is preferred over polling `/api/status`.
 
 ### 6.3 UPnP/DLNA MediaRenderer (Port 49152)
 
-PiCast implements a UPnP/DLNA MediaRenderer device, based on the `gmediarender` open-source project with modifications to use PiCast's GStreamer pipeline and Tor proxy. The MediaRenderer implementation supports two UPnP service templates:
+boGDan implements a UPnP/DLNA MediaRenderer device, based on the `gmediarender` open-source project with modifications to use boGDan's GStreamer pipeline and Tor proxy. The MediaRenderer implementation supports two UPnP service templates:
 
-- **AVTransport** (urn:schemas-upnp-org:service:AVTransport:1): Controls playback (SetAVTransportURI, Play, Pause, Stop, Seek). The `SetAVTransportURI` action accepts a media URL, which PiCast passes to the GStreamer pipeline. The `CurrentTransportState` variable reports IDLE/PLAYING/PAUSED_PLAYBACK/STOPPED/TRANSITIONING.
+- **AVTransport** (urn:schemas-upnp-org:service:AVTransport:1): Controls playback (SetAVTransportURI, Play, Pause, Stop, Seek). The `SetAVTransportURI` action accepts a media URL, which boGDan passes to the GStreamer pipeline. The `CurrentTransportState` variable reports IDLE/PLAYING/PAUSED_PLAYBACK/STOPPED/TRANSITIONING.
 
-- **RenderingControl** (urn:schemas-upnp-org:service:RenderingControl:1): Controls audio volume and mute state. PiCast maps these to GStreamer's `volume` element and ALSA mixer controls.
+- **RenderingControl** (urn:schemas-upnp-org:service:RenderingControl:1): Controls audio volume and mute state. boGDan maps these to GStreamer's `volume` element and ALSA mixer controls.
 
-The DLNA interface is compatible with a wide range of sender applications, including VLC, BubbleUPnP, Hi-Fi Cast, Home Assistant's DLNA integration, and any application that implements the UPnP AVTransport control point specification. This provides a zero-install casting experience: users who already have a DLNA-compatible app on their phone can cast to PiCast without installing anything new.
+The DLNA interface is compatible with a wide range of sender applications, including VLC, BubbleUPnP, Hi-Fi Cast, Home Assistant's DLNA integration, and any application that implements the UPnP AVTransport control point specification. This provides a zero-install casting experience: users who already have a DLNA-compatible app on their phone can cast to boGDan without installing anything new.
 
-However, the DLNA interface has a significant limitation compared to the HTTP API: the URL provided via `SetAVTransportURI` must be directly fetchable by the PiCast device. DLNA control points typically send the direct streaming URL, not a page URL. This means DLNA senders cannot benefit from yt-dlp resolution — if a user wants to cast a YouTube video via DLNA, the control point must resolve the direct media URL itself, or PiCast's DLNA handler must detect that the URL is a page URL and invoke yt-dlp internally. PiCast implements the latter behavior: when `SetAVTransportURI` receives a URL that does not have a recognized media file extension (`.mp4`, `.mkv`, `.m3u8`, `.mpd`, etc.), it passes the URL through the content resolution pipeline before starting playback.
+However, the DLNA interface has a significant limitation compared to the HTTP API: the URL provided via `SetAVTransportURI` must be directly fetchable by the boGDan device. DLNA control points typically send the direct streaming URL, not a page URL. This means DLNA senders cannot benefit from yt-dlp resolution — if a user wants to cast a YouTube video via DLNA, the control point must resolve the direct media URL itself, or boGDan's DLNA handler must detect that the URL is a page URL and invoke yt-dlp internally. boGDan implements the latter behavior: when `SetAVTransportURI` receives a URL that does not have a recognized media file extension (`.mp4`, `.mkv`, `.m3u8`, `.mpd`, etc.), it passes the URL through the content resolution pipeline before starting playback.
 
 ### 6.4 WebSocket Status Channel (Port 8586)
 
-The WebSocket channel provides real-time bidirectional communication between PiCast and connected senders. It runs on port 8586 and uses JSON-encoded messages. The channel serves two purposes: pushing status updates from PiCast to senders (eliminating the need for polling), and receiving low-latency control commands from senders.
+The WebSocket channel provides real-time bidirectional communication between boGDan and connected senders. It runs on port 8586 and uses JSON-encoded messages. The channel serves two purposes: pushing status updates from boGDan to senders (eliminating the need for polling), and receiving low-latency control commands from senders.
 
-**Messages from PiCast to senders:**
+**Messages from boGDan to senders:**
 
 | Message Type | Fields | Description |
 |---|---|---|
@@ -395,7 +395,7 @@ The WebSocket channel provides real-time bidirectional communication between PiC
 | `RESOLVE_PROGRESS` | `{url, stage, progress?, error?}` | Pushed during content resolution. Stages: `started`, `fetching_info`, `extracting_url`, `completed`, `failed`. Provides feedback during yt-dlp's 3–15s resolution time. |
 | `ERROR` | `{code, message, url?, recoverable}` | Pushed on errors. Recoverable errors allow retry; non-recoverable errors transition to ERROR state. |
 
-**Messages from senders to PiCast:**
+**Messages from senders to boGDan:**
 
 | Message Type | Fields | Description |
 |---|---|---|
@@ -405,19 +405,19 @@ The WebSocket channel provides real-time bidirectional communication between PiC
 | `SEEK` | `{position}` | Same as POST /api/seek. |
 | `VOLUME` | `{level}` | Set volume (0.0–1.0). |
 
-Multiple senders can connect to the WebSocket channel simultaneously. PiCast broadcasts `MEDIA_STATUS` and `ERROR` messages to all connected senders, ensuring that a status change initiated by one sender (e.g., pressing pause in the browser extension) is immediately reflected on all other connected senders (e.g., the Home Assistant dashboard). Control commands from any sender are processed on a first-come-first-served basis — there is no sender priority or ownership model.
+Multiple senders can connect to the WebSocket channel simultaneously. boGDan broadcasts `MEDIA_STATUS` and `ERROR` messages to all connected senders, ensuring that a status change initiated by one sender (e.g., pressing pause in the browser extension) is immediately reflected on all other connected senders (e.g., the Home Assistant dashboard). Control commands from any sender are processed on a first-come-first-served basis — there is no sender priority or ownership model.
 
 ### 6.5 Device Discovery
 
-PiCast advertises itself on the local network using two discovery protocols:
+boGDan advertises itself on the local network using two discovery protocols:
 
-**mDNS (Multicast DNS):** PiCast registers two mDNS service types:
-- `_picast._tcp.local` on port 8585 — PiCast's custom service type, used by the browser extension for auto-discovery. The TXT record includes `version=1.0`, `tor=enabled`, and `maxResolution=1080p`.
+**mDNS (Multicast DNS):** boGDan registers two mDNS service types:
+- `_bogcast._tcp.local` on port 8585 — boGDan's custom service type, used by the browser extension for auto-discovery. The TXT record includes `version=1.0`, `tor=enabled`, and `maxResolution=1080p`.
 - `_http._tcp.local` on port 8585 — Standard HTTP service, used by generic mDNS browsers and home automation platforms.
 
-**SSDP (Simple Service Discovery Protocol):** PiCast sends periodic SSDP NOTIFY messages and responds to M-SEARCH queries for the UPnP MediaRenderer device type (`urn:schemas-upnp-org:device:MediaRenderer:1`) on the standard SSDP multicast address (239.255.255.250:1900). This enables discovery by UPnP control points without mDNS support.
+**SSDP (Simple Service Discovery Protocol):** boGDan sends periodic SSDP NOTIFY messages and responds to M-SEARCH queries for the UPnP MediaRenderer device type (`urn:schemas-upnp-org:device:MediaRenderer:1`) on the standard SSDP multicast address (239.255.255.250:1900). This enables discovery by UPnP control points without mDNS support.
 
-PiCast explicitly does **not** register `_googlecast._tcp.local`. Advertising as a Google Cast device would cause Chromecast-compatible senders (Android, Chrome) to discover PiCast and attempt the Cast V2 authentication handshake, which would fail. This would create a confusing user experience — the device would appear in cast menus but fail to connect. It is better to not appear as a Cast target at all than to appear and fail.
+boGDan explicitly does **not** register `_googlecast._tcp.local`. Advertising as a Google Cast device would cause Chromecast-compatible senders (Android, Chrome) to discover boGDan and attempt the Cast V2 authentication handshake, which would fail. This would create a confusing user experience — the device would appear in cast menus but fail to connect. It is better to not appear as a Cast target at all than to appear and fail.
 
 ---
 
@@ -425,23 +425,23 @@ PiCast explicitly does **not** register `_googlecast._tcp.local`. Advertising as
 
 ### 7.1 Resolution Strategy
 
-PiCast uses a two-tier resolution strategy to convert user-submitted URLs into directly playable media URLs. The distinction between the tiers is based on whether the submitted URL points to a web page (which requires extraction logic to find the embedded media) or directly to a media resource (which can be played immediately).
+boGDan uses a two-tier resolution strategy to convert user-submitted URLs into directly playable media URLs. The distinction between the tiers is based on whether the submitted URL points to a web page (which requires extraction logic to find the embedded media) or directly to a media resource (which can be played immediately).
 
-**Tier 1: yt-dlp extraction.** For page URLs (YouTube, Vimeo, Twitter, and 1,800+ other sites), PiCast invokes yt-dlp to extract the direct media URL, format metadata, and subtitle URLs. This tier handles the vast majority of user-facing casting scenarios — most users submit a page URL from their browser, not a direct media URL.
+**Tier 1: yt-dlp extraction.** For page URLs (YouTube, Vimeo, Twitter, and 1,800+ other sites), boGDan invokes yt-dlp to extract the direct media URL, format metadata, and subtitle URLs. This tier handles the vast majority of user-facing casting scenarios — most users submit a page URL from their browser, not a direct media URL.
 
-**Tier 2: Direct URL handling.** For URLs that point directly to media files (identified by file extension or Content-Type header), PiCast bypasses yt-dlp and passes the URL directly to the GStreamer pipeline. This tier handles CDN-hosted files, HLS/DASH manifests, and pre-resolved URLs from the browser extension.
+**Tier 2: Direct URL handling.** For URLs that point directly to media files (identified by file extension or Content-Type header), boGDan bypasses yt-dlp and passes the URL directly to the GStreamer pipeline. This tier handles CDN-hosted files, HLS/DASH manifests, and pre-resolved URLs from the browser extension.
 
-The tier selection is automatic. When a URL is received, PiCast checks it against a list of known media extensions (`.mp4`, `.mkv`, `.avi`, `.m3u8`, `.mpd`, `.ts`, `.webm`, `.flac`, `.mp3`, `.ogg`, `.opus`, `.wav`) and known media content types. If the URL matches, it goes to Tier 2. If not, it goes to Tier 1. If Tier 1 fails (yt-dlp cannot extract the URL), PiCast falls back to Tier 2, passing the original URL to GStreamer's `parsebin` element for auto-detection.
+The tier selection is automatic. When a URL is received, boGDan checks it against a list of known media extensions (`.mp4`, `.mkv`, `.avi`, `.m3u8`, `.mpd`, `.ts`, `.webm`, `.flac`, `.mp3`, `.ogg`, `.opus`, `.wav`) and known media content types. If the URL matches, it goes to Tier 2. If not, it goes to Tier 1. If Tier 1 fails (yt-dlp cannot extract the URL), boGDan falls back to Tier 2, passing the original URL to GStreamer's `parsebin` element for auto-detection.
 
 ### 7.2 Tier 1: yt-dlp Extraction
 
-yt-dlp is a Python-based command-line tool that extracts direct media URLs from over 1,800 websites. It is the backbone of PiCast's content resolution pipeline. PiCast invokes yt-dlp as a subprocess, routing all its network traffic through the Tor SOCKS proxy.
+yt-dlp is a Python-based command-line tool that extracts direct media URLs from over 1,800 websites. It is the backbone of boGDan's content resolution pipeline. boGDan invokes yt-dlp as a subprocess, routing all its network traffic through the Tor SOCKS proxy.
 
 The full invocation for URL extraction is:
 
 ```bash
 yt-dlp \
-  --proxy socks5h://picast-<site-hash>@127.0.0.1:9050 \
+  --proxy socks5h://bogdan-<site-hash>@127.0.0.1:9050 \
   -J \
   --no-playlist \
   --no-warnings \
@@ -451,17 +451,17 @@ yt-dlp \
   --write-auto-subs \
   --sub-langs "en.*,.*" \
   --sub-format vtt \
-  --paths /tmp/picast/subs/ \
+  --paths /tmp/bogdan/subs/ \
   "<url>"
 ```
 
 Parameter explanation:
 
-- **`--proxy socks5h://picast-<site-hash>@127.0.0.1:9050`**: Routes all yt-dlp traffic through the Tor SOCKS proxy. The `socks5h://` scheme (note the `h`) forces DNS resolution through the Tor network, preventing DNS leaks. The username `picast-<site-hash>` enables Tor stream isolation via `IsolateSOCKSAuth` — connections with different SOCKS usernames are assigned to different Tor circuits. The `<site-hash>` is a truncated SHA-256 of the URL's domain, so videos from the same site share a circuit while videos from different sites use separate circuits (see §8.3).
+- **`--proxy socks5h://bogdan-<site-hash>@127.0.0.1:9050`**: Routes all yt-dlp traffic through the Tor SOCKS proxy. The `socks5h://` scheme (note the `h`) forces DNS resolution through the Tor network, preventing DNS leaks. The username `bogdan-<site-hash>` enables Tor stream isolation via `IsolateSOCKSAuth` — connections with different SOCKS usernames are assigned to different Tor circuits. The `<site-hash>` is a truncated SHA-256 of the URL's domain, so videos from the same site share a circuit while videos from different sites use separate circuits (see §8.3).
 
-- **`-J`**: Outputs a single JSON object containing all extracted information (media URLs, format metadata, subtitles, duration, title). PiCast parses this JSON to select the optimal format and configure the GStreamer pipeline.
+- **`-J`**: Outputs a single JSON object containing all extracted information (media URLs, format metadata, subtitles, duration, title). boGDan parses this JSON to select the optimal format and configure the GStreamer pipeline.
 
-- **`--no-playlist`**: Prevents yt-dlp from extracting an entire playlist when given a video URL that is part of a playlist. PiCast handles playlist queuing separately.
+- **`--no-playlist`**: Prevents yt-dlp from extracting an entire playlist when given a video URL that is part of a playlist. boGDan handles playlist queuing separately.
 
 - **`-f "bestvideo[vcodec^=avc1][height<=720]+bestaudio/..."`**: Format selection string that prioritizes H.264 (avc1) video at 720p or below. This is critical for three reasons: (1) the BCM2711's H.264 hardware decoder is the only zero-copy-compatible decode path; (2) 720p is the practical maximum resolution for reliable playback over Tor (see §8.2); and (3) forcing H.264 avoids the HEVC/VP9/AV1 formats that require software decode or format conversion.
 
@@ -474,23 +474,23 @@ The format selection string is the most critical parameter. It encodes the follo
 3. Best video ≤720p of any codec (fallback — will fail to play if non-H.264)
 4. Best available video of any resolution/codec (last resort)
 
-If the only available format is VP9 or AV1 (common for YouTube 1080p+), yt-dlp will still extract the URL, but PiCast's GStreamer pipeline will fail to decode it (no hardware decoder available). In this case, the error is reported to the sender, and the user may need to cast from a source that provides H.264 streams. Future versions may implement software VP9 decode as a fallback for lower resolutions.
+If the only available format is VP9 or AV1 (common for YouTube 1080p+), yt-dlp will still extract the URL, but boGDan's GStreamer pipeline will fail to decode it (no hardware decoder available). In this case, the error is reported to the sender, and the user may need to cast from a source that provides H.264 streams. Future versions may implement software VP9 decode as a fallback for lower resolutions.
 
 ### 7.3 Tier 2: Direct URL Handling
 
-When the submitted URL is recognized as a direct media resource, PiCast bypasses yt-dlp and passes the URL directly to the GStreamer pipeline. This avoids the 3–15 second overhead of yt-dlp extraction and is the preferred path when the browser extension has already identified the media URL.
+When the submitted URL is recognized as a direct media resource, boGDan bypasses yt-dlp and passes the URL directly to the GStreamer pipeline. This avoids the 3–15 second overhead of yt-dlp extraction and is the preferred path when the browser extension has already identified the media URL.
 
 The direct URL path uses GStreamer's `parsebin` element for container auto-detection. `parsebin` probes the incoming data, identifies the container format (MP4, MKV, WebM, AVI, etc.), and instantiates the appropriate demuxer and parser elements automatically. For adaptive streaming formats (HLS `.m3u8`, DASH `.mpd`), the `adaptivedemux2` element handles segment fetching, manifest parsing, and bitrate adaptation.
 
-The browser extension can provide pre-resolved direct URLs via the `url` field in the `/api/cast` request, along with optional `mimeType` and `headers` fields. When these are provided, PiCast can skip even the `parsebin` auto-detection and directly instantiate the appropriate GStreamer elements, reducing startup latency to under 1 second.
+The browser extension can provide pre-resolved direct URLs via the `url` field in the `/api/cast` request, along with optional `mimeType` and `headers` fields. When these are provided, boGDan can skip even the `parsebin` auto-detection and directly instantiate the appropriate GStreamer elements, reducing startup latency to under 1 second.
 
-For HLS and DASH manifests, the `adaptivedemux2` element fetches segment lists and individual segments through the Tor proxy. Adaptive bitrate switching is disabled in PiCast v1 (the format is fixed by yt-dlp's resolution), but the demuxer's segment fetching and buffering logic is still used for reliable playback of chunked streams.
+For HLS and DASH manifests, the `adaptivedemux2` element fetches segment lists and individual segments through the Tor proxy. Adaptive bitrate switching is disabled in boGDan v1 (the format is fixed by yt-dlp's resolution), but the demuxer's segment fetching and buffering logic is still used for reliable playback of chunked streams.
 
 ### 7.4 Subtitle Extraction
 
-PiCast supports three subtitle sources:
+boGDan supports three subtitle sources:
 
-1. **yt-dlp extracted subtitles**: When yt-dlp is invoked with `--write-subs` and `--write-auto-subs`, it downloads subtitle files in VTT or SRT format. These files are stored in `/tmp/picast/subs/` and loaded by GStreamer's `subtitleoverlay` element. However, as noted in §4.3, PiCast does not use `subtitleoverlay` directly (it would break zero-copy by compositing subtitles into the video frame). Instead, the subtitle file is parsed by a custom module that extracts text, timing, and styling, and renders it on the OSD plane.
+1. **yt-dlp extracted subtitles**: When yt-dlp is invoked with `--write-subs` and `--write-auto-subs`, it downloads subtitle files in VTT or SRT format. These files are stored in `/tmp/bogdan/subs/` and loaded by GStreamer's `subtitleoverlay` element. However, as noted in §4.3, boGDan does not use `subtitleoverlay` directly (it would break zero-copy by compositing subtitles into the video frame). Instead, the subtitle file is parsed by a custom module that extracts text, timing, and styling, and renders it on the OSD plane.
 
 2. **Embedded captions (EIA-608/CEA-608)**: Some video streams, particularly North American broadcast content, carry closed captions embedded in the H.264 SEI NAL units. GStreamer's `closedcaption` element extracts these captions, which are then rendered on the OSD plane alongside or instead of external subtitles.
 
@@ -504,15 +504,15 @@ Subtitle rendering on the OSD plane preserves the zero-copy video pipeline while
 
 ### 8.1 Tor as Security Substrate
 
-Tor is not an optional privacy feature in PiCast — it is a fundamental security property. The distinction matters. A privacy feature can be disabled for convenience; a security property cannot be compromised without undermining the system's purpose.
+Tor is not an optional privacy feature in boGDan — it is a fundamental security property. The distinction matters. A privacy feature can be disabled for convenience; a security property cannot be compromised without undermining the system's purpose.
 
-Without Tor, the user's ISP (and any passive network observer) can see every URL that PiCast resolves and every media server it connects to. This creates a complete viewing history: which videos were watched, when, and from which sources. For users in surveillance-heavy environments, this metadata can be identifying or incriminating. Even in benign environments, the principle of least information applies: the ISP does not need to know what media the user consumes.
+Without Tor, the user's ISP (and any passive network observer) can see every URL that boGDan resolves and every media server it connects to. This creates a complete viewing history: which videos were watched, when, and from which sources. For users in surveillance-heavy environments, this metadata can be identifying or incriminating. Even in benign environments, the principle of least information applies: the ISP does not need to know what media the user consumes.
 
 Tor provides three layers of encryption and routes traffic through three relays (guard, middle, exit) in a circuit. The guard relay knows the user's IP address but not the destination. The exit relay knows the destination but not the user's IP address. The middle relay knows neither. No single relay can link the user to the content they are accessing.
 
-PiCast uses the C Tor daemon (`tor` package), not the Rust-based `arti` client. This decision is driven by a single critical feature: `IsolateSOCKSAuth` support. The `IsolateSOCKSAuth` option on Tor's `SocksPort` configuration ensures that SOCKS connections with different username/password credentials are assigned to different Tor circuits. PiCast uses this feature to implement per-site stream isolation (see §8.3). The `arti` client, as of its current implementation, does not support `IsolateSOCKSAuth`, making it unsuitable for PiCast's stream isolation requirements.
+boGDan uses the C Tor daemon (`tor` package), not the Rust-based `arti` client. This decision is driven by a single critical feature: `IsolateSOCKSAuth` support. The `IsolateSOCKSAuth` option on Tor's `SocksPort` configuration ensures that SOCKS connections with different username/password credentials are assigned to different Tor circuits. boGDan uses this feature to implement per-site stream isolation (see §8.3). The `arti` client, as of its current implementation, does not support `IsolateSOCKSAuth`, making it unsuitable for boGDan's stream isolation requirements.
 
-The Tor daemon runs as a system service under the `debian-tor` user, with its `SocksPort` configured on `127.0.0.1:9050` and its `ControlPort` on `127.0.0.1:9051`. PiCast does not need the control port for circuit management — stream isolation is handled entirely through SOCKS username parameters. The Tor daemon's configuration includes:
+The Tor daemon runs as a system service under the `debian-tor` user, with its `SocksPort` configured on `127.0.0.1:9050` and its `ControlPort` on `127.0.0.1:9051`. boGDan does not need the control port for circuit management — stream isolation is handled entirely through SOCKS username parameters. The Tor daemon's configuration includes:
 
 ```
 SocksPort 127.0.0.1:9050 IsolateSOCKSAuth
@@ -526,7 +526,7 @@ SafeLogging 1
 
 ### 8.2 Bandwidth Reality
 
-Tor's bandwidth is the primary constraint on PiCast's video quality. The Tor network consists of volunteer-operated relays with widely varying capacity. Effective throughput depends on the selected circuit's relay capacities, network congestion, and the number of simultaneous Tor users. PiCast cannot control which relays are selected, and throughput can vary significantly between circuits and over time.
+Tor's bandwidth is the primary constraint on boGDan's video quality. The Tor network consists of volunteer-operated relays with widely varying capacity. Effective throughput depends on the selected circuit's relay capacities, network congestion, and the number of simultaneous Tor users. boGDan cannot control which relays are selected, and throughput can vary significantly between circuits and over time.
 
 The following table summarizes realistic bandwidth expectations for video playback over Tor, based on empirical measurements across multiple circuits and time periods:
 
@@ -535,22 +535,22 @@ The following table summarizes realistic bandwidth expectations for video playba
 | 240p | 0.3–0.5 Mbps | Always reliable | <2s | Lowest quality, suitable for audio-centric content |
 | 360p | 0.5–1.0 Mbps | Reliable | 2–5s | Acceptable for most content, slight softness |
 | 480p | 1.0–2.0 Mbps | Usually reliable | 5–15s | Good quality on small screens, occasional buffering |
-| 720p | 2.0–4.0 Mbps | Possible with buffering | 15–60s | PiCast's default target. 50MB queue2 buffer provides 30–60s of playback. |
+| 720p | 2.0–4.0 Mbps | Possible with buffering | 15–60s | boGDan's default target. 50MB queue2 buffer provides 30–60s of playback. |
 | 1080p | 4.0–8.0 Mbps | Unreliable | 30–120s+ | Frequent buffering stalls. Only viable on fast circuits. |
 
-The 720p default is a practical compromise. At 2–4 Mbps, most Tor circuits can sustain playback with the queue2 buffer absorbing periodic bandwidth dips. The 50MB queue2 buffer (`max-size-bytes=52428800`) holds approximately 30–60 seconds of 720p H.264 video, providing sufficient cushion for typical Tor circuit fluctuations (500ms–2s stalls). When the buffer drops below the low threshold (10%), PiCast enters BUFFERING state and displays a buffering indicator on the OSD. When it recovers above the high threshold (80%), playback resumes.
+The 720p default is a practical compromise. At 2–4 Mbps, most Tor circuits can sustain playback with the queue2 buffer absorbing periodic bandwidth dips. The 50MB queue2 buffer (`max-size-bytes=52428800`) holds approximately 30–60 seconds of 720p H.264 video, providing sufficient cushion for typical Tor circuit fluctuations (500ms–2s stalls). When the buffer drops below the low threshold (10%), boGDan enters BUFFERING state and displays a buffering indicator on the OSD. When it recovers above the high threshold (80%), playback resumes.
 
-1080p playback is possible on favorable Tor circuits but unreliable. Users who attempt 1080p will experience frequent buffering stalls, sometimes lasting 10–30 seconds while the queue2 buffer refills. PiCast's adaptive bitrate logic (§10.3) can automatically downscale from 1080p to 720p when buffer levels are persistently low, but the re-resolution process takes 5–30 seconds (yt-dlp must re-extract the URL for a lower-quality format), during which playback continues from the remaining buffer.
+1080p playback is possible on favorable Tor circuits but unreliable. Users who attempt 1080p will experience frequent buffering stalls, sometimes lasting 10–30 seconds while the queue2 buffer refills. boGDan's adaptive bitrate logic (§10.3) can automatically downscale from 1080p to 720p when buffer levels are persistently low, but the re-resolution process takes 5–30 seconds (yt-dlp must re-extract the URL for a lower-quality format), during which playback continues from the remaining buffer.
 
 ### 8.3 Stream Isolation Strategy
 
-Stream isolation is the practice of routing different network connections through different Tor circuits, preventing correlation of traffic from different sources. PiCast implements per-site stream isolation using Tor's `IsolateSOCKSAuth` feature.
+Stream isolation is the practice of routing different network connections through different Tor circuits, preventing correlation of traffic from different sources. boGDan implements per-site stream isolation using Tor's `IsolateSOCKSAuth` feature.
 
-When a SOCKS connection is made to Tor with a username/password pair, Tor's `IsolateSOCKSAuth` option ensures that connections with different username values use different circuits. Connections with the same username share a circuit. PiCast constructs the SOCKS username as `picast-<site-hash>`, where `<site-hash>` is the first 8 characters of the SHA-256 hash of the URL's domain. For example:
+When a SOCKS connection is made to Tor with a username/password pair, Tor's `IsolateSOCKSAuth` option ensures that connections with different username values use different circuits. Connections with the same username share a circuit. boGDan constructs the SOCKS username as `bogdan-<site-hash>`, where `<site-hash>` is the first 8 characters of the SHA-256 hash of the URL's domain. For example:
 
-- YouTube URL → `picast-2cdc4e7a` (hash of "youtube.com")
-- Vimeo URL → `picast-8f3b1a09` (hash of "vimeo.com")
-- Direct CDN URL → `picast-direct` (shared circuit for all direct URLs)
+- YouTube URL → `bogdan-2cdc4e7a` (hash of "youtube.com")
+- Vimeo URL → `bogdan-8f3b1a09` (hash of "vimeo.com")
+- Direct CDN URL → `bogdan-direct` (shared circuit for all direct URLs)
 
 This strategy means that all videos from the same site share a Tor circuit, while videos from different sites use separate circuits. The rationale for per-site isolation (rather than per-video isolation) is:
 
@@ -564,15 +564,15 @@ The `IsolateSOCKSAuth` configuration in Tor ensures that connections with differ
 
 ### 8.4 DNS Leak Prevention
 
-DNS leakage is a critical concern for any Tor-routed system. If DNS queries bypass Tor and are sent to the ISP's recursive resolver, the ISP can observe the domains the user is accessing, even though the actual media traffic is Tor-encrypted. PiCast implements defense-in-depth DNS leak prevention at three layers:
+DNS leakage is a critical concern for any Tor-routed system. If DNS queries bypass Tor and are sent to the ISP's recursive resolver, the ISP can observe the domains the user is accessing, even though the actual media traffic is Tor-encrypted. boGDan implements defense-in-depth DNS leak prevention at three layers:
 
-**Layer 1: SOCKS5h protocol enforcement.** All connections to the Tor proxy use the `socks5h://` scheme (SOCKS5 with remote DNS resolution). The `h` suffix tells the SOCKS client library to send the hostname to the Tor proxy for resolution, rather than resolving it locally. The Tor proxy resolves the hostname through the Tor network (via the exit relay's DNS resolver), ensuring that DNS queries never reach the ISP's resolver. PiCast configures this in every component: GStreamer's `souphttpsrc` element (`socks5-proxy-ip` parameter), yt-dlp's `--proxy` flag, and any custom HTTP clients.
+**Layer 1: SOCKS5h protocol enforcement.** All connections to the Tor proxy use the `socks5h://` scheme (SOCKS5 with remote DNS resolution). The `h` suffix tells the SOCKS client library to send the hostname to the Tor proxy for resolution, rather than resolving it locally. The Tor proxy resolves the hostname through the Tor network (via the exit relay's DNS resolver), ensuring that DNS queries never reach the ISP's resolver. boGDan configures this in every component: GStreamer's `souphttpsrc` element (`socks5-proxy-ip` parameter), yt-dlp's `--proxy` flag, and any custom HTTP clients.
 
-**Layer 2: System resolver override.** PiCast sets `/etc/resolv.conf` to point to `127.0.0.1`, where a local `dnsmasq` instance listens. This dnsmasq is configured to **refuse all queries** — it does not forward any DNS requests upstream. This ensures that even if an application or library ignores the SOCKS5h configuration and attempts to resolve a hostname locally, the DNS query will fail immediately rather than leaking to the ISP's resolver. The failed resolution will cause the application to fall back to the SOCKS5h proxy (or fail with a clear error), rather than silently leaking.
+**Layer 2: System resolver override.** boGDan sets `/etc/resolv.conf` to point to `127.0.0.1`, where a local `dnsmasq` instance listens. This dnsmasq is configured to **refuse all queries** — it does not forward any DNS requests upstream. This ensures that even if an application or library ignores the SOCKS5h configuration and attempts to resolve a hostname locally, the DNS query will fail immediately rather than leaking to the ISP's resolver. The failed resolution will cause the application to fall back to the SOCKS5h proxy (or fail with a clear error), rather than silently leaking.
 
-**Layer 3: iptables OUTPUT chain filtering.** PiCast's firewall rules (see §11.2) block all outbound traffic except connections to `127.0.0.1:9050` (Tor SOCKS), `127.0.0.1:9051` (Tor control), and LAN addresses. UDP port 53 (DNS) outbound to any non-local address is explicitly DROPped and LOGged. This provides a kernel-level guarantee that DNS queries cannot reach an external resolver, even if the application and system resolver configurations are both misconfigured.
+**Layer 3: iptables OUTPUT chain filtering.** boGDan's firewall rules (see §11.2) block all outbound traffic except connections to `127.0.0.1:9050` (Tor SOCKS), `127.0.0.1:9051` (Tor control), and LAN addresses. UDP port 53 (DNS) outbound to any non-local address is explicitly DROPped and LOGged. This provides a kernel-level guarantee that DNS queries cannot reach an external resolver, even if the application and system resolver configurations are both misconfigured.
 
-The combination of these three layers ensures that DNS leakage is effectively impossible under normal operation. The only theoretical bypass would be a compromised Tor exit relay that injects DNS resolution into the Tor protocol itself, but this is outside PiCast's threat model — it would require compromise of the Tor protocol, which is a network-level rather than application-level concern.
+The combination of these three layers ensures that DNS leakage is effectively impossible under normal operation. The only theoretical bypass would be a compromised Tor exit relay that injects DNS resolution into the Tor protocol itself, but this is outside boGDan's threat model — it would require compromise of the Tor protocol, which is a network-level rather than application-level concern.
 
 ---
 
@@ -580,33 +580,33 @@ The combination of these three layers ensures that DNS leakage is effectively im
 
 ### 9.1 Extension Design
 
-The PiCast browser extension is the primary user-facing interface for casting content from a desktop browser. It is implemented as a Manifest V3 extension for Chrome and Firefox, using the modern declarative and event-driven APIs that Manifest V3 requires.
+The boGDan browser extension is the primary user-facing interface for casting content from a desktop browser. It is implemented as a Manifest V3 extension for Chrome and Firefox, using the modern declarative and event-driven APIs that Manifest V3 requires.
 
 The extension operates in two modes, selected automatically based on the content being viewed:
 
-**Intercept mode** uses the `declarativeNetRequest` API (Manifest V3's replacement for `webRequest` blocking) to observe network requests and identify media URLs. The extension registers dynamic rules that match common media URL patterns: `.m3u8` (HLS manifests), `.mpd` (DASH manifests), `.mp4` (MPEG-4 containers), `.ts` (MPEG-TS segments), `.webm` (WebM containers), and `.m4s` (DASH/CMAF segments). When a matching URL is observed, the extension captures it and presents a "Cast to PiCast" action to the user. If the user accepts, the intercepted URL is sent directly to PiCast's HTTP API, bypassing yt-dlp resolution entirely.
+**Intercept mode** uses the `declarativeNetRequest` API (Manifest V3's replacement for `webRequest` blocking) to observe network requests and identify media URLs. The extension registers dynamic rules that match common media URL patterns: `.m3u8` (HLS manifests), `.mpd` (DASH manifests), `.mp4` (MPEG-4 containers), `.ts` (MPEG-TS segments), `.webm` (WebM containers), and `.m4s` (DASH/CMAF segments). When a matching URL is observed, the extension captures it and presents a "Cast to boGDan" action to the user. If the user accepts, the intercepted URL is sent directly to boGDan's HTTP API, bypassing yt-dlp resolution entirely.
 
-**Fallback mode** is activated when intercept mode does not capture a usable media URL (e.g., the site uses encrypted media segments, non-standard URL patterns, or dynamically generated URLs). In fallback mode, the extension sends the page URL to PiCast's HTTP API, which invokes yt-dlp for server-side resolution. This mode is slower (3–15 seconds for yt-dlp extraction) but works with any site that yt-dlp supports.
+**Fallback mode** is activated when intercept mode does not capture a usable media URL (e.g., the site uses encrypted media segments, non-standard URL patterns, or dynamically generated URLs). In fallback mode, the extension sends the page URL to boGDan's HTTP API, which invokes yt-dlp for server-side resolution. This mode is slower (3–15 seconds for yt-dlp extraction) but works with any site that yt-dlp supports.
 
 The extension automatically selects the appropriate mode: if intercept mode has captured a media URL, it uses that; if not, it falls back to page URL submission. The user can override this behavior via the extension's settings (see §9.3).
 
-The extension's UI consists of a browser action (toolbar icon) that indicates PiCast connection status (connected/disconnected) and a popup that shows the current playback state, provides cast/stop/pause controls, and displays the PiCast device's address. The popup communicates with the PiCast WebSocket channel for real-time status updates.
+The extension's UI consists of a browser action (toolbar icon) that indicates boGDan connection status (connected/disconnected) and a popup that shows the current playback state, provides cast/stop/pause controls, and displays the boGDan device's address. The popup communicates with the boGDan WebSocket channel for real-time status updates.
 
 ### 9.2 MSE Interception (Advanced)
 
 Modern web video players use the Media Source Extensions (MSE) API to deliver content. Instead of setting a `src` attribute on a `<video>` element, the player creates a `MediaSource` object, attaches it to the video element, and feeds media segments via `SourceBuffer.appendBuffer()`. This approach allows the player to control segment fetching, adaptive bitrate switching, and DRM-encrypted segment handling.
 
-MSE interception is an advanced, opt-in feature of the PiCast browser extension that captures the exact media data being fed to the video element. The technique involves:
+MSE interception is an advanced, opt-in feature of the boGDan browser extension that captures the exact media data being fed to the video element. The technique involves:
 
 1. **Content script injection**: The extension injects a content script into the page's main world (using `world: "MAIN"` in Manifest V3). This gives the script access to the page's JavaScript context, including the `MediaSource` and `SourceBuffer` constructors.
 
 2. **Monkey-patching `SourceBuffer.appendBuffer()`**: The content script replaces the native `appendBuffer()` method with a wrapper that intercepts the `ArrayBuffer` or `TypedArray` argument before passing it to the original method. The intercepted data is forwarded to the extension's background script via `window.postMessage()`.
 
-3. **Segment reassembly**: The background script collects intercepted segments, identifies the container format (by probing the initial segments for ftyp/moof/trun boxes for MP4, or the 0x47 sync byte for MPEG-TS), and constructs a playable stream URL or sends segments to PiCast via a local HTTP proxy.
+3. **Segment reassembly**: The background script collects intercepted segments, identifies the container format (by probing the initial segments for ftyp/moof/trun boxes for MP4, or the 0x47 sync byte for MPEG-TS), and constructs a playable stream URL or sends segments to boGDan via a local HTTP proxy.
 
 This technique is powerful but has significant limitations:
 
-- **DRM-encrypted segments**: When the page uses Encrypted Media Extensions (EME), the segments captured by MSE interception are encrypted. PiCast does not support DRM decryption, so these segments are useless.
+- **DRM-encrypted segments**: When the page uses Encrypted Media Extensions (EME), the segments captured by MSE interception are encrypted. boGDan does not support DRM decryption, so these segments are useless.
 - **Content Security Policy (CSP)**: Some sites set CSP headers that block inline script injection, preventing the content script from executing in the main world.
 - **Player complexity**: Sophisticated players (YouTube, Netflix) use custom segment parsing and buffer management that may not be compatible with simple interception.
 - **Performance impact**: Capturing and forwarding every media segment adds overhead, which can cause playback stuttering on the browser side.
@@ -619,13 +619,13 @@ The browser extension exposes the following configuration options, stored via th
 
 | Setting | Type | Default | Description |
 |---|---|---|---|
-| `piAddress` | string | `picast.local` | Hostname or IP address of the PiCast device. The extension resolves `picast.local` via mDNS. Can be set to a raw IP (e.g., `192.168.1.100`) for networks without mDNS. |
+| `piAddress` | string | `bogdan.local` | Hostname or IP address of the boGDan device. The extension resolves `bogdan.local` via mDNS. Can be set to a raw IP (e.g., `192.168.1.100`) for networks without mDNS. |
 | `torMode` | enum | `full` | Tor routing mode: `full` (all traffic through Tor), `resolution-only` (only yt-dlp resolution through Tor, media fetch direct), `off` (no Tor, direct connections). The `resolution-only` mode is useful on trusted networks where media CDN traffic need not be anonymized. |
 | `preferIntercepted` | boolean | `true` | When true, intercepted media URLs are preferred over page URL submission. When false, the extension always sends the page URL for server-side yt-dlp resolution. |
 | `autoCast` | boolean | `false` | When true, the extension automatically casts detected media without requiring user interaction. Useful for "always-on" casting setups. |
-| `maxResolution` | enum | `720p` | Maximum resolution to request from PiCast. Options: `240p`, `360p`, `480p`, `720p`, `1080p`. The extension sends this as a hint in the `/api/cast` request's `format` field. |
+| `maxResolution` | enum | `720p` | Maximum resolution to request from boGDan. Options: `240p`, `360p`, `480p`, `720p`, `1080p`. The extension sends this as a hint in the `/api/cast` request's `format` field. |
 
-The `torMode` setting is particularly important. In `full` mode, the extension instructs PiCast to route both content resolution (yt-dlp) and media fetching (souphttpsrc) through Tor. In `resolution-only` mode, only yt-dlp uses Tor — the actual media stream is fetched directly from the CDN. This reduces latency and improves bandwidth (CDN connections are typically much faster than Tor), but at the cost of exposing the user's IP address to the media CDN. The `off` mode disables Tor entirely, making PiCast function as a conventional casting device.
+The `torMode` setting is particularly important. In `full` mode, the extension instructs boGDan to route both content resolution (yt-dlp) and media fetching (souphttpsrc) through Tor. In `resolution-only` mode, only yt-dlp uses Tor — the actual media stream is fetched directly from the CDN. This reduces latency and improves bandwidth (CDN connections are typically much faster than Tor), but at the cost of exposing the user's IP address to the media CDN. The `off` mode disables Tor entirely, making boGDan function as a conventional casting device.
 
 ---
 
@@ -633,7 +633,7 @@ The `torMode` setting is particularly important. In `full` mode, the extension i
 
 ### 10.1 State Machine
 
-PiCast's playback engine is governed by a finite state machine with six states. All state transitions are deterministic, atomic, and broadcast to connected senders via the WebSocket channel.
+boGDan's playback engine is governed by a finite state machine with six states. All state transitions are deterministic, atomic, and broadcast to connected senders via the WebSocket channel.
 
 | State | Description |
 |---|---|
@@ -665,7 +665,7 @@ All transitions are logged with timestamps and relevant metadata (URL, format, b
 
 ### 10.2 Playback Queue
 
-PiCast maintains a FIFO playback queue that persists across restarts via a SQLite database in WAL (Write-Ahead Logging) mode. WAL mode provides better concurrent read performance than the default rollback journal, which is important when both the playback engine and the HTTP API are reading the queue simultaneously.
+boGDan maintains a FIFO playback queue that persists across restarts via a SQLite database in WAL (Write-Ahead Logging) mode. WAL mode provides better concurrent read performance than the default rollback journal, which is important when both the playback engine and the HTTP API are reading the queue simultaneously.
 
 Each queue entry contains:
 
@@ -681,23 +681,23 @@ Each queue entry contains:
 | `addedAt` | TEXT | ISO 8601 timestamp when entry was added |
 | `state` | TEXT | Queue entry state: pending, playing, completed, failed |
 
-When the current playback ends (end-of-stream), PiCast automatically advances to the next pending entry in the queue. If the next entry has not yet been resolved, PiCast transitions to RESOLVING state for that entry. The queue can be manipulated via the HTTP API: `POST /api/queue` adds an entry, `DELETE /api/queue/<id>` removes an entry, `GET /api/queue` lists all entries.
+When the current playback ends (end-of-stream), boGDan automatically advances to the next pending entry in the queue. If the next entry has not yet been resolved, boGDan transitions to RESOLVING state for that entry. The queue can be manipulated via the HTTP API: `POST /api/queue` adds an entry, `DELETE /api/queue/<id>` removes an entry, `GET /api/queue` lists all entries.
 
-Resume positions are updated every 5 seconds during playback and on state transitions (pause, stop, error). If a playback is interrupted (e.g., power loss, crash), the resume position allows PiCast to offer to resume from where it left off when the device restarts.
+Resume positions are updated every 5 seconds during playback and on state transitions (pause, stop, error). If a playback is interrupted (e.g., power loss, crash), the resume position allows boGDan to offer to resume from where it left off when the device restarts.
 
 ### 10.3 Adaptive Bitrate Over Tor
 
 Traditional adaptive bitrate (ABR) algorithms estimate available bandwidth and select the highest quality that the estimated bandwidth can sustain. This approach fails over Tor because Tor's bandwidth is highly variable and unpredictable — a bandwidth estimate made at time T may be completely wrong at time T+1 second due to circuit congestion, relay load changes, or circuit rotation.
 
-PiCast uses a **buffer-level ABR** strategy instead. Rather than estimating bandwidth, PiCast monitors the queue2 buffer fill level and makes quality decisions based on whether the buffer is growing, stable, or shrinking. The logic is:
+boGDan uses a **buffer-level ABR** strategy instead. Rather than estimating bandwidth, boGDan monitors the queue2 buffer fill level and makes quality decisions based on whether the buffer is growing, stable, or shrinking. The logic is:
 
-- **Downscale trigger**: Buffer level drops below 15% during PLAYING state. PiCast transitions to RESOLVING for a lower-quality format of the same content. While yt-dlp re-resolves the URL (5–30 seconds), the current stream continues playing from the remaining buffer. If the buffer is exhausted before re-resolution completes, PiCast enters BUFFERING state.
+- **Downscale trigger**: Buffer level drops below 15% during PLAYING state. boGDan transitions to RESOLVING for a lower-quality format of the same content. While yt-dlp re-resolves the URL (5–30 seconds), the current stream continues playing from the remaining buffer. If the buffer is exhausted before re-resolution completes, boGDan enters BUFFERING state.
 
-- **Upscale trigger**: Buffer level has been above 70% for 30 consecutive seconds during PLAYING state. This indicates that the current Tor circuit has sufficient bandwidth for a higher quality stream. PiCast initiates background re-resolution for a higher-quality format. The switch occurs only if the new URL is successfully resolved and the buffer remains above 50%.
+- **Upscale trigger**: Buffer level has been above 70% for 30 consecutive seconds during PLAYING state. This indicates that the current Tor circuit has sufficient bandwidth for a higher quality stream. boGDan initiates background re-resolution for a higher-quality format. The switch occurs only if the new URL is successfully resolved and the buffer remains above 50%.
 
-The re-resolution process is the main challenge. Unlike CDN-based adaptive streaming (where manifest files list all available bitrates and switching is instant), PiCast must invoke yt-dlp to get a different quality URL. This takes 5–30 seconds, during which the current stream continues playing. If the buffer is exhausted before re-resolution completes, playback stalls.
+The re-resolution process is the main challenge. Unlike CDN-based adaptive streaming (where manifest files list all available bitrates and switching is instant), boGDan must invoke yt-dlp to get a different quality URL. This takes 5–30 seconds, during which the current stream continues playing. If the buffer is exhausted before re-resolution completes, playback stalls.
 
-To minimize disruption, PiCast uses GStreamer's `pad-probe` mechanism to perform a **gapless source switch**: when the new URL is ready, a second `souphttpsrc` element is instantiated and connected to the pipeline in parallel. Once the new source has buffered sufficiently, the old source's pad is blocked, and the new source's pad is linked. This provides a seamless transition without a visible gap in playback — the video may briefly drop in quality (or upsample from a lower resolution) during the transition, but it does not freeze or display a loading spinner.
+To minimize disruption, boGDan uses GStreamer's `pad-probe` mechanism to perform a **gapless source switch**: when the new URL is ready, a second `souphttpsrc` element is instantiated and connected to the pipeline in parallel. Once the new source has buffered sufficiently, the old source's pad is blocked, and the new source's pad is linked. This provides a seamless transition without a visible gap in playback — the video may briefly drop in quality (or upsample from a lower resolution) during the transition, but it does not freeze or display a loading spinner.
 
 ---
 
@@ -705,10 +705,10 @@ To minimize disruption, PiCast uses GStreamer's `pad-probe` mechanism to perform
 
 ### 11.1 LAN Access Control
 
-PiCast's network interfaces are exposed on the local network for sender connectivity. The following iptables rules restrict access to only the necessary ports and source addresses:
+boGDan's network interfaces are exposed on the local network for sender connectivity. The following iptables rules restrict access to only the necessary ports and source addresses:
 
 ```bash
-# PiCast INPUT chain rules
+# boGDan INPUT chain rules
 iptables -A INPUT -i lo -j ACCEPT                                    # Loopback
 iptables -A INPUT -m conntrack --ctstate ESTABLISHED,RELATED -j ACCEPT  # Established connections
 iptables -A INPUT -s 192.168.0.0/16 -p tcp --dport 8585 -j ACCEPT   # HTTP API (LAN only)
@@ -722,16 +722,16 @@ iptables -A INPUT -p udp --dport 5353 -j ACCEPT                     # mDNS (mult
 iptables -A INPUT -j DROP                                             # Default deny
 ```
 
-These rules ensure that PiCast's control interfaces (HTTP API, WebSocket, DLNA) are accessible only from RFC 1918 private network addresses (192.168.0.0/16 and 10.0.0.0/8). SSDP (port 1900/UDP) and mDNS (port 5353/UDP) are open to all local addresses for device discovery, as they use multicast and are inherently limited to the local network segment.
+These rules ensure that boGDan's control interfaces (HTTP API, WebSocket, DLNA) are accessible only from RFC 1918 private network addresses (192.168.0.0/16 and 10.0.0.0/8). SSDP (port 1900/UDP) and mDNS (port 5353/UDP) are open to all local addresses for device discovery, as they use multicast and are inherently limited to the local network segment.
 
-No interface is exposed on the public internet. PiCast is designed for trusted home and office networks; if exposed on a public network, the iptables rules prevent access from non-RFC1918 addresses, and the lack of authentication (in v1) means that any device on the same LAN can control playback. v2 adds pre-shared key authentication (see §13.4).
+No interface is exposed on the public internet. boGDan is designed for trusted home and office networks; if exposed on a public network, the iptables rules prevent access from non-RFC1918 addresses, and the lack of authentication (in v1) means that any device on the same LAN can control playback. v2 adds pre-shared key authentication (see §13.4).
 
 ### 11.2 Outbound Routing
 
-PiCast's outbound traffic is strictly filtered to ensure that all internet-bound traffic traverses Tor. The OUTPUT chain rules are:
+boGDan's outbound traffic is strictly filtered to ensure that all internet-bound traffic traverses Tor. The OUTPUT chain rules are:
 
 ```bash
-# PiCast OUTPUT chain rules
+# boGDan OUTPUT chain rules
 iptables -A OUTPUT -o lo -j ACCEPT                                        # Loopback
 iptables -A OUTPUT -m conntrack --ctstate ESTABLISHED,RELATED -j ACCEPT   # Established connections
 iptables -A OUTPUT -d 127.0.0.1 -p tcp --dport 9050 -j ACCEPT            # Tor SOCKS
@@ -741,28 +741,28 @@ iptables -A OUTPUT -d 10.0.0.0/8 -j ACCEPT                               # LAN (
 iptables -A OUTPUT -m owner --uid-owner debian-tor -j ACCEPT              # Tor daemon (DNS, OR connections)
 iptables -A OUTPUT -p udp --dport 5353 -j ACCEPT                         # mDNS responses
 iptables -A OUTPUT -p udp --dport 1900 -j ACCEPT                         # SSDP responses
-iptables -A OUTPUT -j LOG --log-prefix "PICAST-OUTPUT-DROP: "             # Log all other outbound
+iptables -A OUTPUT -j LOG --log-prefix "BOGDAN-OUTPUT-DROP: "             # Log all other outbound
 iptables -A OUTPUT -j DROP                                                 # Default deny
 ```
 
 The critical rules are the Tor SOCKS and control port allowances (port 9050 and 9051), which are the only permitted outbound paths for application traffic. All other outbound connections — including direct HTTP/HTTPS, DNS (UDP 53), and any other protocol — are DROPped and LOGged. The `debian-tor` user exemption allows the Tor daemon itself to make outbound connections to entry relays and directory authorities, which is necessary for Tor to function.
 
-The LOG rule provides auditability: any application that attempts to bypass Tor (due to misconfiguration, library behavior, or compromise) will generate a kernel log entry with the `PICAST-OUTPUT-DROP:` prefix, which can be monitored by PiCast's watchdog or external logging infrastructure. This defense-in-depth approach ensures that even if an application-level configuration error bypasses the SOCKS5h proxy, the kernel-level filter prevents the leak.
+The LOG rule provides auditability: any application that attempts to bypass Tor (due to misconfiguration, library behavior, or compromise) will generate a kernel log entry with the `BOGDAN-OUTPUT-DROP:` prefix, which can be monitored by boGDan's watchdog or external logging infrastructure. This defense-in-depth approach ensures that even if an application-level configuration error bypasses the SOCKS5h proxy, the kernel-level filter prevents the leak.
 
 ### 11.3 Authentication
 
-PiCast v1 does not implement authentication. This is a deliberate design decision based on the threat model: PiCast operates on a trusted LAN (home or office network), and the risk of unauthorized control is considered acceptable in this context. This is the same trust model as the original Chromecast (which also lacked authentication in its initial release and only added authentication in later firmware versions).
+boGDan v1 does not implement authentication. This is a deliberate design decision based on the threat model: boGDan operates on a trusted LAN (home or office network), and the risk of unauthorized control is considered acceptable in this context. This is the same trust model as the original Chromecast (which also lacked authentication in its initial release and only added authentication in later firmware versions).
 
 The lack of authentication means that any device on the same LAN can:
 
-- Cast media to the PiCast device
+- Cast media to the boGDan device
 - Stop, pause, or seek during playback
 - Observe playback status via the WebSocket channel
 - Modify the playback queue
 
-PiCast does not expose the filesystem, shell access, or any administrative interface over the network. The only capabilities available to a LAN attacker are media control (play/stop/pause/seek) and status observation (current URL, playback position). While annoying, these actions are not security-critical — an attacker with LAN access can already perform far more damaging actions (ARP spoofing, DNS hijacking, traffic interception) without PiCast's help.
+boGDan does not expose the filesystem, shell access, or any administrative interface over the network. The only capabilities available to a LAN attacker are media control (play/stop/pause/seek) and status observation (current URL, playback position). While annoying, these actions are not security-critical — an attacker with LAN access can already perform far more damaging actions (ARP spoofing, DNS hijacking, traffic interception) without boGDan's help.
 
-For v2, PiCast will implement pre-shared key (PSK) authentication via QR code pairing (see §13.4). The PSK approach provides a simple, visual authentication mechanism: the PiCast device displays a QR code on the HDMI output containing the device's IP address and a randomly generated key. The user scans the QR code with the browser extension or mobile app, which stores the key and includes it in all subsequent API requests. This approach does not require a cloud service, account registration, or complex PKI infrastructure.
+For v2, boGDan will implement pre-shared key (PSK) authentication via QR code pairing (see §13.4). The PSK approach provides a simple, visual authentication mechanism: the boGDan device displays a QR code on the HDMI output containing the device's IP address and a randomly generated key. The user scans the QR code with the browser extension or mobile app, which stores the key and includes it in all subsequent API requests. This approach does not require a cloud service, account registration, or complex PKI infrastructure.
 
 ---
 
@@ -770,30 +770,30 @@ For v2, PiCast will implement pre-shared key (PSK) authentication via QR code pa
 
 ### 12.1 Operating System
 
-PiCast runs on **Raspberry Pi OS Lite 64-bit** (based on Debian bookworm). The Lite variant omits all desktop components — no X11, no Wayland, no Chromium, no desktop environment, no office suite. The resulting base image is approximately 800MB, compared to 3–4GB for the full desktop image. This reduced footprint translates directly into a smaller attack surface, lower memory consumption, and faster boot times.
+boGDan runs on **Raspberry Pi OS Lite 64-bit** (based on Debian bookworm). The Lite variant omits all desktop components — no X11, no Wayland, no Chromium, no desktop environment, no office suite. The resulting base image is approximately 800MB, compared to 3–4GB for the full desktop image. This reduced footprint translates directly into a smaller attack surface, lower memory consumption, and faster boot times.
 
 The following components are explicitly removed or disabled from the base image:
 
 | Component | Reason for Removal |
 |---|---|
-| X11 / Wayland | No display server needed; PiCast talks directly to DRM/KMS |
+| X11 / Wayland | No display server needed; boGDan talks directly to DRM/KMS |
 | Chromium browser | Security liability; not needed for appliance operation |
 | desktop-base, lxde, etc. | Desktop environment packages; unnecessary |
-| pulseaudio | PiCast uses ALSA directly for audio output |
-| avahi-daemon | Replaced by PiCast's custom mDNS implementation |
-| triggerhappy | Hotkey daemon; no input devices on PiCast |
+| pulseaudio | boGDan uses ALSA directly for audio output |
+| avahi-daemon | Replaced by boGDan's custom mDNS implementation |
+| triggerhappy | Hotkey daemon; no input devices on boGDan |
 | rfkill, bluetooth | Not used; reduce attack surface |
 
 The kernel is **Linux 6.6 LTS**, the long-term support release used by Raspberry Pi OS bookworm. Two device tree overlays are required:
 
-- **`vc4-kms-v3d`**: Enables the vc4 DRM/KMS driver (for HVS and V3D GPU) and the V3D OpenGL driver. This overlay is essential for PiCast's display stack — without it, there is no DRM device at `/dev/dri/card0`.
+- **`vc4-kms-v3d`**: Enables the vc4 DRM/KMS driver (for HVS and V3D GPU) and the V3D OpenGL driver. This overlay is essential for boGDan's display stack — without it, there is no DRM device at `/dev/dri/card0`.
 
-- **`rpivid-v4l2`**: Enables the HEVC decoder's V4L2 interface at `/dev/video19` (or similar). Although PiCast v1 does not use HEVC decode, the overlay is loaded to ensure the device node is available for future use and to prevent the HEVC hardware from consuming memory if left in an undefined state.
+- **`rpivid-v4l2`**: Enables the HEVC decoder's V4L2 interface at `/dev/video19` (or similar). Although boGDan v1 does not use HEVC decode, the overlay is loaded to ensure the device node is available for future use and to prevent the HEVC hardware from consuming memory if left in an undefined state.
 
 The `/boot/firmware/config.txt` configuration includes:
 
 ```
-# PiCast configuration
+# boGDan configuration
 dtoverlay=vc4-kms-v3d
 dtoverlay=rpivid-v4l2
 disable_splash=1
@@ -805,21 +805,21 @@ The `gpu_mem=256` setting allocates 256MB of CMA (Contiguous Memory Allocator) m
 
 ### 12.2 Autostart
 
-PiCast runs as a systemd service, starting automatically on boot and restarting on failure. The service unit file is:
+boGDan runs as a systemd service, starting automatically on boot and restarting on failure. The service unit file is:
 
 ```ini
 [Unit]
-Description=PiCast Media Casting Appliance
+Description=boGDan Media Casting Appliance
 After=network-online.target tor.service
 Wants=network-online.target
 Requires=tor.service
 
 [Service]
 Type=simple
-User=picast
-Group=picast
+User=bogdan
+Group=bogdan
 SupplementaryGroups=video render audio
-ExecStart=/usr/bin/picast-server --config /etc/picast/config.toml
+ExecStart=/usr/bin/bogdan-server --config /etc/bogdan/config.toml
 Restart=on-failure
 RestartSec=5
 WatchdogSec=30
@@ -831,7 +831,7 @@ NoNewPrivileges=true
 ProtectSystem=strict
 ProtectHome=true
 PrivateTmp=true
-ReadWritePaths=/tmp/picast /var/lib/picast
+ReadWritePaths=/tmp/bogdan /var/lib/bogdan
 DeviceAllow=/dev/dri/card0 rw
 DeviceAllow=/dev/video10 rw
 DeviceAllow=/dev/video11 rw
@@ -843,23 +843,23 @@ WantedBy=multi-user.target
 
 Key design decisions:
 
-- **After/Requires**: The service starts after `network-online.target` and `tor.service`, ensuring that the network and Tor daemon are available before PiCast attempts to resolve URLs. The `Requires=tor.service` directive means that if the Tor daemon stops, PiCast is also stopped (it cannot function without Tor).
+- **After/Requires**: The service starts after `network-online.target` and `tor.service`, ensuring that the network and Tor daemon are available before boGDan attempts to resolve URLs. The `Requires=tor.service` directive means that if the Tor daemon stops, boGDan is also stopped (it cannot function without Tor).
 
-- **User/Group**: PiCast runs as a dedicated `picast` user, not as root. The user is a member of the `video` group (for DRM/KMS access), `render` group (for V3D GPU access), and `audio` group (for ALSA output). The `deviceAllow` directives grant access to specific device nodes.
+- **User/Group**: boGDan runs as a dedicated `bogdan` user, not as root. The user is a member of the `video` group (for DRM/KMS access), `render` group (for V3D GPU access), and `audio` group (for ALSA output). The `deviceAllow` directives grant access to specific device nodes.
 
-- **WatchdogSec=30**: PiCast must notify systemd every 30 seconds via `sd_notify("WATCHDOG=1")`. If it fails to do so, systemd kills and restarts the service. This detects hangs in the GStreamer pipeline or event loop.
+- **WatchdogSec=30**: boGDan must notify systemd every 30 seconds via `sd_notify("WATCHDOG=1")`. If it fails to do so, systemd kills and restarts the service. This detects hangs in the GStreamer pipeline or event loop.
 
-- **Security hardening**: `NoNewPrivileges`, `ProtectSystem=strict`, `ProtectHome=true`, and `PrivateTmp=true` limit the service's ability to escalate privileges or access the filesystem beyond its designated paths. `ReadWritePaths` restricts write access to `/tmp/picast` (temporary subtitle files, session data) and `/var/lib/picast` (SQLite queue database).
+- **Security hardening**: `NoNewPrivileges`, `ProtectSystem=strict`, `ProtectHome=true`, and `PrivateTmp=true` limit the service's ability to escalate privileges or access the filesystem beyond its designated paths. `ReadWritePaths` restricts write access to `/tmp/bogdan` (temporary subtitle files, session data) and `/var/lib/bogdan` (SQLite queue database).
 
 ### 12.3 Resource Budget
 
-PiCast's resource consumption is carefully budgeted to ensure consistent performance and thermal stability on the Raspberry Pi 4B+. The following table summarizes the expected resource usage during 1080p60 H.264 playback:
+boGDan's resource consumption is carefully budgeted to ensure consistent performance and thermal stability on the Raspberry Pi 4B+. The following table summarizes the expected resource usage during 1080p60 H.264 playback:
 
 | Resource | Budget | Typical Usage | Notes |
 |---|---|---|---|
 | CPU (4 cores) | Unlimited | ~3% (single core) | V4L2 decode + GStreamer overhead. Remaining capacity for yt-dlp resolution, OSD rendering, network I/O. |
 | RAM | 1GB minimum, 4GB recommended | ~150MB | GStreamer buffer pools (~80MB), yt-dlp Python runtime (~30MB), OSD buffers (~10MB), OS + services (~80MB), Tor daemon (~30MB). Total ~150MB, leaving ample headroom on 4GB Pi. |
-| Storage | 8GB SD card | ~800MB (OS) + ~100MB (PiCast) | No local media storage. All content is streamed. |
+| Storage | 8GB SD card | ~800MB (OS) + ~100MB (boGDan) | No local media storage. All content is streamed. |
 | Power | USB-C 5V/3A | ~5W (playback) | Idle ~2.5W, playback ~5W, peak (yt-dlp + decode + Tor) ~6W. Passive cooling sufficient at 5W. |
 | Network | 10/100/1000 Ethernet | 2–4 Mbps (Tor) | Ethernet recommended over Wi-Fi for latency stability. Wi-Fi adds 1–2W power. |
 | GPU (V3D) | — | <5% | OSD rendering only. Vast majority of V3D capacity is unused. |
@@ -881,39 +881,39 @@ Two approaches are under investigation:
 
 2. **Kernel driver conversion**: A kernel-level SAND→NV12 conversion that uses the BCM2711's ISP hardware block or a DMA engine to perform the conversion without CPU involvement. This approach would require upstream kernel patches and is dependent on the rpivid driver's DMA-BUF exporter implementation. The Raspberry Pi kernel team has discussed this feature but no implementation timeline has been announced.
 
-If either approach succeeds, PiCast v2 would support 4Kp60 HEVC playback over Tor (where bandwidth permits) or at least 1080p60 HEVC, significantly expanding the available content catalog. Many streaming services now default to HEVC for 1080p+ content, and some offer 4K only in HEVC. Enabling HEVC is essential for long-term content compatibility.
+If either approach succeeds, boGDan v2 would support 4Kp60 HEVC playback over Tor (where bandwidth permits) or at least 1080p60 HEVC, significantly expanding the available content catalog. Many streaming services now default to HEVC for 1080p+ content, and some offer 4K only in HEVC. Enabling HEVC is essential for long-term content compatibility.
 
 ### 13.2 Matter Casting Protocol (v2)
 
 Matter is an open smart home standard backed by the Connectivity Standards Alliance (CSA), with Amazon, Apple, Google, and Samsung as founding members. The Matter specification includes a casting protocol that allows devices to cast media content to Matter-compatible receivers without vendor-specific authentication or cloud dependencies.
 
-Matter casting would address PiCast's most significant usability gap: the inability to appear as a native cast target in iOS and Android operating systems. Currently, PiCast requires users to install a browser extension or use a DLNA-compatible app, which adds friction compared to the one-tap casting experience of Chromecast or AirPlay. A Matter-certified receiver would appear in the native cast UI on Android (and potentially iOS, depending on Apple's Matter adoption), providing a zero-install casting experience.
+Matter casting would address boGDan's most significant usability gap: the inability to appear as a native cast target in iOS and Android operating systems. Currently, boGDan requires users to install a browser extension or use a DLNA-compatible app, which adds friction compared to the one-tap casting experience of Chromecast or AirPlay. A Matter-certified receiver would appear in the native cast UI on Android (and potentially iOS, depending on Apple's Matter adoption), providing a zero-install casting experience.
 
-The Matter casting protocol uses standard mDNS discovery, TLS-encrypted communication, and optional authentication via device attestation. PiCast would implement the Matter Media Player device type, which exposes play/pause/stop/seek controls and accepts media URLs — a near-perfect match for PiCast's existing architecture. The main challenge is Matter certification: the CSA requires conformance testing and certification for devices that carry the Matter logo, which may be impractical for an open-source project. However, the protocol itself is open, and uncertified implementations can interoperate with many controllers.
+The Matter casting protocol uses standard mDNS discovery, TLS-encrypted communication, and optional authentication via device attestation. boGDan would implement the Matter Media Player device type, which exposes play/pause/stop/seek controls and accepts media URLs — a near-perfect match for boGDan's existing architecture. The main challenge is Matter certification: the CSA requires conformance testing and certification for devices that carry the Matter logo, which may be impractical for an open-source project. However, the protocol itself is open, and uncertified implementations can interoperate with many controllers.
 
 ### 13.3 arti Integration (v2)
 
-`arti` is the Rust-based Tor client developed by the Tor Project as a eventual successor to the C-based `tor` daemon. arti offers several advantages for PiCast:
+`arti` is the Rust-based Tor client developed by the Tor Project as a eventual successor to the C-based `tor` daemon. arti offers several advantages for boGDan:
 
-1. **In-process operation**: arti can be embedded directly in the PiCast application as a Rust library, eliminating the need for a separate daemon process. This simplifies deployment, reduces attack surface (no inter-process communication), and eliminates the `debian-tor` user exemption in the iptables OUTPUT chain.
+1. **In-process operation**: arti can be embedded directly in the boGDan application as a Rust library, eliminating the need for a separate daemon process. This simplifies deployment, reduces attack surface (no inter-process communication), and eliminates the `debian-tor` user exemption in the iptables OUTPUT chain.
 
 2. **tokio-native async**: arti uses Rust's tokio asynchronous runtime, which integrates naturally with GStreamer's GLib main loop via a custom `GSource`. This provides more efficient I/O handling than the C Tor daemon's separate event loop.
 
 3. **Memory safety**: arti is written in Rust, which provides compile-time memory safety guarantees. The C Tor daemon has a history of memory corruption vulnerabilities (CVE-2024-{...}), and an in-process Rust client would eliminate this attack surface.
 
-However, arti currently lacks a critical feature: **`IsolateSOCKSAuth` equivalent**. arti's stream isolation API does not support per-connection SOCKS username-based circuit assignment, which PiCast relies on for per-site stream isolation (§8.3). The Tor Project has acknowledged this gap, but no implementation timeline has been announced.
+However, arti currently lacks a critical feature: **`IsolateSOCKSAuth` equivalent**. arti's stream isolation API does not support per-connection SOCKS username-based circuit assignment, which boGDan relies on for per-site stream isolation (§8.3). The Tor Project has acknowledged this gap, but no implementation timeline has been announced.
 
-PiCast v2 will evaluate arti integration when the stream isolation API is available. Until then, the C Tor daemon remains the only option that supports PiCast's security requirements.
+boGDan v2 will evaluate arti integration when the stream isolation API is available. Until then, the C Tor daemon remains the only option that supports boGDan's security requirements.
 
 ### 13.4 LAN Authentication (v2)
 
-PiCast v2 will implement pre-shared key (PSK) authentication to address the v1 limitation of unauthenticated LAN access (§11.3). The planned authentication mechanism uses QR code pairing:
+boGDan v2 will implement pre-shared key (PSK) authentication to address the v1 limitation of unauthenticated LAN access (§11.3). The planned authentication mechanism uses QR code pairing:
 
-1. On first boot (or after a factory reset), PiCast generates a random 256-bit key and displays a QR code on the HDMI output. The QR code encodes a JSON payload containing the device's IP address (`picast.local`), port numbers, and the PSK.
+1. On first boot (or after a factory reset), boGDan generates a random 256-bit key and displays a QR code on the HDMI output. The QR code encodes a JSON payload containing the device's IP address (`bogdan.local`), port numbers, and the PSK.
 
 2. The user scans the QR code with the browser extension (via the camera API) or a mobile companion app. The extension/app stores the PSK in its local secure storage (chrome.storage with OS keychain integration on Chrome, Keychain on macOS, libsecret on Linux).
 
-3. All subsequent API requests include an `Authorization: Bearer <PSK>` header. PiCast verifies the PSK against its stored key before processing the request. WebSocket connections authenticate via a `AUTH` message sent immediately after connection.
+3. All subsequent API requests include an `Authorization: Bearer <PSK>` header. boGDan verifies the PSK against its stored key before processing the request. WebSocket connections authenticate via a `AUTH` message sent immediately after connection.
 
 4. New devices can be paired by displaying the QR code on demand (via a physical button on the Pi's GPIO header or by pressing the existing paired device's "Add device" button, which temporarily re-displays the QR code).
 
@@ -921,22 +921,22 @@ The QR code approach provides several advantages: it is visual and intuitive, it
 
 ### 13.5 MSE Segment Proxy (v2)
 
-The browser extension's MSE interception feature (§9.2) captures media segments from the browser's video player, but the captured segments must be delivered to PiCast for playback. In v1, MSE interception is limited to capturing URLs and metadata — the actual segment data is not forwarded, because there is no mechanism to stream arbitrary binary data from the extension to PiCast.
+The browser extension's MSE interception feature (§9.2) captures media segments from the browser's video player, but the captured segments must be delivered to boGDan for playback. In v1, MSE interception is limited to capturing URLs and metadata — the actual segment data is not forwarded, because there is no mechanism to stream arbitrary binary data from the extension to boGDan.
 
-PiCast v2 will implement an **MSE Segment Proxy**: a local HTTP server running on the browser's host machine (not on the Pi) that re-serves the intercepted MSE segments. The workflow is:
+boGDan v2 will implement an **MSE Segment Proxy**: a local HTTP server running on the browser's host machine (not on the Pi) that re-serves the intercepted MSE segments. The workflow is:
 
 1. The browser extension intercepts `SourceBuffer.appendBuffer()` calls and stores the segment data in the extension's background page.
 
 2. The extension starts a local HTTP server on a random high port (e.g., `http://localhost:54321/`) and registers the intercepted segments at sequential URLs (e.g., `/segment/0`, `/segment/1`, ...).
 
-3. The extension sends PiCast a special cast URL: `http://<browser-host-ip>:54321/manifest.json`, which contains a synthetic HLS or DASH manifest pointing to the local segment URLs.
+3. The extension sends boGDan a special cast URL: `http://<browser-host-ip>:54321/manifest.json`, which contains a synthetic HLS or DASH manifest pointing to the local segment URLs.
 
-4. PiCast fetches the manifest and segments from the browser host's HTTP server (which is on the LAN, not through Tor), decodes and displays the video.
+4. boGDan fetches the manifest and segments from the browser host's HTTP server (which is on the LAN, not through Tor), decodes and displays the video.
 
-This approach enables casting from sites that use token-authenticated media URLs (where the URL is only valid from the browser's IP address or with the browser's cookies). Since PiCast fetches the segments from the browser host (which is on the same LAN), the browser host's IP address and authentication tokens are presented to the media server, and the segments are re-served to PiCast locally.
+This approach enables casting from sites that use token-authenticated media URLs (where the URL is only valid from the browser's IP address or with the browser's cookies). Since boGDan fetches the segments from the browser host (which is on the same LAN), the browser host's IP address and authentication tokens are presented to the media server, and the segments are re-served to boGDan locally.
 
 The main challenge is performance: the browser host must re-serve segments at sufficient bitrate for real-time playback (2–8 Mbps for H.264), which is easily achievable on a modern computer but may be problematic on low-power devices. Additionally, the extension must manage segment lifecycle (evicting old segments to limit memory usage) and handle end-of-stream signaling.
 
 ---
 
-*PiCast Architecture Paper v1.0 — End of Document*
+*boGDan Architecture Paper v1.0 — End of Document*

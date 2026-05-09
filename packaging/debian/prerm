@@ -1,14 +1,14 @@
 #!/bin/bash
-# PiCast pre-remove script
+# boGDan pre-remove script
 set -e
 
 case "$1" in
     remove|upgrade|deconfigure)
-        # Stop the picast service
+        # Stop the bogdan service
         if command -v systemctl >/dev/null 2>&1; then
-            if systemctl is-active --quiet picast 2>/dev/null; then
-                systemctl stop picast || true
-                echo "picast: Service stopped"
+            if systemctl is-active --quiet bogdan 2>/dev/null; then
+                systemctl stop bogdan || true
+                echo "bogdan: Service stopped"
             fi
         fi
         ;;

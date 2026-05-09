@@ -1,19 +1,19 @@
 #!/usr/bin/env bash
 # ╔══════════════════════════════════════════════════════════════════╗
-# ║  PiCast Setup Script — Production-Grade One-Command Install     ║
+# ║  boGDan Setup Script — Production-Grade One-Command Install     ║
 # ║  Target: Raspberry Pi OS Lite 64-bit (bookworm) / Debian       ║
 # ║  Run as: sudo bash scripts/setup.sh                            ║
 # ╚══════════════════════════════════════════════════════════════════╝
 set -euo pipefail
 
 # ─── Version ────────────────────────────────────────────────────────
-PICAST_SETUP_VERSION="0.1.0"
+BOGDAN_SETUP_VERSION="0.1.0"
 
 # ─── Paths (resolve repo root relative to this script) ──────────────
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO_ROOT="$(cd "${SCRIPT_DIR}/.." && pwd)"
 CONFIG_DIR="${REPO_ROOT}/config"
-LOG_FILE="/var/log/picast-setup.log"
+LOG_FILE="/var/log/bogdan-setup.log"
 
 # ─── Colors & Output ────────────────────────────────────────────────
 RED='\033[0;31m'
@@ -24,7 +24,7 @@ CYAN='\033[0;36m'
 BOLD='\033[1m'
 NC='\033[0m' # No Color
 
-log()       { echo -e "${GREEN}[PICAST]${NC} $*" | tee -a "$LOG_FILE"; }
+log()       { echo -e "${GREEN}[BOGDAN]${NC} $*" | tee -a "$LOG_FILE"; }
 warn()      { echo -e "${YELLOW}[WARN]${NC}  $*" | tee -a "$LOG_FILE" >&2; }
 error()     { echo -e "${RED}[ERROR]${NC} $*" | tee -a "$LOG_FILE" >&2; }
 info()      { echo -e "${BLUE}[INFO]${NC}  $*" | tee -a "$LOG_FILE"; }
@@ -68,7 +68,7 @@ backup_file() {
         return 0
     fi
     if [ -z "$BACKUP_DIR" ]; then
-        BACKUP_DIR="/var/backups/picast-setup-$(date +%Y%m%d-%H%M%S)"
+        BACKUP_DIR="/var/backups/bogdan-setup-$(date +%Y%m%d-%H%M%S)"
         mkdir -p "$BACKUP_DIR"
     fi
     local base
@@ -80,23 +80,23 @@ backup_file() {
 # ─── Usage / Help ───────────────────────────────────────────────────
 usage() {
     cat <<EOF
-${BOLD}PiCast Setup Script v${PICAST_SETUP_VERSION}${NC}
+${BOLD}boGDan Setup Script v${BOGDAN_SETUP_VERSION}${NC}
 
 Usage: sudo bash scripts/setup.sh [OPTIONS]
 
 Options:
   --skip-tor         Skip Tor configuration
-  --skip-build       Skip building PiCast from source
+  --skip-build       Skip building boGDan from source
   --skip-firewall    Skip firewall/iptables configuration
   --cross-compile    Cross-compile for aarch64 from x86_64 host
-  --uninstall        Remove PiCast completely
+  --uninstall        Remove boGDan completely
   --help             Show this help message
 
 Examples:
   sudo bash scripts/setup.sh                    # Full install
   sudo bash scripts/setup.sh --skip-build       # Install without building
   sudo bash scripts/setup.sh --cross-compile    # Cross-compile for Pi on x86
-  sudo bash scripts/setup.sh --uninstall        # Remove PiCast
+  sudo bash scripts/setup.sh --uninstall        # Remove boGDan
 EOF
     exit 0
 }
@@ -163,7 +163,7 @@ preflight_checks() {
 
     # Initialize log file
     mkdir -p "$(dirname "$LOG_FILE")"
-    echo "=== PiCast Setup Log — $(date) ===" > "$LOG_FILE"
+    echo "=== boGDan Setup Log — $(date) ===" > "$LOG_FILE"
     info "Logging to ${LOG_FILE}"
 }
 
@@ -171,58 +171,58 @@ preflight_checks() {
 do_uninstall() {
     echo ""
     log "${BOLD}╔══════════════════════════════════════════╗${NC}"
-    log "${BOLD}║     PiCast Uninstall                    ║${NC}"
+    log "${BOLD}║     boGDan Uninstall                    ║${NC}"
     log "${BOLD}╚══════════════════════════════════════════╝${NC}"
     echo ""
 
     # Stop services
-    if systemctl is-active --quiet picast 2>/dev/null; then
-        info "Stopping picast service..."
-        systemctl stop picast || true
+    if systemctl is-active --quiet bogdan 2>/dev/null; then
+        info "Stopping bogdan service..."
+        systemctl stop bogdan || true
     fi
-    if systemctl is-enabled --quiet picast 2>/dev/null; then
-        info "Disabling picast service..."
-        systemctl disable picast || true
+    if systemctl is-enabled --quiet bogdan 2>/dev/null; then
+        info "Disabling bogdan service..."
+        systemctl disable bogdan || true
     fi
 
     # Remove service file
-    if [ -f /etc/systemd/system/picast.service ]; then
-        rm -f /etc/systemd/system/picast.service
+    if [ -f /etc/systemd/system/bogdan.service ]; then
+        rm -f /etc/systemd/system/bogdan.service
         systemctl daemon-reload
         info "Removed systemd service"
     fi
 
     # Remove binary
-    if [ -f /usr/local/bin/picast-server ]; then
-        rm -f /usr/local/bin/picast-server
-        info "Removed /usr/local/bin/picast-server"
+    if [ -f /usr/local/bin/bogdan-server ]; then
+        rm -f /usr/local/bin/bogdan-server
+        info "Removed /usr/local/bin/bogdan-server"
     fi
 
     # Remove user
-    if id -u picast &>/dev/null; then
-        userdel picast 2>/dev/null || true
-        info "Removed picast user"
+    if id -u bogdan &>/dev/null; then
+        userdel bogdan 2>/dev/null || true
+        info "Removed bogdan user"
     fi
 
     # Remove data directory
-    if [ -d /var/lib/picast ]; then
-        rm -rf /var/lib/picast
-        info "Removed /var/lib/picast"
+    if [ -d /var/lib/bogdan ]; then
+        rm -rf /var/lib/bogdan
+        info "Removed /var/lib/bogdan"
     fi
 
     # Remove temp directory
-    if [ -d /tmp/picast ]; then
-        rm -rf /tmp/picast
-        info "Removed /tmp/picast"
+    if [ -d /tmp/bogdan ]; then
+        rm -rf /tmp/bogdan
+        info "Removed /tmp/bogdan"
     fi
 
     # Optionally restore Tor config
     if [ -f /etc/tor/torrc ] && command -v tor &>/dev/null; then
-        warn "Tor config at /etc/tor/torrc was modified by PiCast — review manually"
+        warn "Tor config at /etc/tor/torrc was modified by boGDan — review manually"
     fi
 
     echo ""
-    log "${GREEN}PiCast has been uninstalled.${NC}"
+    log "${GREEN}boGDan has been uninstalled.${NC}"
     exit 0
 }
 
@@ -343,13 +343,13 @@ configure_kernel() {
         backup_file /boot/config.txt
         cat >> /boot/config.txt << 'EOF'
 
-# PiCast: Enable DRM/KMS with V3D GPU
+# boGDan: Enable DRM/KMS with V3D GPU
 dtoverlay=vc4-kms-v3d
 
-# PiCast: Enable HEVC V4L2 decoder (for v2)
+# boGDan: Enable HEVC V4L2 decoder (for v2)
 # dtoverlay=rpivid-v4l2
 
-# PiCast: Disable WiFi and Bluetooth (reduce attack surface, save power)
+# boGDan: Disable WiFi and Bluetooth (reduce attack surface, save power)
 # dtoverlay=disable-wifi
 # dtoverlay=disable-bt
 EOF
@@ -423,10 +423,10 @@ configure_firewall() {
     info "Firewall rules applied and persisted"
 }
 
-# ─── Build PiCast ───────────────────────────────────────────────────
-build_picast() {
+# ─── Build boGDan ───────────────────────────────────────────────────
+build_bogdan() {
     step_next
-    step "Building PiCast..."
+    step "Building boGDan..."
 
     if [ "$SKIP_BUILD" = true ]; then
         info "Skipping build (--skip-build)"
@@ -451,17 +451,17 @@ build_picast() {
     info "Build complete"
 }
 
-# ─── Install PiCast ─────────────────────────────────────────────────
-install_picast() {
+# ─── Install boGDan ─────────────────────────────────────────────────
+install_bogdan() {
     step_next
-    step "Installing PiCast..."
+    step "Installing boGDan..."
 
     # Determine binary path based on build target
     local binary_path
     if [ "$CROSS_COMPILE" = true ]; then
-        binary_path="${REPO_ROOT}/target/aarch64-unknown-linux-gnu/release/picast"
+        binary_path="${REPO_ROOT}/target/aarch64-unknown-linux-gnu/release/bogdan"
     else
-        binary_path="${REPO_ROOT}/target/release/picast"
+        binary_path="${REPO_ROOT}/target/release/bogdan"
     fi
 
     if [ "$SKIP_BUILD" = false ] && [ ! -f "$binary_path" ]; then
@@ -469,120 +469,120 @@ install_picast() {
         exit 1
     fi
 
-    # Create picast user if it doesn't exist
-    if ! id -u picast &>/dev/null; then
-        useradd -r -m -s /usr/sbin/nologin picast
-        info "Created picast system user"
+    # Create bogdan user if it doesn't exist
+    if ! id -u bogdan &>/dev/null; then
+        useradd -r -m -s /usr/sbin/nologin bogdan
+        info "Created bogdan system user"
     else
-        info "picast user already exists"
+        info "bogdan user already exists"
     fi
 
     # Ensure user is in required groups (idempotent)
-    usermod -aG video,render,audio picast
-    info "picast user in groups: video, render, audio"
+    usermod -aG video,render,audio bogdan
+    info "bogdan user in groups: video, render, audio"
 
     # Install binary
     if [ "$SKIP_BUILD" = false ]; then
-        cp "$binary_path" /usr/local/bin/picast-server
-        chmod 755 /usr/local/bin/picast-server
-        info "Installed binary to /usr/local/bin/picast-server"
+        cp "$binary_path" /usr/local/bin/bogdan-server
+        chmod 755 /usr/local/bin/bogdan-server
+        info "Installed binary to /usr/local/bin/bogdan-server"
     fi
 
     # Create data directory
-    mkdir -p /var/lib/picast
-    chown picast:picast /var/lib/picast
-    info "Data directory: /var/lib/picast"
+    mkdir -p /var/lib/bogdan
+    chown bogdan:bogdan /var/lib/bogdan
+    info "Data directory: /var/lib/bogdan"
 
-    # Create resolve cache directory (already under /var/lib/picast)
+    # Create resolve cache directory (already under /var/lib/bogdan)
     # The SQLite cache file will be created automatically by the resolver.
-    info "Resolve cache: /var/lib/picast/resolve-cache.db"
+    info "Resolve cache: /var/lib/bogdan/resolve-cache.db"
 
     # Generate self-signed TLS certificate for HTTPS/WSS
-    local cert_dir="/etc/picast/tls"
-    local cert_path="${cert_dir}/picast.pem"
-    local key_path="${cert_dir}/picast-key.pem"
+    local cert_dir="/etc/bogdan/tls"
+    local cert_path="${cert_dir}/bogdan.pem"
+    local key_path="${cert_dir}/bogdan-key.pem"
     if [ ! -f "$cert_path" ] || [ ! -f "$key_path" ]; then
         info "Generating self-signed TLS certificate..."
         mkdir -p "$cert_dir"
         # Get the Pi's hostname and IP for the SAN
         local hostname
-        hostname="$(hostname 2>/dev/null || echo 'picast')" 
+        hostname="$(hostname 2>/dev/null || echo 'bogdan')" 
         local ip_addr
         ip_addr="$(hostname -I 2>/dev/null | cut -d' ' -f1 || echo '192.168.1.1')"
         openssl req -x509 -newkey rsa:2048 -sha256 -days 3650 \
             -nodes -keyout "$key_path" -out "$cert_path" \
-            -subj "/CN=PiCast/O=PiCast/C=US" \
-            -addext "subjectAltName=DNS:${hostname}.local,DNS:${hostname},DNS:picast.local,IP:${ip_addr},IP:127.0.0.1" \
+            -subj "/CN=boGDan/O=boGDan/C=US" \
+            -addext "subjectAltName=DNS:${hostname}.local,DNS:${hostname},DNS:bogdan.local,IP:${ip_addr},IP:127.0.0.1" \
             2>/dev/null
         chmod 644 "$cert_path"
         chmod 600 "$key_path"
-        chown picast:picast "$cert_path" "$key_path"
+        chown bogdan:bogdan "$cert_path" "$key_path"
         info "TLS certificate generated: ${cert_path}"
-        info "  SANs: ${hostname}.local, ${hostname}, picast.local, ${ip_addr}, 127.0.0.1"
+        info "  SANs: ${hostname}.local, ${hostname}, bogdan.local, ${ip_addr}, 127.0.0.1"
     else
         info "TLS certificate already exists: ${cert_path}"
     fi
 
     # Create temp directory
-    mkdir -p /tmp/picast/subs
-    chown picast:picast /tmp/picast
-    info "Temp directory: /tmp/picast"
+    mkdir -p /tmp/bogdan/subs
+    chown bogdan:bogdan /tmp/bogdan
+    info "Temp directory: /tmp/bogdan"
 
     # Install TOML config file
-    mkdir -p /etc/picast
-    # Prefer deploy/picast.toml (production Pi config) over picast.toml.example (generic)
+    mkdir -p /etc/bogdan
+    # Prefer deploy/bogdan.toml (production Pi config) over bogdan.toml.example (generic)
     local toml_source=""
-    if [ -f "${REPO_ROOT}/deploy/picast.toml" ]; then
-        toml_source="${REPO_ROOT}/deploy/picast.toml"
-    elif [ -f "${REPO_ROOT}/picast.toml.example" ]; then
-        toml_source="${REPO_ROOT}/picast.toml.example"
+    if [ -f "${REPO_ROOT}/deploy/bogdan.toml" ]; then
+        toml_source="${REPO_ROOT}/deploy/bogdan.toml"
+    elif [ -f "${REPO_ROOT}/bogdan.toml.example" ]; then
+        toml_source="${REPO_ROOT}/bogdan.toml.example"
     fi
     if [ -n "$toml_source" ]; then
-        if [ ! -f /etc/picast/picast.toml ]; then
-            cp "$toml_source" /etc/picast/picast.toml
-            chown picast:picast /etc/picast/picast.toml
-            chmod 644 /etc/picast/picast.toml
+        if [ ! -f /etc/bogdan/bogdan.toml ]; then
+            cp "$toml_source" /etc/bogdan/bogdan.toml
+            chown bogdan:bogdan /etc/bogdan/bogdan.toml
+            chmod 644 /etc/bogdan/bogdan.toml
             # Add TLS paths to the config
-            if ! grep -q "tls_cert_path" /etc/picast/picast.toml 2>/dev/null; then
-                echo "" >> /etc/picast/picast.toml
-                echo "# TLS certificate for HTTPS/WSS (self-signed by setup.sh)" >> /etc/picast/picast.toml
-                echo "tls_cert_path = \"/etc/picast/tls/picast.pem\"" >> /etc/picast/picast.toml
-                echo "tls_key_path = \"/etc/picast/tls/picast-key.pem\"" >> /etc/picast/picast.toml
+            if ! grep -q "tls_cert_path" /etc/bogdan/bogdan.toml 2>/dev/null; then
+                echo "" >> /etc/bogdan/bogdan.toml
+                echo "# TLS certificate for HTTPS/WSS (self-signed by setup.sh)" >> /etc/bogdan/bogdan.toml
+                echo "tls_cert_path = \"/etc/bogdan/tls/bogdan.pem\"" >> /etc/bogdan/bogdan.toml
+                echo "tls_key_path = \"/etc/bogdan/tls/bogdan-key.pem\"" >> /etc/bogdan/bogdan.toml
             fi
-            info "Installed config to /etc/picast/picast.toml (from $(basename "$toml_source"))"
+            info "Installed config to /etc/bogdan/bogdan.toml (from $(basename "$toml_source"))"
         else
-            info "Config already exists at /etc/picast/picast.toml — not overwriting"
+            info "Config already exists at /etc/bogdan/bogdan.toml — not overwriting"
             # Add TLS paths if missing from existing config
-            if ! grep -q "tls_cert_path" /etc/picast/picast.toml 2>/dev/null; then
-                echo "" >> /etc/picast/picast.toml
-                echo "# TLS certificate for HTTPS/WSS (self-signed by setup.sh)" >> /etc/picast/picast.toml
-                echo "tls_cert_path = \"/etc/picast/tls/picast.pem\"" >> /etc/picast/picast.toml
-                echo "tls_key_path = \"/etc/picast/tls/picast-key.pem\"" >> /etc/picast/picast.toml
+            if ! grep -q "tls_cert_path" /etc/bogdan/bogdan.toml 2>/dev/null; then
+                echo "" >> /etc/bogdan/bogdan.toml
+                echo "# TLS certificate for HTTPS/WSS (self-signed by setup.sh)" >> /etc/bogdan/bogdan.toml
+                echo "tls_cert_path = \"/etc/bogdan/tls/bogdan.pem\"" >> /etc/bogdan/bogdan.toml
+                echo "tls_key_path = \"/etc/bogdan/tls/bogdan-key.pem\"" >> /etc/bogdan/bogdan.toml
                 info "Added TLS paths to existing config"
             fi
         fi
     else
-        warn "No picast.toml found — skipping config installation"
+        warn "No bogdan.toml found — skipping config installation"
     fi
 
     # Install systemd service (prefer deploy/ version with Pi-specific hardening)
     local service_source=""
-    if [ -f "${REPO_ROOT}/deploy/picast.service" ]; then
-        service_source="${REPO_ROOT}/deploy/picast.service"
-    elif [ -f "${CONFIG_DIR}/picast.service" ]; then
-        service_source="${CONFIG_DIR}/picast.service"
+    if [ -f "${REPO_ROOT}/deploy/bogdan.service" ]; then
+        service_source="${REPO_ROOT}/deploy/bogdan.service"
+    elif [ -f "${CONFIG_DIR}/bogdan.service" ]; then
+        service_source="${CONFIG_DIR}/bogdan.service"
     fi
     if [ -n "$service_source" ]; then
-        backup_file /etc/systemd/system/picast.service
-        # Patch ExecStart to use picast-server
-        sed 's|ExecStart=/usr/local/bin/picast|ExecStart=/usr/local/bin/picast-server|' \
-            "$service_source" > /etc/systemd/system/picast.service
-        chmod 644 /etc/systemd/system/picast.service
+        backup_file /etc/systemd/system/bogdan.service
+        # Patch ExecStart to use bogdan-server
+        sed 's|ExecStart=/usr/local/bin/bogdan|ExecStart=/usr/local/bin/bogdan-server|' \
+            "$service_source" > /etc/systemd/system/bogdan.service
+        chmod 644 /etc/systemd/system/bogdan.service
         systemctl daemon-reload
-        systemctl enable picast
+        systemctl enable bogdan
         info "Systemd service installed and enabled (from $(basename "$service_source"))"
     else
-        warn "picast.service not found — skipping service installation"
+        warn "bogdan.service not found — skipping service installation"
     fi
 }
 
@@ -594,23 +594,23 @@ verify_installation() {
     local failed=0
 
     # Check binary
-    if [ -x /usr/local/bin/picast-server ]; then
-        info "  [OK] /usr/local/bin/picast-server exists and is executable"
+    if [ -x /usr/local/bin/bogdan-server ]; then
+        info "  [OK] /usr/local/bin/bogdan-server exists and is executable"
     else
-        error "  [FAIL] /usr/local/bin/picast-server not found or not executable"
+        error "  [FAIL] /usr/local/bin/bogdan-server not found or not executable"
         failed=1
     fi
 
     # Check that the binary can run (basic smoke test)
-    if [ -x /usr/local/bin/picast-server ]; then
-        if /usr/local/bin/picast-server --version &>/dev/null; then
-            info "  [OK] picast-server --version succeeds"
+    if [ -x /usr/local/bin/bogdan-server ]; then
+        if /usr/local/bin/bogdan-server --version &>/dev/null; then
+            info "  [OK] bogdan-server --version succeeds"
         else
             # Binary might not support --version, try --help
-            if /usr/local/bin/picast-server --help &>/dev/null; then
-                info "  [OK] picast-server --help succeeds"
+            if /usr/local/bin/bogdan-server --help &>/dev/null; then
+                info "  [OK] bogdan-server --help succeeds"
             else
-                warn "  [WARN] Cannot verify picast-server runs (no --version/--help)"
+                warn "  [WARN] Cannot verify bogdan-server runs (no --version/--help)"
             fi
         fi
     fi
@@ -629,36 +629,36 @@ verify_installation() {
         fi
     fi
 
-    # Check PiCast service
-    if systemctl is-enabled --quiet picast 2>/dev/null; then
-        info "  [OK] picast service is enabled"
+    # Check boGDan service
+    if systemctl is-enabled --quiet bogdan 2>/dev/null; then
+        info "  [OK] bogdan service is enabled"
     else
-        error "  [FAIL] picast service is not enabled"
+        error "  [FAIL] bogdan service is not enabled"
         failed=1
     fi
 
     # Check user
-    if id -u picast &>/dev/null; then
-        info "  [OK] picast user exists"
+    if id -u bogdan &>/dev/null; then
+        info "  [OK] bogdan user exists"
     else
-        error "  [FAIL] picast user does not exist"
+        error "  [FAIL] bogdan user does not exist"
         failed=1
     fi
 
     # Check data directory
-    if [ -d /var/lib/picast ]; then
-        info "  [OK] /var/lib/picast exists"
+    if [ -d /var/lib/bogdan ]; then
+        info "  [OK] /var/lib/bogdan exists"
     else
-        error "  [FAIL] /var/lib/picast does not exist"
+        error "  [FAIL] /var/lib/bogdan does not exist"
         failed=1
     fi
 
     # Check firewall
     if [ "$SKIP_FIREWALL" = false ]; then
         if iptables -L INPUT 2>/dev/null | grep -q "8585"; then
-            info "  [OK] Firewall rules include PiCast port 8585"
+            info "  [OK] Firewall rules include boGDan port 8585"
         else
-            warn "  [WARN] Firewall rules may not include PiCast ports"
+            warn "  [WARN] Firewall rules may not include boGDan ports"
         fi
     fi
 
@@ -681,7 +681,7 @@ print_banner() {
     echo -e "${CYAN}${BOLD}║   ╚═════╝ ╚═╝  ╚═╝ ╚═════╝   ╚═╝   ╚══════╝       ║${NC}"
     echo -e "${CYAN}${BOLD}║                                                   ║${NC}"
     echo -e "${CYAN}${BOLD}║   Tor-routed media casting appliance              ║${NC}"
-    echo -e "${CYAN}${BOLD}║   Setup v${PICAST_SETUP_VERSION}                                   ║${NC}"
+    echo -e "${CYAN}${BOLD}║   Setup v${BOGDAN_SETUP_VERSION}                                   ║${NC}"
     echo -e "${CYAN}${BOLD}║                                                   ║${NC}"
     echo -e "${CYAN}${BOLD}╚═══════════════════════════════════════════════════╝${NC}"
     echo ""
@@ -691,17 +691,17 @@ print_banner() {
 print_summary() {
     echo ""
     log "${GREEN}${BOLD}╔══════════════════════════════════════════╗${NC}"
-    log "${GREEN}${BOLD}║   PiCast Setup Complete!                 ║${NC}"
+    log "${GREEN}${BOLD}║   boGDan Setup Complete!                 ║${NC}"
     log "${GREEN}${BOLD}╚══════════════════════════════════════════╝${NC}"
     echo ""
     info "Next steps:"
     info "  1. Reboot to apply kernel overlay:  ${BOLD}sudo reboot${NC}"
-    info "  2. Start PiCast:                    ${BOLD}sudo systemctl start picast${NC}"
-    info "  3. Check status:                    ${BOLD}sudo systemctl status picast${NC}"
-    info "  4. View logs:                       ${BOLD}journalctl -u picast -f${NC}"
+    info "  2. Start boGDan:                    ${BOLD}sudo systemctl start bogdan${NC}"
+    info "  3. Check status:                    ${BOLD}sudo systemctl status bogdan${NC}"
+    info "  4. View logs:                       ${BOLD}journalctl -u bogdan -f${NC}"
     echo ""
     info "  Cast from browser: Install the extension from src/extension/"
-    info "  Cast from VLC:     Playback → Renderer → PiCast"
+    info "  Cast from VLC:     Playback → Renderer → boGDan"
     local ip_addr
     ip_addr="$(hostname -I 2>/dev/null | cut -d' ' -f1)" || ip_addr="<PI-IP>"
     info "  Cast via API:      curl -X POST http://${ip_addr}:8585/api/cast -H 'Content-Type: application/json' -d '{\"url\": \"https://www.youtube.com/watch?v=dQw4w9WgXcQ\"}'"
@@ -731,8 +731,8 @@ main() {
     configure_kernel
     configure_tor
     configure_firewall
-    build_picast
-    install_picast
+    build_bogdan
+    install_bogdan
     verify_installation
     print_summary
 }

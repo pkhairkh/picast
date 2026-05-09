@@ -1,4 +1,4 @@
-# PiCast cross-compilation configuration
+# boGDan cross-compilation configuration
 #
 # For building on x86_64 host targeting Raspberry Pi 4B+ (aarch64):
 #

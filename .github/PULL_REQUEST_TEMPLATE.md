@@ -8,13 +8,13 @@
 
 <!-- Check all that apply -->
 
-- [ ] `picast-server`
-- [ ] `picast-protocols`
-- [ ] `picast-session`
-- [ ] `picast-resolver`
-- [ ] `picast-playback`
-- [ ] `picast-display`
-- [ ] `picast-tor`
+- [ ] `bogdan-server`
+- [ ] `bogdan-protocols`
+- [ ] `bogdan-session`
+- [ ] `bogdan-resolver`
+- [ ] `bogdan-playback`
+- [ ] `bogdan-display`
+- [ ] `bogdan-tor`
 - [ ] Workspace / Cross-cutting
 
 ## Type of Change

@@ -4,14 +4,14 @@
 
 **Do not report security vulnerabilities through public GitHub issues.**
 
-Instead, please report them through [GitHub Security Advisories](https://github.com/pkhairkh/picast/security/advisories/new).
+Instead, please report them through [GitHub Security Advisories](https://github.com/pkhairkh/bogdan/security/advisories/new).
 
 Include as much of the following information as possible:
 
 - Type of vulnerability (e.g., privilege escalation, information disclosure, RCE)
 - Full paths of source files related to the vulnerability
 - Step-by-step reproduction instructions
-- Potential impact on a deployed PiCast appliance
+- Potential impact on a deployed boGDan appliance
 - Any suggested mitigations or fixes
 
 You should receive a response within **48 hours**. If you do not, please follow up
@@ -19,7 +19,7 @@ via the same channel to confirm receipt.
 
 ## Threat Model
 
-PiCast is a Raspberry Pi 4B+ media casting appliance. The following summarizes
+boGDan is a Raspberry Pi 4B+ media casting appliance. The following summarizes
 the primary security considerations that inform our design and review process:
 
 | Threat Vector | Mitigation |

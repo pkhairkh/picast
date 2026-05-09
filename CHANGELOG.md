@@ -1,6 +1,6 @@
 # Changelog
 
-All notable changes to PiCast will be documented in this file.
+All notable changes to boGDan will be documented in this file.
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
@@ -8,12 +8,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ### Added
-- Project scaffold: Rust workspace with 7 crates (picast-server, picast-protocols, picast-session, picast-resolver, picast-playback, picast-display, picast-tor)
+- Project scaffold: Rust workspace with 7 crates (bogdan-server, bogdan-protocols, bogdan-session, bogdan-resolver, bogdan-playback, bogdan-display, bogdan-tor)
 - Architecture documentation (ARCHITECTURE.md, SPECIFICATION.md, DECISIONS.md)
 - Individual ADR files (ADR-001 through ADR-009) in docs/decisions/
 - Per-module documentation in docs/ (hardware, protocols, playback, tor, extension)
 - Browser extension skeleton (Manifest V3, background.js, popup)
-- Configuration files (torrc, iptables.rules, picast.service)
+- Configuration files (torrc, iptables.rules, bogdan.service)
 - Pi setup script (scripts/setup.sh)
 - Development roadmap (docs/ROADMAP.md)
 - Technical glossary (docs/GLOSSARY.md)

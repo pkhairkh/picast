@@ -1,12 +1,12 @@
 # DLNA MediaRenderer Specification
 
-PiCast implements a UPnP AV MediaRenderer device so that standard DLNA controller apps (BubbleUPnP, Windows Media Player, VLC, Home Assistant) can cast media without a custom sender app. This document specifies the SSDP discovery protocol, device description XML, AVTransport service actions, RenderingControl service actions, and the mapping between UPnP transport states and PiCast's internal session states.
+boGDan implements a UPnP AV MediaRenderer device so that standard DLNA controller apps (BubbleUPnP, Windows Media Player, VLC, Home Assistant) can cast media without a custom sender app. This document specifies the SSDP discovery protocol, device description XML, AVTransport service actions, RenderingControl service actions, and the mapping between UPnP transport states and boGDan's internal session states.
 
 ## Overview
 
 ```
 ┌──────────────┐    SSDP (1900)     ┌──────────────┐
-│  DLNA        │◀───────────────────│  PiCast      │
+│  DLNA        │◀───────────────────│  boGDan      │
 │  Controller  │    M-SEARCH/NOTIFY │  MediaRenderer│
 │  (Phone/PC)  │                    │              │
 │              │    HTTP (8200)     │              │
@@ -22,7 +22,7 @@ The DLNA renderer runs on port 8200 for HTTP (device description, SOAP control) 
 
 ### Announcement (NOTIFY)
 
-PiCast sends NOTIFY messages every 30 seconds to the SSDP multicast address `239.255.255.250:1900`. Four separate NOTIFY messages are sent, one for each service type, to ensure compatibility with all DLNA controllers:
+boGDan sends NOTIFY messages every 30 seconds to the SSDP multicast address `239.255.255.250:1900`. Four separate NOTIFY messages are sent, one for each service type, to ensure compatibility with all DLNA controllers:
 
 ```
 NOTIFY * HTTP/1.1
@@ -31,8 +31,8 @@ CACHE-CONTROL: max-age=1800
 LOCATION: http://<pi-ip>:8200/description.xml
 NT: upnp:rootdevice
 NTS: ssdp:alive
-SERVER: Linux/5.15 UPnP/1.1 PiCast/0.1
-USN: uuid:picast-001::upnp:rootdevice
+SERVER: Linux/5.15 UPnP/1.1 boGDan/0.1
+USN: uuid:bogdan-001::upnp:rootdevice
 ```
 
 ```
@@ -42,8 +42,8 @@ CACHE-CONTROL: max-age=1800
 LOCATION: http://<pi-ip>:8200/description.xml
 NT: urn:schemas-upnp-org:device:MediaRenderer:1
 NTS: ssdp:alive
-SERVER: Linux/5.15 UPnP/1.1 PiCast/0.1
-USN: uuid:picast-001::urn:schemas-upnp-org:device:MediaRenderer:1
+SERVER: Linux/5.15 UPnP/1.1 boGDan/0.1
+USN: uuid:bogdan-001::urn:schemas-upnp-org:device:MediaRenderer:1
 ```
 
 ```
@@ -53,8 +53,8 @@ CACHE-CONTROL: max-age=1800
 LOCATION: http://<pi-ip>:8200/description.xml
 NT: urn:schemas-upnp-org:service:AVTransport:1
 NTS: ssdp:alive
-SERVER: Linux/5.15 UPnP/1.1 PiCast/0.1
-USN: uuid:picast-001::urn:schemas-upnp-org:service:AVTransport:1
+SERVER: Linux/5.15 UPnP/1.1 boGDan/0.1
+USN: uuid:bogdan-001::urn:schemas-upnp-org:service:AVTransport:1
 ```
 
 ```
@@ -64,13 +64,13 @@ CACHE-CONTROL: max-age=1800
 LOCATION: http://<pi-ip>:8200/description.xml
 NT: urn:schemas-upnp-org:service:RenderingControl:1
 NTS: ssdp:alive
-SERVER: Linux/5.15 UPnP/1.1 PiCast/0.1
-USN: uuid:picast-001::urn:schemas-upnp-org:service:RenderingControl:1
+SERVER: Linux/5.15 UPnP/1.1 boGDan/0.1
+USN: uuid:bogdan-001::urn:schemas-upnp-org:service:RenderingControl:1
 ```
 
 ### M-SEARCH Response
 
-When a controller sends an M-SEARCH query, PiCast responds within a random delay of 0–MX seconds (to avoid response storms when multiple devices are present on the network):
+When a controller sends an M-SEARCH query, boGDan responds within a random delay of 0–MX seconds (to avoid response storms when multiple devices are present on the network):
 
 ```
 HTTP/1.1 200 OK
@@ -78,26 +78,26 @@ CACHE-CONTROL: max-age=1800
 DATE: Mon, 15 Jan 2024 10:30:00 GMT
 EXT:
 LOCATION: http://<pi-ip>:8200/description.xml
-SERVER: Linux/5.15 UPnP/1.1 PiCast/0.1
+SERVER: Linux/5.15 UPnP/1.1 boGDan/0.1
 ST: urn:schemas-upnp-org:device:MediaRenderer:1
-USN: uuid:picast-001::urn:schemas-upnp-org:device:MediaRenderer:1
+USN: uuid:bogdan-001::urn:schemas-upnp-org:device:MediaRenderer:1
 ```
 
 ### Shutdown (byebye)
 
-On graceful shutdown, PiCast sends NOTIFY with `NTS: ssdp:byebye` for each service type:
+On graceful shutdown, boGDan sends NOTIFY with `NTS: ssdp:byebye` for each service type:
 
 ```
 NOTIFY * HTTP/1.1
 HOST: 239.255.255.250:1900
 NT: urn:schemas-upnp-org:device:MediaRenderer:1
 NTS: ssdp:byebye
-USN: uuid:picast-001::urn:schemas-upnp-org:device:MediaRenderer:1
+USN: uuid:bogdan-001::urn:schemas-upnp-org:device:MediaRenderer:1
 ```
 
 ## Device Description XML
 
-Served at `GET /description.xml` on port 8200. This XML describes the PiCast device, its services, and their control/event URLs.
+Served at `GET /description.xml` on port 8200. This XML describes the boGDan device, its services, and their control/event URLs.
 
 ```xml
 <?xml version="1.0" encoding="utf-8"?>
@@ -109,15 +109,15 @@ Served at `GET /description.xml` on port 8200. This XML describes the PiCast dev
   </specVersion>
   <device>
     <deviceType>urn:schemas-upnp-org:device:MediaRenderer:1</deviceType>
-    <friendlyName>PiCast</friendlyName>
-    <manufacturer>PiCast Project</manufacturer>
-    <manufacturerURL>https://github.com/picast/picast</manufacturerURL>
-    <modelDescription>PiCast Media Renderer</modelDescription>
-    <modelName>PiCast</modelName>
+    <friendlyName>boGDan</friendlyName>
+    <manufacturer>boGDan Project</manufacturer>
+    <manufacturerURL>https://github.com/bogdan/bogdan</manufacturerURL>
+    <modelDescription>boGDan Media Renderer</modelDescription>
+    <modelName>boGDan</modelName>
     <modelNumber>0.1</modelNumber>
-    <modelURL>https://github.com/picast/picast</modelURL>
+    <modelURL>https://github.com/bogdan/bogdan</modelURL>
     <serialNumber>000000001</serialNumber>
-    <UDN>uuid:picast-001</UDN>
+    <UDN>uuid:bogdan-001</UDN>
     <dlna:X_DLNACAP>playcontainer-0-0,mrl-1-0</dlna:X_DLNACAP>
     <dlna:X_DLNADOC>DMR-1.50</dlna:X_DLNADOC>
 
@@ -154,7 +154,7 @@ Control URL: `POST /ctl/avtransport`
 
 ### SetAVTransportURI
 
-Set the media URL to play. Maps to `SessionManager::load(url)`. The URL may be a direct media URL, an HLS manifest, or a web page URL — PiCast will classify and resolve it through the same pipeline used by the HTTP API.
+Set the media URL to play. Maps to `SessionManager::load(url)`. The URL may be a direct media URL, an HLS manifest, or a web page URL — boGDan will classify and resolve it through the same pipeline used by the HTTP API.
 
 ```xml
 <?xml version="1.0"?>
@@ -222,7 +222,7 @@ Seek to a position. Maps to `SessionManager::seek()`.
 </u:Seek>
 ```
 
-**Target format**: `HH:MM:SS` or `HH:MM:SS.fraction`. PiCast converts this to seconds and calls `seek(position_secs)`.
+**Target format**: `HH:MM:SS` or `HH:MM:SS.fraction`. boGDan converts this to seconds and calls `seek(position_secs)`.
 
 ### GetPositionInfo
 
@@ -253,9 +253,9 @@ Return current transport state.
 </u:GetTransportInfoResponse>
 ```
 
-### PiCast State to UPnP Transport State Mapping
+### boGDan State to UPnP Transport State Mapping
 
-| PiCast State | UPnP Transport State | Notes |
+| boGDan State | UPnP Transport State | Notes |
 |-------------|---------------------|-------|
 | Idle | NO_MEDIA_PRESENT | No media loaded |
 | Resolving | TRANSITIONING | URL being resolved through yt-dlp/Tor |
@@ -309,7 +309,7 @@ Control URL: `POST /ctl/connectionmanager`
 
 ### GetProtocolInfo
 
-Return supported media protocols. This tells DLNA controllers which media types PiCast can play.
+Return supported media protocols. This tells DLNA controllers which media types boGDan can play.
 
 ```xml
 <u:GetProtocolInfoResponse xmlns:u="urn:schemas-upnp-org:service:ConnectionManager:1">
@@ -347,7 +347,7 @@ UPnP SOAP errors use fault codes with UPnP-specific error numbers:
 </s:Body>
 ```
 
-| Error Code | Description | PiCast Scenario |
+| Error Code | Description | boGDan Scenario |
 |-----------|-------------|-----------------|
 | 402 | Invalid arguments | Missing InstanceID or required parameter |
 | 501 | Action failed | Internal error (GStreamer, Tor, DRM) |
@@ -361,4 +361,4 @@ UPnP SOAP errors use fault codes with UPnP-specific error numbers:
 
 - **No site resolution feedback**: DLNA controllers expect `SetAVTransportURI` to return immediately. If the URL requires yt-dlp resolution (5–15 seconds), the SOAP response returns success and the transport state is set to `TRANSITIONING`. The controller must poll `GetTransportInfo` to detect when playback actually starts.
 - **No Tor indication**: DLNA has no mechanism to indicate that traffic is being routed through Tor. The controller sees a standard MediaRenderer.
-- **Single instance**: All AVTransport and RenderingControl actions use `InstanceID=0`. PiCast does not support multiple simultaneous media streams.
+- **Single instance**: All AVTransport and RenderingControl actions use `InstanceID=0`. boGDan does not support multiple simultaneous media streams.

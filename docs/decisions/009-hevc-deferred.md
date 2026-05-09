@@ -38,17 +38,17 @@ Several approaches are being explored in the Pi community:
 
 3. **rpi-hevc-dec kernel conversion**: The `rpi-hevc-dec` project (Broadcom's reference HEVC decoder) includes a kernel-mode SAND→NV12 conversion option. This would perform the conversion at the kernel level, making it transparent to userspace. However, this code is not upstream and its maintenance status is uncertain.
 
-4. **Force H.264 in yt-dlp**: The simplest immediate solution — tell yt-dlp to only request H.264 formats. This is what PiCast v1 does.
+4. **Force H.264 in yt-dlp**: The simplest immediate solution — tell yt-dlp to only request H.264 formats. This is what boGDan v1 does.
 
 ## Decision
 
-HEVC hardware decoding is deferred to PiCast v2. For v1, the `picast-resolver` crate forces H.264 format selection in yt-dlp:
+HEVC hardware decoding is deferred to boGDan v2. For v1, the `bogdan-resolver` crate forces H.264 format selection in yt-dlp:
 
 ```
 --format "bv[height<=1080][vcodec^=avc1]+ba/b[height<=1080]/bv+ba"
 ```
 
-The `vcodec^=avc1` filter ensures only H.264 video streams are selected. If no H.264 stream is available at the requested resolution, yt-dlp falls back to the best available format (which might be HEVC — in that case, GStreamer will attempt software decode, which will likely fail at high resolutions, and PiCast will display an error).
+The `vcodec^=avc1` filter ensures only H.264 video streams are selected. If no H.264 stream is available at the requested resolution, yt-dlp falls back to the best available format (which might be HEVC — in that case, GStreamer will attempt software decode, which will likely fail at high resolutions, and boGDan will display an error).
 
 This decision will be re-evaluated when **any one** of the following conditions is met:
 
@@ -71,16 +71,16 @@ This decision will be re-evaluated when **any one** of the following conditions 
 | ✅ Reliable H.264 playback | All H.264 content plays via V4L2 M2M with zero-copy DMA-BUF display; no format conversion issues |
 | ✅ No CPU overhead | No SAND→NV12 conversion required; CPU is free for Tor and yt-dlp |
 | ✅ Simple pipeline | `v4l2h264dec → kmssink` is a proven, tested pipeline with no format conversion steps |
-| ✅ Clear upgrade path | When SAND conversion is available, PiCast v2 can switch to HEVC by changing the yt-dlp format string and adding a conversion element to the GStreamer pipeline |
+| ✅ Clear upgrade path | When SAND conversion is available, boGDan v2 can switch to HEVC by changing the yt-dlp format string and adding a conversion element to the GStreamer pipeline |
 | ❌ No 4K playback | H.264 4K requires ~30–50 Mbps, exceeding typical Tor circuit bandwidth (~5 Mbps); HEVC 4K at ~15 Mbps would fit but is not available |
 | ❌ Higher bandwidth for 1080p | H.264 1080p requires ~8–12 Mbps vs. HEVC 1080p at ~4–7 Mbps; on slow Tor circuits, H.264 may buffer more frequently |
-| ❌ Some content unavailable | A small but growing number of streaming services only provide HEVC at 1080p+; PiCast v1 cannot play these |
+| ❌ Some content unavailable | A small but growing number of streaming services only provide HEVC at 1080p+; boGDan v1 cannot play these |
 | ❌ Incomplete hardware utilization | The Pi 4's HEVC decoder sits idle; hardware capability is wasted |
 
 ## Alternatives Rejected
 
 | Alternative | Reason for Rejection |
 |-------------|---------------------|
-| **Software SAND→NV12 in PiCast** | Adds ~40% CPU utilization at 1080p30; exceeds 100% CPU at 4K; CPU is already needed for Tor encryption and yt-dlp; not viable for sustained playback |
+| **Software SAND→NV12 in boGDan** | Adds ~40% CPU utilization at 1080p30; exceeds 100% CPU at 4K; CPU is already needed for Tor encryption and yt-dlp; not viable for sustained playback |
 | **Force HEVC and accept software decode** | Pi 4 cannot software-decode HEVC 1080p in real-time (requires ~4x Cortex-A72 at 1.5 GHz); playback would be slideshow at best |
 | **Dual-output pipeline (HEVC decode → CPU convert → GPU display)** | SAND frames in main memory → CPU convert → re-import into DRM; defeats zero-copy; adds 2+ frame latency; CPU overhead makes it impractical |

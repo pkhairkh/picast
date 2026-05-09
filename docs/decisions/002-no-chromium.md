@@ -15,18 +15,18 @@ Many casting solutions (Chromecast, web-based kiosks, smart TV apps) rely on a b
 - **RAM consumption**: Chromium on Pi 4 uses 300–500 MB of RAM with a single tab playing video. On a 2 GB Pi 4, this leaves insufficient headroom for Tor, GStreamer buffers, and the OS.
 - **Software decode unreliability**: Chromium's software H.264 decoder on ARM is slow and prone to frame drops at 1080p. V4L2 M2M hardware decode via Chromium is unreliable — it requires specific `--enable-features=V4L2VideoDecoder` flags and the Chromium V4L2 codepath has a history of regressions on Pi 4.
 - **No Widevine L1**: Pi 4 lacks Widevine L1 (hardware-verified decryption). Even with Widevine L3 (software CDM), DRM playback on ARM is unreliable (see ADR-007).
-- **JavaScript overhead**: A browser runtime includes V8 JIT compiler, renderer process, GPU process, and utility processes — all consuming RAM and CPU that PiCast cannot spare.
+- **JavaScript overhead**: A browser runtime includes V8 JIT compiler, renderer process, GPU process, and utility processes — all consuming RAM and CPU that boGDan cannot spare.
 - **Security surface**: Chromium's multi-process architecture is designed for security, but each process is an attack vector. On a Tor-routed appliance, minimizing exposed code paths is critical.
 
-PiCast's use case is media casting — playing video URLs on a TV. It does not need to render HTML, execute JavaScript, or provide a web browsing experience.
+boGDan's use case is media casting — playing video URLs on a TV. It does not need to render HTML, execute JavaScript, or provide a web browsing experience.
 
 ## Decision
 
-PiCast will not embed or launch Chromium or any browser runtime. Instead, media resolution follows this path:
+boGDan will not embed or launch Chromium or any browser runtime. Instead, media resolution follows this path:
 
-1. **URL classification**: The `picast-resolver` crate classifies URLs as direct media URLs or site URLs requiring extraction.
-2. **yt-dlp subprocess**: Site URLs are resolved by the `picast-resolver` crate spawning `yt-dlp` as a subprocess with a 30-second timeout, parsing its JSON output for direct media URLs (see ADR-008).
-3. **GStreamer pipeline**: Direct media URLs are fed to the `picast-playback` crate's GStreamer V4L2 M2M pipeline for hardware-decoded, zero-copy playback (see ADR-003).
+1. **URL classification**: The `bogdan-resolver` crate classifies URLs as direct media URLs or site URLs requiring extraction.
+2. **yt-dlp subprocess**: Site URLs are resolved by the `bogdan-resolver` crate spawning `yt-dlp` as a subprocess with a 30-second timeout, parsing its JSON output for direct media URLs (see ADR-008).
+3. **GStreamer pipeline**: Direct media URLs are fed to the `bogdan-playback` crate's GStreamer V4L2 M2M pipeline for hardware-decoded, zero-copy playback (see ADR-003).
 
 This eliminates the browser entirely from the media path.
 
@@ -41,7 +41,7 @@ This eliminates the browser entirely from the media path.
 | ✅ Predictable resource usage | GStreamer + yt-dlp have well-bounded memory profiles |
 | ❌ No DRM playback | Cannot play Netflix, Disney+, or other Widevine-protected content (see ADR-007) |
 | ❌ No JavaScript-dependent sites | Sites requiring JS execution to load media (e.g., some embedded players) cannot be resolved by yt-dlp alone |
-| ❌ No interactive web content | PiCast cannot display web pages, HTML5 animations, or interactive web apps |
+| ❌ No interactive web content | boGDan cannot display web pages, HTML5 animations, or interactive web apps |
 
 ## Alternatives Rejected
 

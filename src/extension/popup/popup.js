@@ -1,5 +1,5 @@
 /**
- * PiCast Popup Script
+ * boGDan Popup Script
  *
  * Manages the popup UI: cast button, playback controls, detected
  * media list, and real-time status display.
@@ -8,7 +8,7 @@
  *
  * The popup receives real-time status updates via the background
  * service worker, which maintains a WebSocket connection to the
- * PiCast server. When the WebSocket is unavailable, the popup
+ * boGDan server. When the WebSocket is unavailable, the popup
  * falls back to HTTP polling every 3 seconds.
  *
  * - WebSocket: instant push of MEDIA_STATUS, RESOLVE_PROGRESS, ERROR
@@ -156,7 +156,7 @@ function updatePlaybackUI(state, positionMs, durationMs, volume, title) {
   setStatus(stateLabels[currentState] || currentState);
 }
 
-// ─── PiCast API (via background service worker) ────────────────────
+// ─── boGDan API (via background service worker) ────────────────────
 
 async function sendMessage(type, data = {}) {
   return new Promise((resolve, reject) => {
@@ -261,7 +261,7 @@ async function refreshStatus() {
     const status = await sendMessage("GET_STATUS");
     if (status?.error) {
       statusDot.className = "status-dot disconnected";
-      setStatus("Cannot connect to PiCast. Check settings.", "error");
+      setStatus("Cannot connect to boGDan. Check settings.", "error");
       setControlsEnabled(false);
       return;
     }
@@ -275,7 +275,7 @@ async function refreshStatus() {
     );
   } catch {
     statusDot.className = "status-dot disconnected";
-    setStatus("Cannot connect to PiCast. Check settings.", "error");
+    setStatus("Cannot connect to boGDan. Check settings.", "error");
     setControlsEnabled(false);
   }
 }
@@ -353,7 +353,7 @@ async function doCast() {
         <path d="M2 16.1A5 5 0 0 1 5.9 20M2 12.05A9 9 0 0 1 9.95 20M2 8V6a2 2 0 0 1 2-2h16a2 2 0 0 1 2 2v12a2 2 0 0 1-2 2h-6"/>
         <line x1="2" y1="20" x2="2.01" y2="20"/>
       </svg>
-      Cast to PiCast`;
+      Cast to boGDan`;
   }
 }
 

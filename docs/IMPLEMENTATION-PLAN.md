@@ -1,6 +1,6 @@
-# PiCast Implementation Plan
+# boGDan Implementation Plan
 
-> **Purpose:** Concrete, ordered task list for building PiCast from scaffold to v1.0.0
+> **Purpose:** Concrete, ordered task list for building boGDan from scaffold to v1.0.0
 > **Audience:** AI agents and human developers implementing the system
 > **Convention:** Each task is scoped to a single agent session. Tasks list exact files to create/modify, dependencies, and acceptance criteria.
 
@@ -30,7 +30,7 @@ T<id> [∥] <title>
 ---
 
 **T01** ∥ Tor SOCKS5 manager
-  Crate: `picast-tor`
+  Crate: `bogdan-tor`
   Files: `src/tor/src/lib.rs`, `src/tor/Cargo.toml`, `src/tor/README.md`
   Depends: none
   Accept:
@@ -40,18 +40,18 @@ T<id> [∥] <title>
   - `tor_handle.health_check()` attempts a TCP connect to SOCKS port, returns `CircuitHealth`
   - `tor_handle.ensure_running()` checks if Tor daemon process is alive, starts it if not (via `tokio::process::Command`)
   - `tor_handle.new_circuit()` sends `SIGNAL NEWNYM` to Tor control port (9051) via cookie auth
-  - All unit tests pass: `cargo test -p picast-tor`
-  - `cargo clippy -p picast-tor` zero warnings
+  - All unit tests pass: `cargo test -p bogdan-tor`
+  - `cargo clippy -p bogdan-tor` zero warnings
   Implementation notes:
   - Add dependencies: `reqwest` (with `socks` feature), `sha2`, `tokio` (process), `nix` (signal)
-  - SOCKS5 username for IsolateSOCKSAuth: `format!("picast-{}", &sha256(hostname)[..16])`
+  - SOCKS5 username for IsolateSOCKSAuth: `format!("bogdan-{}", &sha256(hostname)[..16])`
   - Control port auth: read `/run/tor/control.authcookie`, send `AUTHENTICATE <hex>\r\nSIGNAL NEWNYM\r\n`
   - Health check: TCP connect to SOCKS port + measure RTT with a small HTTP request through Tor to `https://check.tor-project.org/api/ip`
 
 ---
 
 **T02** ∥ DRM/KMS display manager
-  Crate: `picast-display`
+  Crate: `bogdan-display`
   Files: `src/display/src/lib.rs`, `src/display/Cargo.toml`, `src/display/README.md`
   Depends: none
   Accept:
@@ -63,7 +63,7 @@ T<id> [∥] <title>
   - `dm.resolution()` returns `(u32, u32)` for active mode
   - `dm.release()` drops master and restores previous CRTC state
   - All unit tests pass (using `vkms` module on x86_64 or mocked DRM calls)
-  - `cargo clippy -p picast-display` zero warnings
+  - `cargo clippy -p bogdan-display` zero warnings
   Implementation notes:
   - Add dependencies: `drm` crate (drm-rs), `nix` (ioctl wrappers), `gbm` (GBM buffer allocation for OSD plane)
   - Use `drm::control::atomic::AtomicCommitRequest` for all plane updates
@@ -74,9 +74,9 @@ T<id> [∥] <title>
 ---
 
 **T03** ∥ GStreamer playback engine
-  Crate: `picast-playback`
+  Crate: `bogdan-playback`
   Files: `src/playback/src/lib.rs`, `src/playback/src/pipeline.rs`, `src/playback/src/events.rs`, `src/playback/Cargo.toml`, `src/playback/README.md`
-  Depends: none (uses GStreamer directly, not picast-display — kmssink handles DRM internally)
+  Depends: none (uses GStreamer directly, not bogdan-display — kmssink handles DRM internally)
   Accept:
   - `PlaybackEngine::new(PipelineConfig)` initializes GStreamer and creates an idle engine
   - `engine.play(url, socks_proxy)` constructs and starts the GStreamer pipeline: `souphttpsrc → queue2 → parsebin → v4l2h264dec → kmssink` with DMA-BUF io-mode
@@ -89,7 +89,7 @@ T<id> [∥] <title>
   - `engine.buffer_health()` returns `BufferHealth` from queue2 buffering stats
   - `engine.events()` returns a `tokio::sync::mpsc::Receiver<PlaybackEvent>` with `Playing`, `Paused`, `Stopped`, `Error(String)`, `EndOfStream`, `Buffering { percent: u8 }`
   - All unit tests pass
-  - `cargo clippy -p picast-playback` zero warnings
+  - `cargo clippy -p bogdan-playback` zero warnings
   Implementation notes:
   - Add dependencies: `gstreamer`, `gstreamer-app`, `gstreamer-video`, `gstreamer-audio` (gstreamer-rs crates)
   - `gstreamer::init()` must be called exactly once — use `std::sync::Once`
@@ -108,9 +108,9 @@ T<id> [∥] <title>
 ---
 
 **T04** URL resolver with yt-dlp subprocess
-  Crate: `picast-resolver`
+  Crate: `bogdan-resolver`
   Files: `src/resolver/src/lib.rs`, `src/resolver/src/classifier.rs`, `src/resolver/src/ytdlp.rs`, `src/resolver/src/cache.rs`, `src/resolver/Cargo.toml`, `src/resolver/README.md`
-  Depends: T01 (picast-tor for SOCKS5 client)
+  Depends: T01 (bogdan-tor for SOCKS5 client)
   Accept:
   - `Resolver::new(tor_handle)` creates a resolver with Tor integration
   - `resolver.classify(url)` returns `UrlCategory` without network access (pure URL parsing)
@@ -123,7 +123,7 @@ T<id> [∥] <title>
   - `ResolvedMedia` struct: `source_url`, `direct_url`, `category`, `title`, `duration`, `thumbnail`, `vcodec`, `acodec`, `width`, `height`, `subtitles`, `used_tor`
   - Cache: `HashMap<String, (ResolvedMedia, Instant)>` with 10-minute TTL
   - All unit tests pass (classifier tests are pure, ytdlp tests mock subprocess)
-  - `cargo clippy -p picast-resolver` zero warnings
+  - `cargo clippy -p bogdan-resolver` zero warnings
   Implementation notes:
   - Add dependencies: `tokio` (process), `serde_json`, `sha2`, `lru` (cache)
   - `classifier.rs`: URL parsing only, no network. Match on host (`.onion`), path extension (`.m3u8`, `.mpd`, `.mp4`, `.mkv`, `.webm`, `.ts`), and known site patterns (YouTube, Vimeo, Twitch domains → `WebPage`)
@@ -134,7 +134,7 @@ T<id> [∥] <title>
 ---
 
 **T05** Session manager (state machine)
-  Crate: `picast-session`
+  Crate: `bogdan-session`
   Files: `src/session/src/lib.rs`, `src/session/src/manager.rs`, `src/session/src/interfaces.rs`, `src/session/Cargo.toml`, `src/session/README.md`
   Depends: T01, T02, T03, T04 (all leaf + mid-layer crates)
   Accept:
@@ -147,7 +147,7 @@ T<id> [∥] <title>
   - Auto-stop: tokio task monitors session, stops after 30 min of `Paused` or `Buffering`
   - SQLite persistence: session state written on every transition, recovered on restart
   - All unit tests pass (mock all subsystems with trait implementations)
-  - `cargo clippy -p picast-session` zero warnings
+  - `cargo clippy -p bogdan-session` zero warnings
   Implementation notes:
   - The existing `interfaces.rs` defines the 4 traits (`ResolverTrait`, `PlaybackTrait`, `DisplayTrait`, `TorTrait`). All methods are `async` via `async_trait`.
   - `SessionManager` depends on `Arc<dyn ResolverTrait>`, `Arc<dyn PlaybackTrait>`, etc. — not concrete types.
@@ -163,7 +163,7 @@ T<id> [∥] <title>
 ---
 
 **T06** HTTP REST API server
-  Crate: `picast-protocols`
+  Crate: `bogdan-protocols`
   Files: `src/protocols/src/lib.rs`, `src/protocols/src/http.rs`, `src/protocols/src/ws.rs`, `src/protocols/src/dlna.rs`, `src/protocols/Cargo.toml`, `src/protocols/README.md`
   Depends: T05 (session manager)
   Accept:
@@ -177,7 +177,7 @@ T<id> [∥] <title>
   - CORS headers: `Access-Control-Allow-Origin: *`
   - Error responses: `400`, `404`, `409`, `422`, `503` per spec
   - All integration tests pass (use `reqwest` test client against live server)
-  - `cargo clippy -p picast-protocols` zero warnings
+  - `cargo clippy -p bogdan-protocols` zero warnings
   Implementation notes:
   - Add dependencies: `hyper` (with `server` and `http1` features), `http-body-util`, `tokio` (net, signal), `serde_json`
   - NOT axum/actix/rocket — use hyper directly per AGENT.md convention
@@ -185,12 +185,12 @@ T<id> [∥] <title>
   - Request body parsing: `hyper::body::to_bytes()` → `serde_json::from_slice()`
   - CORS: add headers manually in response
   - `POST /api/cast` spawns a tokio task for resolution (don't block the request thread)
-  - Port: 8585 (configurable via `PICAST_HTTP_ADDR`)
+  - Port: 8585 (configurable via `BOGDAN_HTTP_ADDR`)
 
 ---
 
 **T07** WebSocket server
-  Crate: `picast-protocols` (same crate, different file)
+  Crate: `bogdan-protocols` (same crate, different file)
   Files: `src/protocols/src/ws.rs`
   Depends: T05, T06
   Accept:
@@ -205,12 +205,12 @@ T<id> [∥] <title>
 ---
 
 **T08** Main binary integration
-  Crate: `picast-server`
+  Crate: `bogdan-server`
   Files: `src/server/src/main.rs`, `src/server/Cargo.toml`
   Depends: T01–T07
   Accept:
-  - `picast` binary starts, initializes all subsystems in order: `Tor → Display → Playback → Resolver → Session → HTTP → WebSocket`
-  - Reads config from env vars: `PICAST_HTTP_ADDR`, `PICAST_WS_ADDR`, `PICAST_TOR_SOCKS`, `PICAST_DLNA_NAME`
+  - `bogdan` binary starts, initializes all subsystems in order: `Tor → Display → Playback → Resolver → Session → HTTP → WebSocket`
+  - Reads config from env vars: `BOGDAN_HTTP_ADDR`, `BOGDAN_WS_ADDR`, `BOGDAN_TOR_SOCKS`, `BOGDAN_DLNA_NAME`
   - Graceful shutdown on SIGINT/SIGTERM: stop playback → drop display → stop HTTP/WS servers
   - `RUST_LOG=debug cargo run` shows structured logs from all subsystems
   - `cargo build --release` produces a static binary
@@ -230,7 +230,7 @@ T<id> [∥] <title>
   Accept:
   - Flash Pi OS Lite 64-bit bookworm, run `scripts/setup.sh`
   - `cargo build --release --target aarch64-unknown-linux-gnu` (or on-device)
-  - Start PiCast: `sudo -u picast ./target/release/picast`
+  - Start boGDan: `sudo -u bogdan ./target/release/bogdan`
   - `curl -X POST http://pi:8585/api/cast -H 'Content-Type: application/json' -d '{"url":"https://www.youtube.com/watch?v=dQw4w9WgXcQ"}'`
   - Video plays on HDMI display with audio
   - `curl http://pi:8585/api/status` returns playing state
@@ -241,35 +241,35 @@ T<id> [∥] <title>
 
 ## Milestone v0.2.0 — Protocols
 
-**Goal:** PiCast appears as "PiCast" in VLC's renderer list. WebSocket pushes real-time status to connected clients.
+**Goal:** boGDan appears as "boGDan" in VLC's renderer list. WebSocket pushes real-time status to connected clients.
 
 ---
 
 **T10** DLNA MediaRenderer via gmediarender
-  Crate: `picast-protocols`
+  Crate: `bogdan-protocols`
   Files: `src/protocols/src/dlna.rs`
   Depends: T08
   Accept:
-  - gmediarender starts with PiCast's GStreamer pipeline as GSTREAMER_PIPELINE env var
-  - VLC → Playback → Renderer → "PiCast" appears
-  - Setting URI via VLC starts playback on PiCast
-  - Volume control via VLC maps to PiCast volume
-  - PiCast stops gmediarender when its own HTTP API starts a session (and vice versa)
+  - gmediarender starts with boGDan's GStreamer pipeline as GSTREAMER_PIPELINE env var
+  - VLC → Playback → Renderer → "boGDan" appears
+  - Setting URI via VLC starts playback on boGDan
+  - Volume control via VLC maps to boGDan volume
+  - boGDan stops gmediarender when its own HTTP API starts a session (and vice versa)
   Implementation notes:
   - gmediarender is a subprocess, not a Rust library. Spawn it with `tokio::process::Command`
   - GSTREAMER_PIPELINE env: `souphttpsrc location=%s ! queue2 ! parsebin ! v4l2h264dec capture-io-mode=dmabuf ! kmssink driver-name=vc4`
-  - Session sync: monitor gmediarender's state (D-Bus or GStreamer bus), sync with PiCast session manager
+  - Session sync: monitor gmediarender's state (D-Bus or GStreamer bus), sync with boGDan session manager
   - Race condition: if both DLNA and HTTP API try to cast simultaneously, first one wins
 
 ---
 
 **T11** mDNS announcement
-  Crate: `picast-protocols`
+  Crate: `bogdan-protocols`
   Files: `src/protocols/src/mdns.rs`
   Depends: T06
   Accept:
-  - PiCast advertises `_picast._tcp.local` on port 8585
-  - Browser extension can discover PiCast via `picast.local:8585`
+  - boGDan advertises `_bogcast._tcp.local` on port 8585
+  - Browser extension can discover boGDan via `bogdan.local:8585`
   - avahi-daemon is already installed on Pi OS Lite
 
 ---
@@ -281,7 +281,7 @@ T<id> [∥] <title>
 ---
 
 **T12** Full yt-dlp integration with progress reporting
-  Crate: `picast-resolver`
+  Crate: `bogdan-resolver`
   Files: `src/resolver/src/ytdlp.rs`
   Depends: T08
   Accept:
@@ -296,9 +296,9 @@ T<id> [∥] <title>
   Files: `src/extension/background.js`, `src/extension/popup/popup.html`, `src/extension/popup/popup.js`
   Depends: T06, T11
   Accept:
-  - Click PiCast icon → sends current tab URL to `POST /api/cast`
+  - Click boGDan icon → sends current tab URL to `POST /api/cast`
   - Popup shows: play/pause button, stop button, volume slider, status text
-  - PiCast IP configurable in options, auto-discovered via `picast.local`
+  - boGDan IP configurable in options, auto-discovered via `bogdan.local`
   - Manifest V3, loads in Chrome
 
 ---
@@ -310,7 +310,7 @@ T<id> [∥] <title>
 ---
 
 **T14** Subtitle support
-  Crate: `picast-playback`
+  Crate: `bogdan-playback`
   Files: `src/playback/src/subtitles.rs`
   Depends: T08
   Accept:
@@ -322,7 +322,7 @@ T<id> [∥] <title>
 ---
 
 **T15** ABR controller
-  Crate: `picast-playback`
+  Crate: `bogdan-playback`
   Files: `src/playback/src/abr.rs`
   Depends: T08
   Accept:
@@ -335,7 +335,7 @@ T<id> [∥] <title>
 ---
 
 **T16** OSD overlay
-  Crate: `picast-display`
+  Crate: `bogdan-display`
   Files: `src/display/src/osd.rs`
   Depends: T02
   Accept:
@@ -348,17 +348,17 @@ T<id> [∥] <title>
 
 ## Milestone v1.0.0 — Production
 
-**Goal:** PiCast runs 24/7 unattended. Security hardened. Documented.
+**Goal:** boGDan runs 24/7 unattended. Security hardened. Documented.
 
 ---
 
 **T17** Systemd hardening
-  Files: `config/picast.service`
+  Files: `config/bogdan.service`
   Depends: T08
   Accept:
   - All systemd hardening directives from ROADMAP.md applied
   - `WatchdogSec=60` with `sd_notify("WATCHDOG=1")` every 30s
-  - `picast` user with minimal capabilities
+  - `bogdan` user with minimal capabilities
 
 ---
 

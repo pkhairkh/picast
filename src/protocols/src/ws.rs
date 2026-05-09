@@ -1,4 +1,4 @@
-//! PiCast WebSocket Server
+//! boGDan WebSocket Server
 //!
 //! Low-latency bidirectional event stream for real-time UIs
 //! (browser extension, web dashboard). Clients subscribe to
@@ -41,7 +41,7 @@
 
 use anyhow::{anyhow, Result};
 use futures_util::{SinkExt, StreamExt};
-use picast_session::{MediaSession, SessionEvent, SessionManager};
+use bogdan_session::{MediaSession, SessionEvent, SessionManager};
 use serde::{Deserialize, Serialize};
 use std::sync::Arc;
 use std::time::Duration;
@@ -640,7 +640,7 @@ mod tests {
 
     #[test]
     fn map_session_event_playing_with_session() {
-        use picast_session::PlayerState;
+        use bogdan_session::PlayerState;
 
         let mut session = MediaSession::new("https://example.com/video".into());
         session.state = PlayerState::Playing;

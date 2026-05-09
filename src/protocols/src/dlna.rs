@@ -1,4 +1,4 @@
-//! PiCast DLNA/UPnP MediaRenderer
+//! boGDan DLNA/UPnP MediaRenderer
 //!
 //! Advertises itself via SSDP on the local network and responds to
 //! UPnP `AVTransport` and `RenderingControl` SOAP actions so that
@@ -7,14 +7,14 @@
 //!
 //! ## Implementation Strategy
 //!
-//! In v1, PiCast uses `gmediarender` as a subprocess for DLNA
+//! In v1, boGDan uses `gmediarender` as a subprocess for DLNA
 //! support rather than implementing the full UPnP stack in Rust.
 //! gmediarender is a lightweight, well-tested DLNA renderer that
 //! uses GStreamer for playback, which aligns perfectly with our
 //! pipeline architecture.
 //!
 //! The `GSTREAMER_PIPELINE` environment variable is set to match
-//! PiCast's pipeline (with SOCKS5 proxy support), and PiCast's
+//! boGDan's pipeline (with SOCKS5 proxy support), and boGDan's
 //! session manager synchronises state with gmediarender.
 //!
 //! ## Session Synchronisation
@@ -25,14 +25,14 @@
 //!   via its D-Bus/UPnP control interface.
 //! - Responds to DLNA controller actions (play, pause, stop, seek,
 //!   volume) by delegating to the session manager, keeping the
-//!   PiCast session state consistent with the DLNA control surface.
+//!   boGDan session state consistent with the DLNA control surface.
 //!
 //! In v1, bidirectional sync is approximated by having the DLNA
 //! renderer start/stop with the session lifecycle. Full bidirectional
 //! D-Bus bridge is deferred to v2.
 
 use anyhow::{anyhow, Result};
-use picast_session::SessionEvent;
+use bogdan_session::SessionEvent;
 use std::sync::Arc;
 use tokio::io::{AsyncBufReadExt, BufReader};
 use tokio::process::{Child, Command};
@@ -70,7 +70,7 @@ impl DlnaRenderer {
 
     /// Start the DLNA renderer subprocess.
     ///
-    /// Spawns `gmediarender` with PiCast's GStreamer pipeline
+    /// Spawns `gmediarender` with boGDan's GStreamer pipeline
     /// configured via the `GSTREAMER_PIPELINE` environment variable.
     /// The pipeline routes through Tor's SOCKS5 proxy.
     pub async fn start(&self) -> Result<()> {
@@ -269,24 +269,24 @@ impl Drop for DlnaRenderer {
 
 /// Run the DLNA session synchroniser as a background task.
 ///
-/// Subscribes to session events and mirrors PiCast state changes
+/// Subscribes to session events and mirrors boGDan state changes
 /// to the gmediarender subprocess lifecycle:
 ///
-/// - **Resolving** → stops gmediarender early, before PiCast acquires
-///   the display or starts the GStreamer pipeline. Both PiCast and
+/// - **Resolving** → stops gmediarender early, before boGDan acquires
+///   the display or starts the GStreamer pipeline. Both boGDan and
 ///   gmediarender use kmssink for DRM/KMS output, and only one
 ///   process can hold DRM master at a time. Stopping gmediarender
 ///   as soon as URL resolution begins ensures DRM master is available
 ///   when kmssink needs it.
 /// - **Stopped/Idle** → starts gmediarender so DLNA controllers can
-///   discover and cast to PiCast while idle
-/// - **Paused** → gmediarender stays stopped (PiCast still holds DRM)
+///   discover and cast to boGDan while idle
+/// - **Paused** → gmediarender stays stopped (boGDan still holds DRM)
 /// - **Error** → starts gmediarender so DLNA is available as fallback
 ///
-/// The key insight is that PiCast and gmediarender both use kmssink
+/// The key insight is that boGDan and gmediarender both use kmssink
 /// for DRM/KMS output, and only one process can hold DRM master at
-/// a time. When PiCast is playing, gmediarender must be stopped;
-/// when PiCast is idle, gmediarender should be running for DLNA
+/// a time. When boGDan is playing, gmediarender must be stopped;
+/// when boGDan is idle, gmediarender should be running for DLNA
 /// discovery.
 pub async fn run_dlna_sync(
     dlna: Arc<DlnaRenderer>,
@@ -335,7 +335,7 @@ pub async fn run_dlna_sync(
                     },
                     SessionEvent::Stopped { .. }
                         // Start gmediarender when the session stops so DLNA
-                        // controllers can discover PiCast while idle.
+                        // controllers can discover boGDan while idle.
                         if !dlna.is_running().await => {
                         tracing::info!(
                             "session stopped — starting gmediarender for DLNA discovery"
@@ -415,8 +415,8 @@ mod tests {
 
     #[test]
     fn dlna_renderer_new() {
-        let renderer = DlnaRenderer::new("PiCast", "127.0.0.1:9050");
-        assert_eq!(renderer.friendly_name(), "PiCast");
+        let renderer = DlnaRenderer::new("boGDan", "127.0.0.1:9050");
+        assert_eq!(renderer.friendly_name(), "boGDan");
     }
 
     #[test]
@@ -427,20 +427,20 @@ mod tests {
 
     #[test]
     fn dlna_renderer_custom_binary_path() {
-        let renderer = DlnaRenderer::new("PiCast", "127.0.0.1:9050")
+        let renderer = DlnaRenderer::new("boGDan", "127.0.0.1:9050")
             .with_binary_path("/usr/local/bin/gmediarender");
         assert_eq!(renderer.binary_path, "/usr/local/bin/gmediarender");
     }
 
     #[tokio::test]
     async fn dlna_renderer_not_running_by_default() {
-        let renderer = DlnaRenderer::new("PiCast", "127.0.0.1:9050");
+        let renderer = DlnaRenderer::new("boGDan", "127.0.0.1:9050");
         assert!(!renderer.is_running().await);
     }
 
     #[tokio::test]
     async fn dlna_renderer_start_fails_without_binary() {
-        let renderer = DlnaRenderer::new("PiCast", "127.0.0.1:9050")
+        let renderer = DlnaRenderer::new("boGDan", "127.0.0.1:9050")
             .with_binary_path("/nonexistent/gmediarender");
         let result = renderer.start().await;
         assert!(result.is_err(), "should fail when binary doesn't exist");
@@ -448,7 +448,7 @@ mod tests {
 
     #[tokio::test]
     async fn dlna_renderer_stop_when_not_running() {
-        let renderer = DlnaRenderer::new("PiCast", "127.0.0.1:9050");
+        let renderer = DlnaRenderer::new("boGDan", "127.0.0.1:9050");
         // Stop should succeed even when not running
         let result = renderer.stop().await;
         assert!(result.is_ok(), "stop should succeed when not running");
@@ -457,7 +457,7 @@ mod tests {
     #[tokio::test]
     async fn dlna_sync_handles_lagged_events() {
         let (tx, rx) = broadcast::channel(4);
-        let dlna = Arc::new(DlnaRenderer::new("PiCast", "127.0.0.1:9050"));
+        let dlna = Arc::new(DlnaRenderer::new("boGDan", "127.0.0.1:9050"));
 
         // Fill the channel to cause lag
         for _i in 0..10 {
@@ -480,7 +480,7 @@ mod tests {
     #[tokio::test]
     async fn dlna_sync_stops_renderer_on_stream_close() {
         let (tx, rx) = broadcast::channel(16);
-        let dlna = Arc::new(DlnaRenderer::new("PiCast", "127.0.0.1:9050"));
+        let dlna = Arc::new(DlnaRenderer::new("boGDan", "127.0.0.1:9050"));
 
         let dlna_clone = dlna.clone();
         let handle = tokio::spawn(async move {

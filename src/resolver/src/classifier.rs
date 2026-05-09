@@ -1,4 +1,4 @@
-//! PiCast URL Classifier
+//! boGDan URL Classifier
 //!
 //! Pure URL-based classification without any network access.
 //! Determines the [`UrlCategory`] for a given URL based on

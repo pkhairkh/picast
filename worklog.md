@@ -73,7 +73,7 @@ Task: Fix CDN 403 compilation error and add proactive IP mismatch detection
 
 Work Log:
 - User pulled latest code and got compilation error: SessionEvent::CdnForbidden not handled in ws.rs
-- Found two repos: /home/z/my-project/ (old) and /home/z/my-project/picast/ (latest)
+- Found two repos: /home/z/my-project/ (old) and /home/z/my-project/bogdan/ (latest)
 - Fixed ws.rs: added CdnForbidden match arm → ServerEvent::Error with CDN message
 - Fixed main.rs: added invalidate_cache() to ResolverAdapter (new ResolverTrait method)
 - Build passes with cargo check

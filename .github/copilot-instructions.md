@@ -1,10 +1,10 @@
-# PiCast — GitHub Copilot Instructions
+# boGDan — GitHub Copilot Instructions
 
 > This file provides context for GitHub Copilot when suggesting code in this repository.
 
 ## Project Overview
 
-PiCast is a **Tor-routed, zero-copy media casting appliance** for Raspberry Pi 4B+.
+boGDan is a **Tor-routed, zero-copy media casting appliance** for Raspberry Pi 4B+.
 Written in Rust, it uses GStreamer + V4L2 hardware decode + DRM/KMS direct display.
 No X11, no Wayland, no Chromium, no DRM playback.
 
@@ -24,13 +24,13 @@ No X11, no Wayland, no Chromium, no DRM playback.
 
 7 crates in a Cargo workspace:
 
-1. `picast-tor` — SOCKS5 proxy management, circuit health
-2. `picast-display` — DRM/KMS plane control, atomic modesetting
-3. `picast-resolver` — URL classification, yt-dlp subprocess, format selection
-4. `picast-playback` — GStreamer pipeline (v4l2h264dec → kmssink)
-5. `picast-session` — State machine, queue, ABR, SQLite session store
-6. `picast-protocols` — HTTP API (hyper), WebSocket, DLNA/UPnP
-7. `picast-server` — Main binary, wires everything together
+1. `bogdan-tor` — SOCKS5 proxy management, circuit health
+2. `bogdan-display` — DRM/KMS plane control, atomic modesetting
+3. `bogdan-resolver` — URL classification, yt-dlp subprocess, format selection
+4. `bogdan-playback` — GStreamer pipeline (v4l2h264dec → kmssink)
+5. `bogdan-session` — State machine, queue, ABR, SQLite session store
+6. `bogdan-protocols` — HTTP API (hyper), WebSocket, DLNA/UPnP
+7. `bogdan-server` — Main binary, wires everything together
 
 ## Code Patterns
 

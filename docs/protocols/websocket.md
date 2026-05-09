@@ -1,6 +1,6 @@
 # WebSocket Protocol Specification
 
-PiCast exposes a WebSocket server on port **8081** for real-time bidirectional communication with sender applications. The WebSocket provides push-based state updates so clients don't need to poll `GET /api/v1/status`. Multiple clients may connect simultaneously — PiCast broadcasts state changes to all connected clients.
+boGDan exposes a WebSocket server on port **8081** for real-time bidirectional communication with sender applications. The WebSocket provides push-based state updates so clients don't need to poll `GET /api/v1/status`. Multiple clients may connect simultaneously — boGDan broadcasts state changes to all connected clients.
 
 ## Connection
 
@@ -25,7 +25,7 @@ All messages are JSON text frames with a `type` field for dispatch:
 
 ---
 
-## Incoming Messages (Sender → PiCast)
+## Incoming Messages (Sender → boGDan)
 
 ### cast
 
@@ -133,7 +133,7 @@ Keep-alive ping. The server responds with `pong`.
 
 ---
 
-## Outgoing Messages (PiCast → Sender)
+## Outgoing Messages (boGDan → Sender)
 
 ### state_change
 
@@ -227,7 +227,7 @@ Sent when an asynchronous error occurs (resolver failure, pipeline error, Tor di
 |-------|------|-------------|
 | `message` | string | Human-readable error description |
 | `code` | string | Machine-readable error category (see below) |
-| `recoverable` | boolean | Whether PiCast can continue without user intervention |
+| `recoverable` | boolean | Whether boGDan can continue without user intervention |
 
 ### Error Codes
 

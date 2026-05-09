@@ -1,4 +1,4 @@
-# PiCast — Rust Formatting Configuration
+# boGDan — Rust Formatting Configuration
 # See: https://rust-lang.github.io/rustfmt/
 
 max_width = 100

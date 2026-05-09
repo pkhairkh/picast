@@ -1,14 +1,14 @@
 /**
- * PiCast Options Page Script
+ * boGDan Options Page Script
  *
  * Manages the settings UI: load/save/reset preferences,
- * test connection to PiCast receiver.
+ * test connection to boGDan receiver.
  */
 
 "use strict";
 
 var DEFAULTS = {
-  piHost: "picast.local",
+  piHost: "bogdan.local",
   httpPort: 8585,
   wsPort: 8586,
   torMode: "full",
@@ -113,15 +113,15 @@ function saveSettings() {
       saveBtn.textContent = "Save Settings";
     }, 2000);
 
-    // Send audio device to PiCast server so next playback uses it
+    // Send audio device to boGDan server so next playback uses it
     if (settings.audioDevice !== undefined) {
       chrome.runtime.sendMessage(
         { type: "SET_AUDIO_DEVICE", device: settings.audioDevice },
         function (result) {
           if (result && !result.error) {
-            console.log("[PiCast] Audio device updated on server:", settings.audioDevice);
+            console.log("[boGDan] Audio device updated on server:", settings.audioDevice);
           } else {
-            console.warn("[PiCast] Failed to update audio device on server:", result?.error);
+            console.warn("[boGDan] Failed to update audio device on server:", result?.error);
           }
         }
       );

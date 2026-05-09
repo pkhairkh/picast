@@ -1,6 +1,6 @@
-# picast-tor
+# bogdan-tor
 
-Manages the Tor daemon lifecycle, SOCKS5 proxy pool, stream isolation via per-site username hashing, and circuit health monitoring. Ensures all outbound traffic from PiCast is anonymized and DNS-leak-proof.
+Manages the Tor daemon lifecycle, SOCKS5 proxy pool, stream isolation via per-site username hashing, and circuit health monitoring. Ensures all outbound traffic from boGDan is anonymized and DNS-leak-proof.
 
 ## Purpose
 
@@ -16,7 +16,7 @@ The tor crate routes all outbound network traffic (yt-dlp URL resolution, GStrea
 | `CircuitHealth` | struct | Health check result: `reachable` (bool), `latency_ms` (u64), `circuit_count` (u32) |
 | `TorError` | enum | Error variants: `DaemonStart`, `NotReady`, `SocksHandshake`, `CircuitFailed`, `DnsLeak` |
 
-Implements `picast_session::interfaces::TorTrait`:
+Implements `bogdan_session::interfaces::TorTrait`:
 
 | Method | Description |
 |--------|-------------|
@@ -39,7 +39,7 @@ Additional methods:
 
 | Dependency | Why |
 |------------|-----|
-| `picast-session` | Provides `TorTrait` trait definition that this crate implements |
+| `bogdan-session` | Provides `TorTrait` trait definition that this crate implements |
 | `tokio` | Async process management (`tokio::process::Command` for Tor daemon), TCP streams for SOCKS5 |
 | `sha2` | SHA-256 hashing of hostnames for SOCKS5 stream isolation usernames |
 | `hex` | Hex encoding of SHA-256 hash bytes for SOCKS5 username field |
@@ -48,13 +48,13 @@ Additional methods:
 
 ## SOCKS5 Username Hashing Scheme (Stream Isolation)
 
-Tor's `IsolateSOCKSAuth` flag causes connections with different SOCKS5 username/password credentials to use separate circuits. PiCast exploits this by deriving a unique username from each site's hostname, ensuring that different sites get different circuits while the same site consistently uses the same circuit.
+Tor's `IsolateSOCKSAuth` flag causes connections with different SOCKS5 username/password credentials to use separate circuits. boGDan exploits this by deriving a unique username from each site's hostname, ensuring that different sites get different circuits while the same site consistently uses the same circuit.
 
 ### Algorithm
 
 ```
 username = hex(SHA-256(hostname))[0..16]    ← First 16 hex characters of SHA-256
-password = "picast-isolation"               ← Constant (not security-critical)
+password = "bogcast-isolation"               ← Constant (not security-critical)
 ```
 
 ### Examples
@@ -72,9 +72,9 @@ password = "picast-isolation"               ← Constant (not security-critical)
 
 2. **Different sites → different usernames → different circuits**: YouTube and Vimeo traffic never share a circuit, so an observer at one site cannot correlate traffic with the other. This prevents cross-site tracking even if the Tor exit node is compromised.
 
-3. **Deterministic**: The hash is deterministic — no random state is involved. Restarting PiCast or reconnecting produces the same username for the same site, which means the same circuit (if it still exists). This avoids unnecessary circuit builds.
+3. **Deterministic**: The hash is deterministic — no random state is involved. Restarting boGDan or reconnecting produces the same username for the same site, which means the same circuit (if it still exists). This avoids unnecessary circuit builds.
 
-4. **Not security-critical**: The SOCKS5 username/password fields are used purely for circuit isolation, not authentication. They are visible only on the loopback interface between PiCast and the local Tor daemon — they never leave the Pi. An attacker who can read loopback traffic has already compromised the Pi.
+4. **Not security-critical**: The SOCKS5 username/password fields are used purely for circuit isolation, not authentication. They are visible only on the loopback interface between boGDan and the local Tor daemon — they never leave the Pi. An attacker who can read loopback traffic has already compromised the Pi.
 
 ### Implementation
 
@@ -85,14 +85,14 @@ fn socks5_credentials(site_host: &str) -> (String, String) {
     hasher.update(site_host.as_bytes());
     let hash = hasher.finalize();
     let username = hex::encode(&hash[..8]);  // First 8 bytes = 16 hex chars
-    let password = "picast-isolation".to_string();
+    let password = "bogcast-isolation".to_string();
     (username, password)
 }
 ```
 
 ## Bandwidth Expectations
 
-Tor's bandwidth is fundamentally limited by the voluntary exit relay infrastructure. PiCast targets 720p as the default quality tier because 1080p streaming through Tor is unreliable on many exit nodes. The ABR controller monitors buffer fill and downshifts automatically when throughput drops.
+Tor's bandwidth is fundamentally limited by the voluntary exit relay infrastructure. boGDan targets 720p as the default quality tier because 1080p streaming through Tor is unreliable on many exit nodes. The ABR controller monitors buffer fill and downshifts automatically when throughput drops.
 
 | Scenario | Expected Speed | Notes |
 |----------|---------------|-------|
@@ -136,7 +136,7 @@ ControlPort 9051
 ExitPolicy reject *:*
 
 # Data directory (avoids conflict with system Tor)
-DataDirectory /var/lib/picast/tor
+DataDirectory /var/lib/bogdan/tor
 
 # Log level
 Log notice stderr
@@ -182,19 +182,19 @@ All DNS queries MUST go through Tor's DNSPort (9053), not the system resolver. T
 
 ## Key Constraints
 
-- **Tor is slow**: accept that 1080p streaming through Tor may not be possible on some exit relays. The ABR controller handles this by downshifting to 720p/480p. Do not attempt to work around this by bypassing Tor — that would violate PiCast's core privacy requirement.
+- **Tor is slow**: accept that 1080p streaming through Tor may not be possible on some exit relays. The ABR controller handles this by downshifting to 720p/480p. Do not attempt to work around this by bypassing Tor — that would violate boGDan's core privacy requirement.
 
 - **SOCKS5 auth is not security**: the username/password in SOCKS5 are used purely for circuit isolation, not authentication. Anyone who can connect to 127.0.0.1:9050 can use the proxy. The SOCKS5 port must not be exposed to the network — bind to 127.0.0.1 only.
 
-- **Daemon data directory**: must be writable by the `picast` user and have mode 0700 (Tor will refuse to start if the directory is world-readable). The setup script creates `/var/lib/picast/tor` with correct permissions.
+- **Daemon data directory**: must be writable by the `bogdan` user and have mode 0700 (Tor will refuse to start if the directory is world-readable). The setup script creates `/var/lib/bogdan/tor` with correct permissions.
 
 - **Bootstrap time**: the first time Tor runs, it may take 30–60 seconds to bootstrap (download consensus, build circuits). Subsequent starts are faster (5–15s) if the data directory is preserved. The `wait_ready()` timeout must account for this.
 
 - **Circuit rotation**: Tor rotates circuits every 10 minutes by default. This causes a brief interruption in streaming (~200ms) as the new circuit is built. The GStreamer `queue2` buffer should absorb this. Do NOT disable circuit rotation — it is a security feature.
 
-- **No relay**: PiCast explicitly does not run as a relay or exit node. The Pi's bandwidth is entirely used for its own traffic. The `ExitPolicy reject *:*` and zero relay bandwidth ensure the Pi does not carry third-party Tor traffic.
+- **No relay**: boGDan explicitly does not run as a relay or exit node. The Pi's bandwidth is entirely used for its own traffic. The `ExitPolicy reject *:*` and zero relay bandwidth ensure the Pi does not carry third-party Tor traffic.
 
-- **System Tor conflicts**: if the system Tor service (`tor.service`) is running, it may already occupy port 9050. PiCast's setup script should stop the system Tor service or configure PiCast's Tor to use a different SOCKS port (e.g., 9054). At runtime, `TorManager::start()` should detect the port conflict and fail with a clear error message.
+- **System Tor conflicts**: if the system Tor service (`tor.service`) is running, it may already occupy port 9050. boGDan's setup script should stop the system Tor service or configure boGDan's Tor to use a different SOCKS port (e.g., 9054). At runtime, `TorManager::start()` should detect the port conflict and fail with a clear error message.
 
 ## Reference
 

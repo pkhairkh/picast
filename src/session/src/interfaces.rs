@@ -1,4 +1,4 @@
-//! PiCast Subsystem Trait Interfaces
+//! boGDan Subsystem Trait Interfaces
 //!
 //! These traits define the contracts that each subsystem must implement.
 //! The session manager depends on the **traits** rather than concrete

@@ -1,5 +1,5 @@
 #!/bin/bash
-# PiCast deployment script
+# boGDan deployment script
 #
 # Builds the release binary (with hw feature), copies it to
 # /usr/local/bin, installs the systemd unit, and restarts the service.
@@ -11,21 +11,21 @@
 set -euo pipefail
 
 REPO_DIR="$(cd "$(dirname "$0")" && pwd)"
-BINARY_NAME="picast"
-# The systemd service references /usr/local/bin/picast-server,
+BINARY_NAME="bogdan"
+# The systemd service references /usr/local/bin/bogdan-server,
 # so we install under that name regardless of the Cargo bin name.
-INSTALL_AS="picast-server"
+INSTALL_AS="bogdan-server"
 INSTALL_DIR="/usr/local/bin"
-SERVICE_SRC="$REPO_DIR/deploy/picast.service"
-SERVICE_DST="/etc/systemd/system/picast.service"
-CONFIG_DIR="/etc/picast"
+SERVICE_SRC="$REPO_DIR/deploy/bogdan.service"
+SERVICE_DST="/etc/systemd/system/bogdan.service"
+CONFIG_DIR="/etc/bogdan"
 
 SKIP_BUILD=false
 if [[ "${1:-}" == "--no-build" ]]; then
     SKIP_BUILD=true
 fi
 
-echo "=== PiCast Deploy ==="
+echo "=== boGDan Deploy ==="
 echo ""
 
 # ── Build ──────────────────────────────────────────────────────────────
@@ -67,7 +67,7 @@ if [[ "$SKIP_BUILD" == false ]]; then
     # Detection checks (in order of reliability):
     # 1. /dev/dri/by-path/platform-v3d — udev symlink (may not exist if udev rules missing)
     # 2. /sys/class/misc/v3d — misc device class (older kernels, pre-6.x)
-    # 3. /dev/dri/renderD128 — V3D render node (used by picast-v3d crate internally)
+    # 3. /dev/dri/renderD128 — V3D render node (used by bogdan-v3d crate internally)
     # 4. lsmod v3d — kernel module loaded but no device node yet
     # 5. /sys/class/drm/card*/device/driver → v3d — DRI card backed by v3d driver
     V3D_FOUND=false
@@ -182,7 +182,7 @@ if [[ "$SKIP_BUILD" == false ]]; then
     fi
 
     # ── PulseAudio for Bluetooth audio ─────────────────────────────
-    # PiCast supports two Bluetooth audio paths:
+    # boGDan supports two Bluetooth audio paths:
     #   1. PulseAudio (pulsesink): if PA is running, it handles BT routing
     #   2. BlueALSA + alsasink: if PA is NOT running, uses the BlueALSA
     #      ALSA plugin (bluealsa:DEV=...,PROFILE=a2dp). This is the default
@@ -223,10 +223,10 @@ sudo systemctl daemon-reload
 echo "      Service unit installed and daemon reloaded."
 
 # ── Restart service ───────────────────────────────────────────────────
-echo "[4/4] Restarting picast service..."
-sudo systemctl restart picast
+echo "[4/4] Restarting bogdan service..."
+sudo systemctl restart bogdan
 sleep 1
-sudo systemctl --no-pager status picast || true
+sudo systemctl --no-pager status bogdan || true
 
 # ── CPU governor: performance ─────────────────────────────────────────
 # On Raspberry Pi 4B+, the default CPU governor is "ondemand", which keeps
@@ -301,7 +301,7 @@ if [[ -n "$CONFIG_FILE" ]]; then
         echo "      (Default 76MB is too low — 256MB provides sufficient GPU memory for"
         echo "       V4L2 decode buffers, ISP conversion, and DRM scanout)"
         echo "" | sudo tee -a "$CONFIG_FILE" > /dev/null
-        echo "# PiCast: GPU memory for hardware video decode (default 76MB is too low)" | sudo tee -a "$CONFIG_FILE" > /dev/null
+        echo "# boGDan: GPU memory for hardware video decode (default 76MB is too low)" | sudo tee -a "$CONFIG_FILE" > /dev/null
         echo "gpu_mem=256" | sudo tee -a "$CONFIG_FILE" > /dev/null
         NEED_REBOOT=true
     else
@@ -317,7 +317,7 @@ if [[ -n "$CONFIG_FILE" ]]; then
         echo "      (Without this, 4K monitors run at 30Hz, causing cadence judder on 25fps content"
         echo "       and HVS bandwidth starvation. The kernel warns about this on every boot.)"
         echo "" | sudo tee -a "$CONFIG_FILE" > /dev/null
-        echo "# PiCast: enable 4K@60Hz HDMI output (raises HVS core clock for 4K pixel rate)" | sudo tee -a "$CONFIG_FILE" > /dev/null
+        echo "# boGDan: enable 4K@60Hz HDMI output (raises HVS core clock for 4K pixel rate)" | sudo tee -a "$CONFIG_FILE" > /dev/null
         echo "hdmi_enable_4kp60" | sudo tee -a "$CONFIG_FILE" > /dev/null
         NEED_REBOOT=true
     else
@@ -340,5 +340,5 @@ echo ""
 echo "=== Deploy complete ==="
 echo "  Binary:  $INSTALL_DIR/$INSTALL_AS"
 echo "  Service: $SERVICE_DST"
-echo "  Status:  systemctl status picast"
-echo "  Logs:    journalctl -u picast -f"
+echo "  Status:  systemctl status bogdan"
+echo "  Logs:    journalctl -u bogdan -f"
