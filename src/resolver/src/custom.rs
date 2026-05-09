@@ -1197,50 +1197,6 @@ fn clean_base64(s: &str) -> Option<String> {
     Some(padded)
 }
 
-/// Append the Voe CDN authorization token (`&rq=`) to a media URL.
-///
-/// Voe's CDN requires an `&rq=` (request) query parameter for
-/// authorization. Without it, the CDN returns 403 Forbidden on
-/// direct MP4 download URLs. The `direct_access_url` in Voe's
-/// JSON does NOT include `&rq=`, but the HLS `source` URL does.
-///
-/// This function appends `&rq=<token>` to the URL if:
-/// - The token is provided (Some and non-empty)
-/// - The URL doesn't already contain `&rq=` or `?rq=`
-///
-/// The token comes from the JSON's `"request"` field and is the
-/// same value as the `&rq=` parameter in the HLS source URL.
-fn append_rq_token(url: &str, token: Option<&str>) -> String {
-    match token {
-        Some(t) if !t.is_empty() => {
-            // Don't add &rq= if the URL already has one
-            if url.contains("&rq=") || url.contains("?rq=") {
-                tracing::debug!(
-                    url = %url,
-                    "append_rq_token: URL already contains &rq=, skipping"
-                );
-                return url.to_owned();
-            }
-            let separator = if url.contains('?') { '&' } else { '?' };
-            let new_url = format!("{}{}rq={}", url, separator, t);
-            tracing::info!(
-                original_url = %url,
-                rq_token = %t,
-                new_url = %new_url,
-                "Voe: appended &rq= CDN authorization token to media URL"
-            );
-            new_url
-        },
-        _ => {
-            tracing::debug!(
-                url = %url,
-                "append_rq_token: no request token available, returning URL unchanged"
-            );
-            url.to_owned()
-        },
-    }
-}
-
 fn is_bait_source(source: &str) -> bool {
     let lower = source.to_lowercase();
     if BAIT_FILENAMES.iter().any(|fn_| lower.contains(&fn_.to_lowercase())) {
