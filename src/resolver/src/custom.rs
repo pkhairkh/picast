@@ -905,32 +905,70 @@ fn deobfuscate_embedded_json(raw_json: &str) -> Option<String> {
 
             // ── URL extraction priority ──────────────────────────────────
             //
-            // CRITICAL: The priority order matters because Voe's CDN blocks
-            // the /engine/download/ endpoint from Tor exit IPs (returns 403/404).
-            // The /engine/hls2-c/ endpoint (HLS) WORKS from Tor exit IPs.
+            // Voe's CDN has multiple endpoints with different behaviours:
             //
-            // The "source" key typically contains the HLS .m3u8 URL that the
-            // browser actually uses for playback. This is the most reliable URL
-            // because it goes through the CDN's HLS streaming endpoint, not the
-            // direct download endpoint.
+            //   /engine/hls2-c/  (HLS) — used by browsers via JWPlayer.
+            //     The HLS source URL includes &rq= (request token) in the
+            //     query string and is the URL the browser actually uses.
+            //     However, the CDN's DDoS-Guard/WAF may block requests from
+            //     non-residential IPs (Tor exits, datacenters) with 403/404.
             //
-            // The "mp4" and "direct_access_url" keys point to /engine/download/
-            // which is blocked from Tor. We still try them as fallback in case
-            // some CDN hosts allow direct downloads.
+            //   /engine/download/  (MP4) — direct MP4 download.
+            //     This endpoint requires &rq= appended for CDN authorization
+            //     (the JSON's "request" field). Without &rq=, the CDN returns
+            //     403. The &rq= token is NOT included in the URL's &t=
+            //     signature computation — it's a separate authorization
+            //     check. Testing confirmed that appending &rq= to the
+            //     download URL is required for the CDN to serve content.
+            //
+            // Both endpoints may be blocked from Tor/datacenter IPs by
+            // the CDN's IP reputation checks. We try all available URLs
+            // and let the playback layer handle fallback/retry.
             //
             // Priority order:
-            //   1. "source" — the URL the browser actually uses (HLS or MP4)
-            //   2. "mp4" — direct MP4 URL or multi-quality object
-            //   3. "direct_access_url" — direct download URL (may be blocked)
+            //   1. "direct_access_url" + &rq= — MP4 download with auth token
+            //   2. "source" — the URL the browser uses (usually HLS .m3u8)
+            //   3. "mp4" — direct MP4 URL or multi-quality object
             //   4. "hls" key — explicit HLS playlist URL
+            //
+            // We prefer MP4 over HLS because:
+            //   - MP4 requires only one HTTP request (lower latency)
+            //   - HLS requires fetching master playlist → variant playlist →
+            //     individual .ts segments (many round-trips through Tor)
+            //   - GStreamer's parsebin handles MP4 natively via appsrc
+            //   - HLS segment downloads through Tor are slow and may stutter
 
-            // Priority 1: "source" — the URL the browser actually uses.
-            // This is typically the HLS .m3u8 URL which works from Tor.
-            // Do NOT append &rq= — the source URL already has it if needed.
+            // Priority 1: "direct_access_url" + &rq= — direct MP4 download
+            // with CDN authorization token appended. The &rq= parameter is
+            // required by the CDN for the /engine/download/ endpoint when
+            // "check": true and "direct_access_allowed": false.
+            if let Some(url) = obj.get("direct_access_url").and_then(|v| v.as_str()) {
+                if !url.is_empty() && !is_hls_url(url) {
+                    let url_with_rq = if let Some(ref token) = request_token {
+                        if !url.contains("&rq=") && !url.contains("?rq=") {
+                            tracing::info!(
+                                url = %url,
+                                rq_token = %token,
+                                "Voe method8: appending &rq= to direct_access_url for CDN authorization"
+                            );
+                            format!("{}&rq={}", url, token)
+                        } else {
+                            url.to_owned()
+                        }
+                    } else {
+                        tracing::info!(url = %url, "Voe method8: extracted URL from 'direct_access_url' (no &rq= token available)");
+                        url.to_owned()
+                    };
+                    return Some(url_with_rq);
+                }
+            }
+
+            // Priority 2: "source" — the URL the browser actually uses.
+            // This is typically the HLS .m3u8 URL with &rq= already included.
             if let Some(url) = obj.get("source").and_then(|v| v.as_str()) {
                 if !url.is_empty() {
                     if is_hls_url(url) {
-                        tracing::info!(url = %url, "Voe method8: HLS URL in 'source' — this is the URL the browser uses (works from Tor)");
+                        tracing::info!(url = %url, "Voe method8: HLS URL in 'source' — browser uses this for playback");
                     } else {
                         tracing::info!(url = %url, "Voe method8: extracted URL from 'source' (using as-is)");
                     }
@@ -938,25 +976,21 @@ fn deobfuscate_embedded_json(raw_json: &str) -> Option<String> {
                 }
             }
 
-            // Priority 2: "mp4" key — direct MP4 URL or multi-quality object
-            // Do NOT append &rq= — it breaks the CDN's &t= signature.
+            // Priority 3: "mp4" key — direct MP4 URL or multi-quality object
             if let Some(mp4_val) = obj.get("mp4") {
                 if let Some(url) = extract_media_from_json_value(mp4_val) {
-                    tracing::info!(url = %url, "Voe method8: extracted MP4 URL from 'mp4' key (no &rq= appended — breaks CDN signature)");
-                    return Some(url);
-                }
-            }
-
-            // Priority 3: "direct_access_url" — allow HLS as fallback
-            // Do NOT append &rq= — it breaks the CDN's &t= signature.
-            if let Some(url) = obj.get("direct_access_url").and_then(|v| v.as_str()) {
-                if !url.is_empty() {
-                    if is_hls_url(url) {
-                        tracing::info!(url = %url, "Voe method8: HLS URL in 'direct_access_url' — returning as fallback (StreamSource has HLS client)");
+                    // Append &rq= if not already present
+                    let url_with_rq = if let Some(ref token) = request_token {
+                        if !url.contains("&rq=") && !url.contains("?rq=") {
+                            format!("{}&rq={}", url, token)
+                        } else {
+                            url
+                        }
                     } else {
-                        tracing::info!(url = %url, "Voe method8: extracted URL from 'direct_access_url' (no &rq= appended — breaks CDN signature)");
-                    }
-                    return Some(url.to_owned());
+                        url
+                    };
+                    tracing::info!(url = %url_with_rq, "Voe method8: extracted MP4 URL from 'mp4' key");
+                    return Some(url_with_rq);
                 }
             }
 
@@ -1607,11 +1641,9 @@ fn build_result(
     };
 
     if is_hls {
-        tracing::warn!(
+        tracing::info!(
             url = %media_url,
-            "Voe resolver: returned HLS URL — this should not happen! \
-             The appsrc pipeline cannot handle HLS streams. \
-             The mp4-first priority logic should have prevented this."
+            "Voe resolver: resolved HLS URL — StreamSource will fetch playlists and segments via HLS client"
         );
     } else {
         tracing::info!(

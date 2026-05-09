@@ -477,16 +477,21 @@ impl StreamSource {
 
     /// Fetch a playlist (master or variant) as text via the reqwest client.
     async fn fetch_playlist_text(&self, url: &str) -> Result<String, String> {
+        // HLS playlist requests should use browser-like headers that match
+        // what JWPlayer sends via fetch()/XHR. The key differences from MP4:
+        //   - Sec-Fetch-Dest: "empty" (XHR/fetch, not <video> element)
+        //   - Sec-Fetch-Mode: "cors" (JWPlayer uses CORS-enabled fetch)
+        //   - Accept: include HLS MIME types
         let mut req = self
             .client
             .get(url)
-            .header("Accept", "*/*")
+            .header("Accept", "application/vnd.apple.mpegurl, application/x-mpegurl, */*")
             .header("Accept-Encoding", "identity;q=1, *;q=0")
             .header("sec-ch-ua", r#""Chromium";v="131", "Not_A Brand";v="24""#)
             .header("sec-ch-ua-mobile", "?0")
             .header("sec-ch-ua-platform", "\"Windows\"")
-            .header("Sec-Fetch-Dest", "video")
-            .header("Sec-Fetch-Mode", "no-cors")
+            .header("Sec-Fetch-Dest", "empty")
+            .header("Sec-Fetch-Mode", "cors")
             .header("Sec-Fetch-Site", "cross-site");
 
         if !self.source_url.is_empty() {
@@ -501,6 +506,11 @@ impl StreamSource {
             }
         }
 
+        // Forward cookies from the resolver session. The CDN may validate
+        // that the request includes session cookies (XSRF-TOKEN, voe_session)
+        // that were set when the page was visited. Even though these cookies
+        // are scoped to the page domain, the CDN may check them as part of
+        // the session validation.
         if !self.cookies.is_empty() {
             let cookie_header = self.cookies.join("; ");
             req = req.header("Cookie", &cookie_header);
@@ -782,7 +792,9 @@ impl StreamSource {
                     return;
                 }
 
-                // Build segment request
+                // Build segment request — use video element headers
+                // (.ts segments are loaded by the <video> element's MSE,
+                // so Sec-Fetch-Dest: "video" is appropriate for segments)
                 let mut req = client
                     .get(seg_url)
                     .header("Accept", "*/*")

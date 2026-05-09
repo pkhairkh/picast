@@ -269,7 +269,7 @@ impl GstPipeline {
                     "stream source: preflight CDN check failed (including fallback) — re-resolve needed"
                 );
                 return Err(PlaybackError::PipelineCreation(
-                    "CDN 403 Forbidden — re-resolve needed".into(),
+                    format!("CDN preflight failed: {} — re-resolve needed", e),
                 ));
             }
 
