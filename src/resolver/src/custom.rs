@@ -800,11 +800,43 @@ fn deobfuscate_embedded_json(raw_json: &str) -> Option<String> {
     //   - Previously, "direct_access_url" was tried first, causing the
     //     resolver to return HLS URLs when "mp4" was a multi-quality object
     //     (the .as_str() call failed on the object, falling through to "hls")
+    //
+    // CDN Authorization Token (&rq=):
+    //
+    // Voe's CDN requires an &rq= (request) query parameter for
+    // authorization. Without it, the CDN returns 403 Forbidden on
+    // the direct MP4 download URL ("direct_access_url"). The HLS
+    // source URL already includes &rq=, but the direct_access_url
+    // does NOT — it must be appended from the JSON's "request" field.
+    //
+    // This was discovered because Voe pages have
+    // "direct_access_allowed": false and "check": true, meaning
+    // the CDN validates the request token before allowing the
+    // download. The &rq= token is the same value as the JSON's
+    // "request" field and is also present as &rq= in the HLS
+    // source URL.
     if let Ok(parsed) = serde_json::from_str::<serde_json::Value>(&step6) {
         if let Some(obj) = parsed.as_object() {
+            // Extract the "request" token for CDN authorization.
+            // This must be appended as &rq= to the direct_access_url
+            // or any MP4 URL that doesn't already have it.
+            let request_token = obj
+                .get("request")
+                .and_then(|v| v.as_str())
+                .filter(|s| !s.is_empty())
+                .map(|s| s.to_owned());
+
+            if let Some(ref token) = request_token {
+                tracing::debug!(
+                    rq_token = %token,
+                    "Voe method8: extracted 'request' token for CDN authorization"
+                );
+            }
+
             // Priority 1: "mp4" key — direct MP4 URL or multi-quality object
             if let Some(mp4_val) = obj.get("mp4") {
                 if let Some(url) = extract_media_from_json_value(mp4_val) {
+                    let url = append_rq_token(&url, request_token.as_deref());
                     tracing::debug!(url = %url, "Voe method8: extracted MP4 URL from 'mp4' key");
                     return Some(url);
                 }
@@ -813,8 +845,9 @@ fn deobfuscate_embedded_json(raw_json: &str) -> Option<String> {
             // Priority 2: "direct_access_url" — skip if HLS
             if let Some(url) = obj.get("direct_access_url").and_then(|v| v.as_str()) {
                 if !url.is_empty() && !is_hls_url(url) {
+                    let url = append_rq_token(url, request_token.as_deref());
                     tracing::debug!(url = %url, "Voe method8: extracted URL from 'direct_access_url'");
-                    return Some(url.to_owned());
+                    return Some(url);
                 }
                 if is_hls_url(url) {
                     tracing::debug!(url = %url, "Voe method8: skipping HLS URL in 'direct_access_url'");
@@ -824,6 +857,7 @@ fn deobfuscate_embedded_json(raw_json: &str) -> Option<String> {
             // Priority 3: "source" — skip if HLS
             if let Some(url) = obj.get("source").and_then(|v| v.as_str()) {
                 if !url.is_empty() && !is_hls_url(url) {
+                    let url = append_rq_token(url, request_token.as_deref());
                     tracing::debug!(url = %url, "Voe method8: extracted URL from 'source'");
                     return Some(url.to_owned());
                 }
@@ -1121,7 +1155,50 @@ fn clean_base64(s: &str) -> Option<String> {
     Some(padded)
 }
 
-/// Check if a URL looks like a known test/bait video.
+/// Append the Voe CDN authorization token (`&rq=`) to a media URL.
+///
+/// Voe's CDN requires an `&rq=` (request) query parameter for
+/// authorization. Without it, the CDN returns 403 Forbidden on
+/// direct MP4 download URLs. The `direct_access_url` in Voe's
+/// JSON does NOT include `&rq=`, but the HLS `source` URL does.
+///
+/// This function appends `&rq=<token>` to the URL if:
+/// - The token is provided (Some and non-empty)
+/// - The URL doesn't already contain `&rq=` or `?rq=`
+///
+/// The token comes from the JSON's `"request"` field and is the
+/// same value as the `&rq=` parameter in the HLS source URL.
+fn append_rq_token(url: &str, token: Option<&str>) -> String {
+    match token {
+        Some(t) if !t.is_empty() => {
+            // Don't add &rq= if the URL already has one
+            if url.contains("&rq=") || url.contains("?rq=") {
+                tracing::debug!(
+                    url = %url,
+                    "append_rq_token: URL already contains &rq=, skipping"
+                );
+                return url.to_owned();
+            }
+            let separator = if url.contains('?') { '&' } else { '?' };
+            let new_url = format!("{}{}rq={}", url, separator, t);
+            tracing::info!(
+                original_url = %url,
+                rq_token = %t,
+                new_url = %new_url,
+                "Voe: appended &rq= CDN authorization token to media URL"
+            );
+            new_url
+        },
+        _ => {
+            tracing::debug!(
+                url = %url,
+                "append_rq_token: no request token available, returning URL unchanged"
+            );
+            url.to_owned()
+        },
+    }
+}
+
 fn is_bait_source(source: &str) -> bool {
     let lower = source.to_lowercase();
     if BAIT_FILENAMES.iter().any(|fn_| lower.contains(&fn_.to_lowercase())) {
@@ -1459,6 +1536,38 @@ mod tests {
         assert!(!is_voe_domain("youtube.com"));
         assert!(!is_voe_domain("google.com"));
         assert!(!is_voe_domain("vimeo.com"));
+    }
+
+    #[test]
+    fn test_append_rq_token() {
+        // Basic case: append &rq= to URL with existing query params
+        let url = "https://cdn.example.com/video.mp4?t=abc&sp=380";
+        let result = append_rq_token(url, Some("REQ123"));
+        assert_eq!(result, "https://cdn.example.com/video.mp4?t=abc&sp=380&rq=REQ123");
+
+        // URL already has &rq= — should not add another
+        let url_with_rq = "https://cdn.example.com/video.mp4?t=abc&rq=EXISTING";
+        let result = append_rq_token(url_with_rq, Some("REQ123"));
+        assert_eq!(result, url_with_rq);
+
+        // URL already has ?rq= — should not add another
+        let url_with_rq_start = "https://cdn.example.com/video.mp4?rq=EXISTING";
+        let result = append_rq_token(url_with_rq_start, Some("REQ123"));
+        assert_eq!(result, url_with_rq_start);
+
+        // No token provided — return URL unchanged
+        let url_no_token = "https://cdn.example.com/video.mp4?t=abc";
+        let result = append_rq_token(url_no_token, None);
+        assert_eq!(result, url_no_token);
+
+        // Empty token — return URL unchanged
+        let result = append_rq_token(url_no_token, Some(""));
+        assert_eq!(result, url_no_token);
+
+        // URL without any query params — use ? separator
+        let url_no_query = "https://cdn.example.com/video.mp4";
+        let result = append_rq_token(url_no_query, Some("REQ123"));
+        assert_eq!(result, "https://cdn.example.com/video.mp4?rq=REQ123");
     }
 
     #[test]
