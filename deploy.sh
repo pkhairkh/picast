@@ -30,7 +30,7 @@ echo ""
 
 # ── Build ──────────────────────────────────────────────────────────────
 if [[ "$SKIP_BUILD" == false ]]; then
-    echo "[1/4] Building release binary with hw + hevc features..."
+    echo "[1/6] Building release binary with hw + hevc features..."
 
     # Ensure rustc meets the MSRV (1.88).  Several transitive dependencies
     # (time 0.3.46+, cookie_store 0.22+, idna 1.x / ICU4X 2.x) require
@@ -200,7 +200,7 @@ if [[ "$SKIP_BUILD" == false ]]; then
     (cd "$REPO_DIR" && cargo build --release --features hw,hevc)
     echo "      Build complete."
 else
-    echo "[1/4] Skipping build (--no-build)."
+    echo "[1/6] Skipping build (--no-build)."
 fi
 
 BINARY_SRC="$REPO_DIR/target/release/$BINARY_NAME"
@@ -211,24 +211,157 @@ if [[ ! -f "$BINARY_SRC" ]]; then
 fi
 
 # ── Install binary ────────────────────────────────────────────────────
-echo "[2/4] Installing binary to $INSTALL_DIR/..."
+echo "[2/6] Installing binary to $INSTALL_DIR/..."
 sudo cp "$BINARY_SRC" "$INSTALL_DIR/$INSTALL_AS"
 sudo chmod 755 "$INSTALL_DIR/$INSTALL_AS"
 echo "      Installed $INSTALL_AS $(stat -c %s "$INSTALL_DIR/$INSTALL_AS" 2>/dev/null || stat -f %z "$INSTALL_DIR/$INSTALL_AS") bytes"
 
+# ── Migrate from picast (if present) ────────────────────────────────
+echo "[3/6] Migrating from picast (if present)..."
+
+# Stop and disable old picast service if it exists
+if systemctl list-unit-files picast.service &>/dev/null; then
+    if systemctl is-active --quiet picast 2>/dev/null; then
+        echo "      Stopping old picast service..."
+        sudo systemctl stop picast || true
+    fi
+    if systemctl is-enabled --quiet picast 2>/dev/null; then
+        echo "      Disabling old picast service..."
+        sudo systemctl disable picast || true
+    fi
+    # Remove old service file
+    if [[ -f /etc/systemd/system/picast.service ]]; then
+        sudo rm -f /etc/systemd/system/picast.service
+        sudo systemctl daemon-reload
+        echo "      Removed old picast.service"
+    fi
+else
+    echo "      No old picast service found — clean install"
+fi
+
+# Create bogdan system user if it doesn't exist.
+# If the old picast user exists, rename it; otherwise create fresh.
+if ! id -u bogdan &>/dev/null; then
+    if id -u picast &>/dev/null; then
+        echo "      Renaming picast user → bogdan..."
+        sudo usermod -l bogdan -d /var/lib/bogdan -m picast 2>/dev/null || true
+        sudo groupmod -n bogdan picast 2>/dev/null || true
+    else
+        echo "      Creating bogdan system user..."
+        sudo useradd -r -m -s /usr/sbin/nologin bogdan
+    fi
+else
+    echo "      bogdan user already exists"
+fi
+
+# Ensure user is in required groups
+sudo usermod -aG video,render,audio bogdan 2>/dev/null || true
+
+# Migrate /etc/picast → /etc/bogdan
+if [[ -d /etc/picast ]] && [[ ! -d /etc/bogdan ]]; then
+    echo "      Migrating /etc/picast → /etc/bogdan..."
+    sudo cp -a /etc/picast /etc/bogdan
+    # Update config file name if it exists
+    if [[ -f /etc/bogdan/picast.toml ]] && [[ ! -f /etc/bogdan/bogdan.toml ]]; then
+        sudo mv /etc/bogdan/picast.toml /etc/bogdan/bogdan.toml
+        # Update paths inside the config file
+        sudo sed -i 's|/etc/picast/|/etc/bogdan/|g' /etc/bogdan/bogdan.toml
+        sudo sed -i 's|/var/lib/picast|/var/lib/bogdan|g' /etc/bogdan/bogdan.toml
+        sudo sed -i 's|picast\.pem|bogdan.pem|g' /etc/bogdan/bogdan.toml
+        sudo sed -i 's|picast-key\.pem|bogdan-key.pem|g' /etc/bogdan/bogdan.toml
+        echo "      Renamed picast.toml → bogdan.toml and updated paths"
+    fi
+    # Rename TLS certs
+    if [[ -f /etc/bogdan/tls/picast.pem ]] && [[ ! -f /etc/bogdan/tls/bogdan.pem ]]; then
+        sudo mv /etc/bogdan/tls/picast.pem /etc/bogdan/tls/bogdan.pem
+        echo "      Renamed TLS cert: picast.pem → bogdan.pem"
+    fi
+    if [[ -f /etc/bogdan/tls/picast-key.pem ]] && [[ ! -f /etc/bogdan/tls/bogdan-key.pem ]]; then
+        sudo mv /etc/bogdan/tls/picast-key.pem /etc/bogdan/tls/bogdan-key.pem
+        echo "      Renamed TLS key: picast-key.pem → bogdan-key.pem"
+    fi
+fi
+
+# Migrate /var/lib/picast → /var/lib/bogdan
+if [[ -d /var/lib/picast ]] && [[ ! -d /var/lib/bogdan ]]; then
+    echo "      Migrating /var/lib/picast → /var/lib/bogdan..."
+    sudo cp -a /var/lib/picast /var/lib/bogdan
+fi
+
+# Ensure directories exist with correct ownership
+sudo mkdir -p /etc/bogdan/tls
+sudo mkdir -p /var/lib/bogdan
+sudo mkdir -p /run/bogdan
+sudo chown -R bogdan:bogdan /etc/bogdan
+sudo chown -R bogdan:bogdan /var/lib/bogdan
+
+# Install config file if not present
+if [[ ! -f /etc/bogdan/bogdan.toml ]]; then
+    CONFIG_SOURCE=""
+    if [[ -f "$REPO_DIR/deploy/bogdan.toml" ]]; then
+        CONFIG_SOURCE="$REPO_DIR/deploy/bogdan.toml"
+    elif [[ -f "$REPO_DIR/bogdan.toml.example" ]]; then
+        CONFIG_SOURCE="$REPO_DIR/bogdan.toml.example"
+    fi
+    if [[ -n "$CONFIG_SOURCE" ]]; then
+        sudo cp "$CONFIG_SOURCE" /etc/bogdan/bogdan.toml
+        sudo chown bogdan:bogdan /etc/bogdan/bogdan.toml
+        sudo chmod 644 /etc/bogdan/bogdan.toml
+        echo "      Installed config from $(basename "$CONFIG_SOURCE")"
+    else
+        echo "      WARNING: No bogdan.toml found — config not installed"
+    fi
+else
+    echo "      Config already exists at /etc/bogdan/bogdan.toml"
+fi
+
+# Ensure TLS certs exist
+if [[ ! -f /etc/bogdan/tls/bogdan.pem ]] || [[ ! -f /etc/bogdan/tls/bogdan-key.pem ]]; then
+    if [[ -f "$REPO_DIR/deploy/generate-certs.sh" ]]; then
+        echo "      Generating TLS certificates..."
+        sudo bash "$REPO_DIR/deploy/generate-certs.sh" 2>/dev/null || {
+            # Fallback: generate self-signed cert directly
+            echo "      Fallback: generating self-signed TLS certificate..."
+            HOSTNAME_STR=$(hostname 2>/dev/null || echo 'bogdan')
+            IP_ADDR=$(hostname -I 2>/dev/null | cut -d' ' -f1 || echo '192.168.1.1')
+            sudo openssl req -x509 -newkey rsa:2048 -sha256 -days 3650 \
+                -nodes -keyout /etc/bogdan/tls/bogdan-key.pem -out /etc/bogdan/tls/bogdan.pem \
+                -subj "/CN=boGDan/O=boGDan/C=US" \
+                -addext "subjectAltName=DNS:${HOSTNAME_STR}.local,DNS:${HOSTNAME_STR},DNS:bogdan.local,IP:${IP_ADDR},IP:127.0.0.1" \
+                2>/dev/null
+            sudo chown bogdan:bogdan /etc/bogdan/tls/bogdan.pem /etc/bogdan/tls/bogdan-key.pem
+            sudo chmod 644 /etc/bogdan/tls/bogdan.pem
+            sudo chmod 600 /etc/bogdan/tls/bogdan-key.pem
+            echo "      Self-signed TLS cert generated"
+        }
+    else
+        echo "      WARNING: No TLS certs found and no generate-certs.sh available"
+    fi
+else
+    echo "      TLS certificates already exist"
+fi
+
+# Remove old picast binary if present
+if [[ -f /usr/local/bin/picast-server ]]; then
+    echo "      Removing old picast-server binary..."
+    sudo rm -f /usr/local/bin/picast-server
+fi
+
+echo "      Migration complete."
+
 # ── Install service ───────────────────────────────────────────────────
-echo "[3/4] Installing systemd service..."
+echo "[4/6] Installing systemd service..."
 sudo cp "$SERVICE_SRC" "$SERVICE_DST"
 sudo systemctl daemon-reload
 echo "      Service unit installed and daemon reloaded."
 
 # ── Restart service ───────────────────────────────────────────────────
-echo "[4/4] Restarting bogdan service..."
+echo "[5/6] Restarting bogdan service..."
 sudo systemctl restart bogdan
 sleep 1
 sudo systemctl --no-pager status bogdan || true
 
-# ── CPU governor: performance ─────────────────────────────────────────
+# ── [6/6] CPU governor: performance ──────────────────────────────────────
 # On Raspberry Pi 4B+, the default CPU governor is "ondemand", which keeps
 # the ARM clock at 800 MHz and only scales up under heavy CPU load.  This
 # is catastrophic for hardware video decode: V4L2 M2M decode uses very

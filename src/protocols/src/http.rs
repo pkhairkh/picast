@@ -190,7 +190,15 @@ impl HttpApiServer {
                                         .serve_connection(io, service)
                                         .await
                                     {
-                                        tracing::error!(error = %e, remote = %remote, "HTTPS connection error");
+                                        // "connection closed before message completed" is normal
+                                        // when a client disconnects mid-request (e.g. browser
+                                        // timeout during slow Tor resolution). Log at debug
+                                        // level to avoid spamming the journal on every disconnect.
+                                        if e.to_string().contains("connection closed") {
+                                            tracing::debug!(error = %e, remote = %remote, "HTTPS client disconnected");
+                                        } else {
+                                            tracing::warn!(error = %e, remote = %remote, "HTTPS connection error");
+                                        }
                                     }
                                 }
                                 Err(e) => {
@@ -203,7 +211,11 @@ impl HttpApiServer {
                                 .serve_connection(io, service)
                                 .await
                             {
-                                tracing::error!(error = %e, remote = %remote, "HTTP connection error");
+                                if e.to_string().contains("connection closed") {
+                                    tracing::debug!(error = %e, remote = %remote, "HTTP client disconnected");
+                                } else {
+                                    tracing::warn!(error = %e, remote = %remote, "HTTP connection error");
+                                }
                             }
                         }
                     });
@@ -275,25 +287,44 @@ async fn handle_request(
             if let Err(e) = is_safe_cast_url(&payload.url) {
                 return error_response(StatusCode::BAD_REQUEST, &e.to_string());
             }
-            match session.load(&payload.url).await {
-                Ok(id) => {
-                    let resp =
-                        CastResponse { session_id: id.to_string(), status: "resolving".into() };
-                    json_response(StatusCode::ACCEPTED, &resp)
+
+            // Quick-check: if a session is already active, reject immediately
+            // without spawning a background task. This avoids the race where
+            // two concurrent /api/cast requests both pass the load() check.
+            match session.current_status().await {
+                Ok(_) => {
+                    return error_response(
+                        StatusCode::CONFLICT,
+                        "session already active — stop the current session first",
+                    );
+                },
+                Err(bogdan_session::SessionError::NoActiveSession) => {
+                    // Good — no active session, proceed.
                 },
                 Err(e) => {
-                    let (code, msg) = match &e {
-                        bogdan_session::SessionError::AlreadyActive => {
-                            (StatusCode::CONFLICT, e.to_string())
-                        },
-                        bogdan_session::SessionError::ResolutionFailed(_) => {
-                            (StatusCode::UNPROCESSABLE_ENTITY, e.to_string())
-                        },
-                        _ => (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()),
-                    };
-                    error_response(code, &msg)
+                    // Database or other error — log but continue; load() will
+                    // catch it if it's a real problem.
+                    tracing::warn!(error = %e, "status check before cast failed");
                 },
             }
+
+            // Return 202 Accepted immediately with a placeholder session ID.
+            // The actual resolution + playback happens in a background task.
+            // Clients should poll /api/status or subscribe to WebSocket events
+            // for state changes (Resolving → Buffering → Playing / Error).
+            let session_id = uuid::Uuid::new_v4();
+            let url = payload.url.clone();
+            let bg_session = session.clone();
+
+            tokio::spawn(async move {
+                if let Err(e) = bg_session.load(&url).await {
+                    tracing::warn!(error = %e, url = %url, "background cast failed");
+                }
+            });
+
+            let resp =
+                CastResponse { session_id: session_id.to_string(), status: "resolving".into() };
+            json_response(StatusCode::ACCEPTED, &resp)
         },
 
         // Stop.
