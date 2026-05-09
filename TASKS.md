@@ -1,1459 +1,1064 @@
-# boGDan Task Breakdown
+# boGDan Sprint-Based Task Breakdown
 
-**Granular, actionable tasks derived from [ROADMAP.md](ROADMAP.md).**
-Each task has a unique ID, phase, dependency, acceptance criteria, and estimated
-effort. Tasks are ordered by execution sequence within each phase.
+**Sprint-organized, actionable tasks derived from [ROADMAP.md](ROADMAP.md) and
+[ARCHITECTURE.md](ARCHITECTURE.md). Each sprint has a Definition of Done (DoD),
+explicit acceptance criteria, and estimated effort.**
 
 **Status legend:** `[ ]` not started · `[~]` in progress · `[x]` done
 
-**Last verified:** 2026-05-06 — `cargo check --workspace` ✅ · `cargo test --workspace` (344 tests) ✅ · `cargo clippy --workspace -- -D warnings` ✅ · `cargo fmt --check` ✅ · T-9.3/T-9.4/T-9.7/T-9.8/T-10.1/T-10.2/T-10.4 implemented
+**Last verified:** 2026-05-10 — `cargo check --workspace` · `cargo test --workspace` (344 tests) · `cargo clippy --workspace -- -D warnings` · `cargo fmt --check`
 
 ---
 
-## Phase 0 — Build & CI Foundation
+## Completed Work Summary
 
-### T-0.1 Workspace compilation fix ✅
-- **Crate:** workspace
+The following phases from the original task breakdown are fully implemented:
+
+| Phase | Description | Status |
+|-------|-------------|--------|
+| 0 | Build & CI Foundation (T-0.1 through T-0.5) | Done |
+| 1 | Tor Daemon Integration (T-1.1 through T-1.6) | Done |
+| 2 | DRM/KMS Display Manager — mock mode only (T-2.6) | Partial |
+| 3 | GStreamer Playback Engine (T-3.1, T-3.4 through T-3.10) | Partial |
+| 4 | Content Resolver / yt-dlp (T-4.1 through T-4.9) | Done |
+| 5 | Session Manager (T-5.1 through T-5.7) | Done |
+| 6 | Protocol Servers (T-6.1 through T-6.9) | Done |
+| 7 | Server Orchestration — init + config + health (T-7.1 through T-7.6) | Partial |
+
+**Additionally implemented but not tracked in the original task list:**
+
+- Custom Voe resolver with multi-method deobfuscation (`custom.rs`, 1908 lines)
+- Custom DoodStream resolver (`custom.rs`)
+- SOCKS5 forwarder for Tor circuit isolation (`socks_forwarder.rs`, 557 lines)
+- Progressive download via StreamSource + appsrc (`stream_source.rs`, 1280 lines)
+- HLS segment download and parsing
+- CDN preflight check (GET Range: bytes=0-0)
+- CDN speed-limit detection (sp= parameter)
+- Bait source / decoy detection
+- Dynamic pipeline construction with parsebin (replacing fixed pipeline)
+- Cookie forwarding from resolver session to CDN download
+- ResolverSocksForwarder (separate from playback SOCKS forwarder)
+- Browser-like User-Agent and headers throughout
+
+---
+
+## Sprint 1 — Provider Extraction & Resolver Architecture
+
+**Duration:** 2 weeks (10 working days)
+**Goal:** Make the custom resolver system config-driven and pluggable, eliminating
+VOE/DoodStream-specific hardcoded logic from the resolver core.
+
+**Definition of Done (DoD):**
+- All VOE-specific constants and domain lists moved out of Rust source into
+  a TOML provider configuration file
+- A `ProviderConfig` struct deserializes from TOML with provider name, domain
+  patterns, deobfuscation pipeline steps, and URL extraction rules
+- A `DeobfuscationPipeline` trait defines the interface for pluggable
+  deobfuscation strategies (ROT13, Base64, char-shift, reverse, marker-strip)
+- The existing Voe and DoodStream resolvers are refactored to use the
+  pipeline trait; no functional regression
+- `cargo test --workspace` passes; new unit tests for pipeline steps
+- `cargo clippy --workspace -- -D warnings` clean
+- Provider config file (`providers.d/voe.toml`, `providers.d/doodstream.toml`)
+  validated at startup with clear error messages
+
+**Sprint Acceptance Criteria:**
+1. Adding a new video hosting provider requires ONLY a new `.toml` file under
+   `providers.d/` — no Rust code changes for providers that use existing
+   deobfuscation primitives
+2. Removing `providers.d/voe.toml` causes the Voe resolver to be unavailable,
+   but the system still starts and all other providers work
+3. The deobfuscation pipeline steps are individually unit-tested with known
+   input/output pairs
+4. Domain pattern matching supports exact match, suffix match, and regex
+
+### S1.1 Define ProviderConfig TOML schema
+
+- **Crate:** `bogdan-resolver`
 - **Depends on:** nothing
-- **Effort:** 0.5 day
-- **Description:** Fix all compilation errors across the workspace. Currently
-  `server/main.rs` uses `Arc<()>` stubs instead of real crate types. Make all
-  crates compile on x86_64 with feature flags that gate Pi-specific dependencies
-  (`gstreamer`, `drm`, `gbm`, `nix`).
-- **Acceptance:** `cargo check --workspace` exits 0 on x86_64.
-- **Key steps:**
-  1. Add feature flags to each crate's `Cargo.toml`: `default = []`, `hw = ["gstreamer", "drm-rs", "gbm", "nix"]`
-  2. Gate `use gstreamer;` etc. behind `#[cfg(feature = "hw")]`
-  3. Provide `compile_error!()` if `hw` feature is used on non-aarch64
-  4. Fix any version mismatches in workspace `Cargo.toml`
-
-### T-0.2 `.cargo/config.toml` cross-compilation ✅
-- **Crate:** workspace
-- **Depends on:** T-0.1
-- **Effort:** 0.5 day
-- **Description:** Configure cross-compilation for `aarch64-unknown-linux-gnu`.
-  Add `.cargo/config.toml` with target-specific linker. Verify sysroot and
-  linker availability.
-- **Acceptance:** `cargo check --target aarch64-unknown-linux-gnu --workspace` exits 0.
-- **Key steps:**
-  1. Install `aarch64-linux-gnu-gcc` on build host
-  2. Create `.cargo/config.toml` with `[target.aarch64-unknown-linux-gnu] linker = "aarch64-linux-gnu-gcc"`
-  3. Add `--target aarch64-unknown-linux-gnu` to CI
-  4. Document cross-compilation setup in `docs/contributing.md`
-
-### T-0.3 GitHub Actions CI workflow ✅
-- **Crate:** `.github/`
-- **Depends on:** T-0.1
-- **Effort:** 1 day
-- **Description:** Create `.github/workflows/ci.yml` that runs on every push
-  and PR. Pipeline: check, clippy, test, rustfmt.
-- **Acceptance:** CI runs green on a test PR.
-- **Key steps:**
-  1. Create `.github/workflows/ci.yml`
-  2. Jobs: `check-x86`, `check-aarch64`, `clippy`, `test`, `fmt`
-  3. Install system deps: `libgstreamer1.0-dev`, `libgstreamer-plugins-base1.0-dev`, `libdrm-dev`, `libgbm-dev`, `libsqlite3-dev`
-  4. Cache `~/.cargo/registry` and `target/`
-  5. Run without `hw` feature on CI (x86 can't use Pi-specific libs)
-
-### T-0.4 Smoke test infrastructure ✅
-- **Crate:** all
-- **Depends on:** T-0.1
-- **Effort:** 1 day
-- **Description:** Add at least one `#[cfg(test)]` module to every crate. Tests
-  can be trivial (testing `Default` impls, `Display` formatting, error variants)
-  but they must exist and pass.
-- **Acceptance:** `cargo test --workspace` runs and passes on x86_64.
-- **Key steps:**
-  1. `bogdan-tor`: test `SocksProxy::default()`, `SocksProxy::addr()`, `TorManager::new()` parsing
-  2. `bogdan-display`: test `DisplayManager::new()` with mock path, `DrmPlane`/`DrmCrtc` construction
-  3. `bogdan-playback`: test `PipelineConfig::default()`, `BufferHealth::default()`
-  4. `bogdan-resolver`: test `Resolver::classify()` for each `UrlCategory`, `ResolveResult` serialization
-  5. `bogdan-session`: test `MediaSession::new()`, `PlayerState` serialization, `SessionManager::new()` with in-memory SQLite
-  6. `bogdan-protocols`: test `HttpApiServer::new()`, `WebSocketServer::new()`, `DlnaRenderer::new()`
-  7. `bogdan-server`: test `AppConfig::from_env()`
-
-### T-0.5 Conditional compilation for Pi deps ✅
-- **Crate:** playback, display
-- **Depends on:** T-0.1
-- **Effort:** 1 day
-- **Description:** Gate all `gstreamer`, `drm`, `gbm`, `nix` imports behind
-  `#[cfg(feature = "hw")]`. Provide stub implementations when the feature is
-  off so the crate still compiles and tests pass on x86 dev machines.
-- **Acceptance:** `cargo test -p bogdan-playback -p bogdan-display` passes without `hw` feature.
-- **Key steps:**
-  1. `bogdan-playback/Cargo.toml`: `[features] hw = ["gstreamer", "gstreamer-video"]`
-  2. `PlaybackEngine::new()`: `#[cfg(feature = "hw")]` calls `gstreamer::init()`, else returns a mock engine
-  3. `bogdan-display/Cargo.toml`: `[features] hw = ["drm-rs", "gbm", "nix"]`
-  4. `DisplayManager::new()`: `#[cfg(feature = "hw")]` opens real DRM device, else returns mock with default resolution
-  5. Ensure `cargo check -p bogdan-playback` works without `hw` feature
-
----
-
-## Phase 1 — Tor Daemon Integration
-
-### T-1.1 Tor process spawning ✅
-- **Crate:** `bogdan-tor`
-- **Depends on:** T-0.5
-- **Effort:** 1 day
-- **Description:** Implement `TorManager::ensure_running()` to spawn the `tor`
-  binary as a child process via `tokio::process::Command`. Detect if Tor is
-  already running on the configured SOCKS port before spawning.
-- **Acceptance:** Test binary spawns Tor, `ps` shows `tor` process, SOCKS port
-  becomes reachable within `startup_timeout_ms`.
-- **Key steps:**
-  1. Check if SOCKS port is already open (`TcpStream::connect` with short timeout)
-  2. If not, spawn `tor --defaults-torrc /etc/tor/torrc` (or embedded minimal torrc)
-  3. Store `tokio::process::Child` in `TorManager` for lifecycle management
-  4. Poll SOCKS port with exponential backoff until reachable or timeout
-  5. Set `owns_process = true` only if we spawned the process
-
-### T-1.2 SOCKS5 connectivity verification ✅
-- **Crate:** `bogdan-tor`
-- **Depends on:** T-1.1
-- **Effort:** 0.5 day
-- **Description:** Implement a real SOCKS5 handshake test to verify the proxy
-  is functional, not just that the port is open. Connect to the proxy, send
-  SOCKS5 greeting, verify response.
-- **Acceptance:** `health_check()` returns `Ok(CircuitHealth { is_healthy: true, .. })` when Tor is running.
-- **Key steps:**
-  1. Connect to SOCKS proxy via `TcpStream`
-  2. Send SOCKS5 greeting: `[0x05, 0x02, 0x00, 0x02]` (no auth + username/auth)
-  3. Verify server response
-  4. If successful, measure round-trip latency via a `CONNECT` request to a known host
-  5. Return `CircuitHealth { is_healthy: true, latency_ms: Some(measured), .. }`
-
-### T-1.3 Stream isolation via SOCKS5 username ✅
-- **Crate:** `bogdan-tor`
-- **Depends on:** T-1.2
-- **Effort:** 1 day
-- **Description:** Implement the SHA-256 hash-based stream isolation identifier.
-  Each target domain gets a unique SOCKS5 username so Tor's `IsolateSOCKSAuth`
-  assigns separate circuits. Expose a method to generate the username for a given URL.
-- **Acceptance:** Two URLs from different domains produce different SOCKS5 usernames.
-  Same domain produces the same username.
-- **Key steps:**
-  1. Add `md-5` (already in deps) or use `sha2` for SHA-256 hashing
-  2. `pub fn stream_isolation_id(domain: &str) -> String` → SHA-256 of domain, hex-encoded
-  3. Format: `bogdan-{hex_hash[:16]}`
-  4. Expose `pub fn socks_username_for_url(&self, url: &Url) -> String`
-  5. Add `socks5-proxy-username` field to `SocksProxy` config
-  6. Unit test: same domain → same username; different domains → different usernames
-
-### T-1.4 Tor process lifecycle management ✅
-- **Crate:** `bogdan-tor`
-- **Depends on:** T-1.1
-- **Effort:** 1 day
-- **Description:** Implement clean shutdown and crash recovery for the Tor child
-  process. `shutdown()` sends SIGTERM and waits. `Drop` does best-effort kill.
-  Auto-restart on unexpected exit.
-- **Acceptance:** `shutdown()` cleanly stops Tor; if Tor crashes mid-session,
-  `TorManager` detects it and can restart.
-- **Key steps:**
-  1. `shutdown()`: send SIGTERM via `child.kill()`, `child.wait().await` with 10s timeout
-  2. On timeout, SIGKILL
-  3. Spawn background task: monitor `child.wait()`, set `owns_process = false` on exit
-  4. If unexpected exit (non-zero, not from shutdown): log error, optionally auto-restart
-  5. `Drop` impl: try `child.start_kill()` if process still alive (sync, best-effort)
-
-### T-1.5 Circuit health monitoring via control port ✅
-- **Crate:** `bogdan-tor`
-- **Depends on:** T-1.2
 - **Effort:** 1.5 days
-- **Description:** Connect to Tor's control port (`9051`), authenticate, and
-  periodically query circuit status. Parse `GETINFO circuit-status` to populate
-  `CircuitHealth` metrics.
-- **Acceptance:** `health_check()` returns real `CircuitHealth` with
-  `open_circuits`, `built_circuits`, `latency_ms`.
+- **Description:** Design and implement a `ProviderConfig` struct that
+  deserializes from TOML. Each provider config specifies:
+  - `name`: human-readable provider name
+  - `enabled`: bool (default true)
+  - `domain_patterns`: list of exact, suffix, and regex patterns
+  - `resolver_type`: "custom" | "yt-dlp" | "passthrough"
+  - `deobfuscation_pipeline`: ordered list of steps, each with type and params
+  - `url_extraction`: rules for extracting media URL from deobfuscated data
+    (key priority list, quality preference, CDN token handling)
+  - `cookies`: whether to forward cookies from page fetch to download
+  - `request_headers`: custom headers for page fetches
+  - `timeout_secs`: request timeout
+- **Acceptance:** `ProviderConfig::load("providers.d/voe.toml")` returns a
+  validated config; invalid TOML returns clear error messages.
 - **Key steps:**
-  1. Add `ControlPort 9051` to torrc config
-  2. Connect to `127.0.0.1:9051`, authenticate with cookie or password
-  3. Send `GETINFO circuit-status\r\n`
-  4. Parse response: count `BUILT`, `FAILED`, `CLOSED` circuits
-  5. Spawn `tokio::spawn` background task polling every 30s
-  6. Store latest `CircuitHealth` in `Arc<Mutex<CircuitHealth>>`
-  7. `health_check()` reads from the shared state
+  1. Define `ProviderConfig` struct with serde derive
+  2. Define `DeobfuscationStep` enum: Rot13, StripMarkers, Base64Decode,
+     CharShift { amount: i32 }, Reverse, JsonParse, RegexExtract { pattern: String }
+  3. Define `UrlExtractionRule` enum: JsonKey { key: String, priority: u32 },
+     RegexUrl { pattern: String }
+  4. Implement `validate()` method that checks required fields, regex validity
+  5. Write unit tests for serialization/deserialization round-trip
+  6. Write tests for validation errors on missing/invalid fields
 
-### T-1.6 Tor integration test ✅
-- **Crate:** `bogdan-tor`
-- **Depends on:** T-1.3, T-1.4, T-1.5
-- **Effort:** 1 day
-- **Description:** End-to-end test that spawns a real Tor daemon, verifies
-  SOCKS5 connectivity, generates stream isolation IDs, and shuts down cleanly.
-  Skip in CI if Tor is not installed (`#[cfg(feature = "tor-test")]`).
-- **Acceptance:** Test passes on a machine with `tor` installed.
-- **Key steps:**
-  1. `#[tokio::test] async fn test_tor_lifecycle()`
-  2. `TorManager::new("127.0.0.1:19050")` with non-standard port to avoid conflicts
-  3. Use a temporary torrc with `DataDirectory` in `/tmp/bogdan-test-*`
-  4. `ensure_running(60_000).await?`
-  5. `health_check().await?` → verify `is_healthy`
-  6. Generate stream IDs → verify determinism
-  7. `shutdown().await?` → verify process gone
+### S1.2 Implement DeobfuscationPipeline trait
 
----
-
-## Phase 2 — DRM/KMS Display Manager
-
-### T-2.1 DRM device open and master acquisition
-- **Crate:** `bogdan-display`
-- **Depends on:** T-0.5
-- **Effort:** 1 day
-- **Description:** Open `/dev/dri/card0`, call `drmSetMaster()`, verify the
-  vc4 driver is loaded. Fail with clear error messages if hardware is missing.
-- **Acceptance:** `DisplayManager::new("/dev/dri/card0")` succeeds on Pi 4 with
-  vc4 driver; fails gracefully on non-Pi hardware.
-- **Key steps:**
-  1. Use `drm-rs` crate: `drm::Device::open(path)` → get file descriptor
-  2. `drmSetMaster(fd)` → acquire DRM master privilege
-  3. Query driver: `drmGetVersion()` → verify name == "vc4"
-  4. If not vc4: return `DisplayError::DeviceOpen("Expected vc4 driver, found ...")`
-  5. Store `drm::Device` in `DisplayManager`
-  6. `#[cfg(not(feature = "hw"))]`: return mock with default resolution
-
-### T-2.2 Plane and CRTC enumeration
-- **Crate:** `bogdan-display`
-- **Depends on:** T-2.1
-- **Effort:** 1 day
-- **Description:** Enumerate DRM planes and CRTCs. For each plane, record its
-  ID, supported formats, and Z-position. For each CRTC, record its current mode.
-- **Acceptance:** `planes()` returns at least 2 planes; `crtcs()` returns at
-  least 1 CRTC on Pi 4.
-- **Key steps:**
-  1. `drmModeGetResources()` → enumerate CRTCs, connectors
-  2. `drmModeGetPlaneResources()` → enumerate planes
-  3. For each plane: `drmModeGetPlane()` → `plane_id`, `formats`, `possible_crtcs`
-  4. Get `zpos` property via `drmModeGetObjectProperties()` + `drmModeGetProperty()`
-  5. Map DRM fourcc codes to `Vec<u32>` in `DrmPlane.formats`
-  6. For each CRTC: `drmModeGetCrtc()` → `crtc_id`, `width`, `height`, `refresh_rate`
-
-### T-2.3 HDMI connector detection and mode selection
-- **Crate:** `bogdan-display`
-- **Depends on:** T-2.1
-- **Effort:** 1 day
-- **Description:** Find the connected HDMI connector, read its EDID, and select
-  the preferred display mode (1080p60). Fall back to the best available mode.
-- **Acceptance:** `acquire()` selects 1080p60 on a standard HDMI monitor.
-- **Key steps:**
-  1. Enumerate connectors: `drmModeGetConnector()` for each
-  2. Filter for `DRM_MODE_CONNECTED` status
-  3. Prefer `DRM_MODE_CONNECTOR_HDMIA`
-  4. From modes: prefer 1920×1080 @ 60Hz
-  5. Store selected connector ID and mode in `DisplayManager`
-
-### T-2.4 Atomic modesetting implementation
-- **Crate:** `bogdan-display`
-- **Depends on:** T-2.2, T-2.3
+- **Crate:** `bogdan-resolver`
+- **Depends on:** S1.1
 - **Effort:** 2 days
-- **Description:** Implement `acquire()` using `drmModeAtomicCommit` to set
-  the CRTC mode and enable Plane 0 (video). Implement `release()` to disable
-  planes and restore previous state.
-- **Acceptance:** After `acquire()`, HDMI output shows a black frame at 1080p60.
-  After `release()`, display returns to previous state.
+- **Description:** Define and implement a `DeobfuscationPipeline` trait that
+  takes raw obfuscated input and returns a deobfuscated string. Implement
+  concrete step types for each deobfuscation primitive currently used by
+  the Voe and DoodStream resolvers:
+  - `Rot13Step`: applies ROT13 substitution
+  - `StripMarkersStep`: removes marker patterns (configurable regex list)
+  - `Base64DecodeStep`: standard Base64 decode
+  - `CharShiftStep`: shifts ASCII characters by a configurable amount
+  - `ReverseStep`: reverses the string
+  - `JsonParseStep`: parses JSON and extracts a key
+- **Acceptance:** Each step has at least 2 unit tests with known input/output.
+  A pipeline composed of multiple steps correctly chains their outputs.
 - **Key steps:**
-  1. Create atomic request: `drmModeAtomicAlloc()`
-  2. Set CRTC properties: mode, active, primary plane FB
-  3. Set Plane 0 properties: CRTC_ID, SRC_* (source rect), CRTC_* (dest rect), FB_ID
-  4. Commit with `DRM_MODE_ATOMIC_ALLOW_MODESET | DRM_MODE_PAGE_FLIP_EVENT`
-  5. Wait for vblank event via `drmHandleEvent()`
-  6. `release()`: disable planes, clear CRTC FB
+  1. Define `trait DeobfuscationStep { fn apply(&self, input: &str) -> Option<String>; }`
+  2. Implement each concrete step as a struct with `DeobfuscationStep` impl
+  3. Implement `DeobfuscationPipeline` struct that holds `Vec<Box<dyn DeobfuscationStep>>`
+  4. `Pipeline::run(&self, input: &str) -> Option<String>` chains steps,
+     returning None if any step fails
+  5. Implement `From<&ProviderConfig>` for `DeobfuscationPipeline` that
+     builds the pipeline from config step definitions
+  6. Unit test each step with Voe's known deobfuscation chains:
+     Method 8: ROT13 → strip → Base64 → char-shift(-3) → reverse → Base64
+     Method 7: similar chain
+     Method 6: similar chain
 
-### T-2.5 GBM device and surface initialization
-- **Crate:** `bogdan-display`
-- **Depends on:** T-2.1
+### S1.3 Extract Voe resolver to config-driven provider
+
+- **Crate:** `bogdan-resolver`
+- **Depends on:** S1.1, S1.2
+- **Effort:** 3 days
+- **Description:** Refactor `custom.rs::resolve_voe()` to use the
+  DeobfuscationPipeline trait and ProviderConfig. Move all VOE-specific
+  constants (VOE_DOMAINS, BAIT_DOMAINS, BAIT_FILENAMES, deobfuscation
+  step sequences) into `providers.d/voe.toml`. The resolver reads the
+  config at startup and builds the pipeline dynamically.
+- **Acceptance:** Voe resolution still works after refactoring (verified by
+  existing test patterns). `VOE_DOMAINS` no longer appears in `custom.rs`.
+  Adding a domain to `voe.toml` makes it recognized without recompilation.
+- **Key steps:**
+  1. Create `providers.d/voe.toml` with Voe's 3 method pipelines
+  2. Create `providers.d/doodstream.toml` with DoodStream config
+  3. Refactor `resolve_voe()` to accept `&ProviderConfig` and build
+     `DeobfuscationPipeline` from config
+  4. Replace `VOE_DOMAINS` constant with config-driven domain matching
+  5. Replace `is_voe_domain()` heuristic with config lookup + heuristic fallback
+  6. Move `extract_media_from_json_value()` logic to config-driven URL
+     extraction rules
+  7. Move CDN speed-limit logic (`extract_cdn_speed_param`,
+     `typical_bitrate_kbps`) into provider config with quality preference
+  8. Verify: `cargo test -p bogdan-resolver` passes with same results
+
+### S1.4 Extract DoodStream resolver to config-driven provider
+
+- **Crate:** `bogdan-resolver`
+- **Depends on:** S1.1, S1.2
+- **Effort:** 2 days
+- **Description:** Refactor `custom.rs::resolve_doodstream()` to use
+  ProviderConfig. Move DoodStream-specific constants and logic into
+  `providers.d/doodstream.toml`.
+- **Acceptance:** DoodStream resolution still works after refactoring.
+  `DOODSTREAM_DOMAINS` no longer appears in `custom.rs`.
+- **Key steps:**
+  1. Define DoodStream provider config with embed URL derivation rules
+  2. Refactor `resolve_doodstream()` to use config-driven logic
+  3. Move `derive_embed_url()` regex pattern into config
+  4. Replace `DOODSTREAM_DOMAINS` with config lookup
+  5. Verify: existing DoodStream tests pass
+
+### S1.5 Provider registry and startup loading
+
+- **Crate:** `bogdan-resolver`
+- **Depends on:** S1.3, S1.4
 - **Effort:** 1.5 days
-- **Description:** Initialize GBM (Generic Buffer Manager) on the DRM device.
-  Allocate a GBM surface for Plane 1 (OSD overlay) with ARGB8888 format.
-- **Acceptance:** GBM surface allocated with `GBM_BO_USE_RENDERING | GBM_BO_USE_SCANOUT`
-  flags; buffer can be imported into DRM.
+- **Description:** Implement a `ProviderRegistry` that loads all `.toml`
+  files from `providers.d/` at startup, validates them, and builds
+  resolver instances. The registry provides a method to find the matching
+  provider for a given URL (domain matching). Integrate with the existing
+  `Resolver` struct.
+- **Acceptance:** On startup, the resolver logs loaded providers. An unknown
+  domain falls through to yt-dlp. A known domain is routed to the correct
+  provider. Invalid provider TOML produces a clear startup error.
+- **Key steps:**
+  1. Implement `ProviderRegistry::load_from_dir(path) -> Result<Self>`
+  2. `ProviderRegistry::find_provider(&self, url: &Url) -> Option<&ProviderConfig>`
+  3. Integrate into `Resolver::resolve()` dispatch logic
+  4. Add startup log: "Loaded N providers: voe, doodstream, ..."
+  5. Test: config with duplicate provider names → error
+  6. Test: config with invalid regex → error with filename and line
+
+---
+
+## Sprint 2 — Resolver Testing & CDN Resilience
+
+**Duration:** 2 weeks (10 working days)
+**Goal:** Comprehensive testing for custom resolvers, CDN preflight/retry
+logic, and error handling hardening.
+
+**Definition of Done (DoD):**
+- Every deobfuscation step has unit tests with known input/output pairs
+- Voe and DoodStream resolvers have integration tests using mock HTTP servers
+- CDN preflight check has tests for 403, timeout, and success cases
+- Retry logic for CDN failures (re-resolve on 403) is tested
+- Cache integration for custom resolver results works
+- `cargo test --workspace` passes with new tests added
+- No `unwrap()` or `expect()` in production resolver paths that could panic
+
+**Sprint Acceptance Criteria:**
+1. Custom resolver code has >80% line coverage
+2. A CDN 403 during download triggers automatic re-resolution with a new
+   Tor circuit (different isolation username)
+3. Mock HTTP server tests verify Voe Method 6, 7, 8 deobfuscation
+4. Cache stores and returns custom resolver results correctly
+
+### S2.1 Voe deobfuscation unit tests
+
+- **Crate:** `bogdan-resolver`
+- **Depends on:** S1.2
+- **Effort:** 2 days
+- **Description:** Write comprehensive unit tests for each Voe deobfuscation
+  method. Use real obfuscated samples (captured from actual Voe pages,
+  anonymized) as test inputs. Test each step individually and the full
+  pipeline as a chain.
+- **Acceptance:** Each method (6, 7, 8) has at least one test with real
+  obfuscated input that produces a valid media URL. Edge cases (empty
+  input, invalid Base64, missing JSON keys) return None without panicking.
+- **Key steps:**
+  1. Capture 3-5 real Voe page samples and extract the obfuscated blobs
+  2. Write `test_method8_deobfuscation()` with known input → expected output
+  3. Write `test_method7_deobfuscation()` with known input → expected output
+  4. Write `test_method6_deobfuscation()` with known input → expected output
+  5. Write edge case tests: empty string, invalid Base64, truncated JSON
+  6. Write test for `is_voe_domain()` heuristic: real Voe domains pass,
+     well-known domains reject, .com heuristic catches plausible domains
+
+### S2.2 DoodStream resolver unit tests
+
+- **Crate:** `bogdan-resolver`
+- **Depends on:** S1.4
+- **Effort:** 1.5 days
+- **Description:** Write unit tests for DoodStream-specific logic:
+  embed URL derivation, download token extraction, media URL construction.
+- **Acceptance:** `derive_embed_url()` correctly transforms /d/ → /e/ URLs.
+  Media URL construction from download tokens produces valid URLs.
+- **Key steps:**
+  1. Test `derive_embed_url()`: various /d/ URL formats → correct /e/ URLs
+  2. Test `is_doodstream_domain()`: all known domains, subdomains, unknowns
+  3. Test bait source detection with DoodStream bait patterns
+  4. Test error paths: 403 on main page, 403 on embed page
+
+### S2.3 Mock HTTP server integration tests
+
+- **Crate:** `bogdan-resolver`
+- **Depends on:** S2.1, S2.2
+- **Effort:** 3 days
+- **Description:** Set up a mock HTTP server (using `mockito` or `wiremock`)
+  that simulates Voe and DoodStream pages. Write integration tests that
+  hit the mock server instead of real sites, verifying the full resolve
+  flow from URL to ResolveResult.
+- **Acceptance:** `resolve_voe()` and `resolve_doodstream()` work against
+  mock servers. No real network requests in test suite. Tests run in CI.
+- **Key steps:**
+  1. Add `mockito` dev-dependency to `bogdan-resolver/Cargo.toml`
+  2. Create mock Voe page: HTML with obfuscated JSON blob (Method 8)
+  3. Create mock DoodStream page: HTML with embed iframe
+  4. Test: `resolve_voe(mock_url)` returns correct `ResolveResult`
+  5. Test: `resolve_doodstream(mock_url)` returns correct `ResolveResult`
+  6. Test: JS redirect following (Voe → front-end domain)
+  7. Test: Cookie forwarding from page fetch to resolve result
+  8. Test: 404/403 responses return `ResolveError::NoMediaFound`
+
+### S2.4 CDN preflight and retry logic
+
+- **Crate:** `bogdan-playback`
+- **Depends on:** nothing
+- **Effort:** 2 days
+- **Description:** Harden the CDN preflight check and implement automatic
+  re-resolution on CDN 403. When StreamSource's preflight returns 403
+  (CDN IP-bound token mismatch with Tor exit), the system should:
+  1. Generate a new stream isolation username (different Tor circuit)
+  2. Re-resolve the URL through the new circuit
+  3. Retry the CDN preflight with the new direct URL
+  4. Give up after 3 attempts and return a clear error
+- **Acceptance:** CDN 403 during preflight triggers re-resolution with a
+  new circuit. After 3 failures, a clear error is returned to the user.
+  Success on retry works correctly.
+- **Key steps:**
+  1. Add `preflight_retry_count` to `StreamSource` config
+  2. On 403: call back to session manager for re-resolution
+  3. Generate new isolation username: `bogdan-{hash}-{attempt}`
+  4. Restart SOCKS forwarder with new username
+  5. Retry preflight with new circuit
+  6. Log each attempt with Tor exit IP (if available from control port)
+  7. After max retries: return `PlaybackError::CdnForbidden`
+
+### S2.5 Cache integration for custom resolvers
+
+- **Crate:** `bogdan-resolver`
+- **Depends on:** S1.3
+- **Effort:** 1.5 days
+- **Description:** Ensure custom resolver results (Voe, DoodStream) are
+  stored in and served from the SQLite cache. Currently the cache is only
+  populated by yt-dlp results. Custom resolver results should be cached
+  with the same TTL (10 minutes) and same fields.
+- **Acceptance:** Second call to `resolve()` with the same Voe URL returns
+  cached result without making any HTTP requests. Cache entry includes
+  all ResolveResult fields (direct_url, cookies, content_length, etc.).
+- **Key steps:**
+  1. Verify `ResolveResult` from custom resolvers includes all cache fields
+  2. Add `resolver_type` column to cache table: "ytdlp" | "custom" | "direct"
+  3. On custom resolve: INSERT OR REPLACE into cache with resolver_type="custom"
+  4. On cache hit for custom URL: verify TTL, return cached result
+  5. Test: resolve Voe URL → cache miss → resolve → cache hit on second call
+
+---
+
+## Sprint 3 — DRM/KMS Display & Pi Hardware Bringup
+
+**Duration:** 2 weeks (10 working days)
+**Goal:** Working DRM display on Raspberry Pi hardware — the last major
+unimplemented subsystem.
+
+**Definition of Done (DoD):**
+- `bogdan-display` opens `/dev/dri/card0`, acquires DRM master, verifies
+  vc4 driver, and enumerates real planes/CRTCs on Pi 4
+- `acquire()` performs atomic modesetting at 1080p60 on HDMI
+- `release()` cleanly disables planes and restores state
+- GBM surface allocation for Plane 1 (OSD overlay) succeeds
+- All display operations work on Pi 4 with vc4 driver
+- Mock mode continues to work on x86 for CI
+- `cargo test -p bogdan-display --features hw` passes on Pi 4
+
+**Sprint Acceptance Criteria:**
+1. On Pi 4: `DisplayManager::new("/dev/dri/card0")` succeeds
+2. On Pi 4: `acquire()` shows a black frame at 1080p60 on HDMI
+3. On Pi 4: `release()` restores the display to previous state
+4. On x86: all existing tests continue to pass without `hw` feature
+5. No other process can hold DRM master while boGDan is running
+
+### S3.1 DRM device open and master acquisition
+
+- **Crate:** `bogdan-display`
+- **Depends on:** nothing (parallel with Sprint 2)
+- **Effort:** 1.5 days
+- **Description:** Implement real DRM device opening behind `#[cfg(feature = "hw")]`.
+  Open `/dev/dri/card0`, call `drmSetMaster()`, verify vc4 driver. Fail
+  with clear error messages if hardware is missing or another process
+  holds DRM master.
+- **Acceptance:** `DisplayManager::new("/dev/dri/card0")` succeeds on Pi 4
+  with vc4 driver; fails with `DisplayError::DeviceOpen` on non-Pi hardware
+  or when another compositor is running.
+- **Key steps:**
+  1. `#[cfg(feature = "hw")]` branch: open DRM device with `drm-rs`
+  2. Acquire DRM master: `drmSetMaster(fd)`
+  3. Query driver version: verify name == "vc4"
+  4. If not vc4: return `DisplayError::DeviceOpen("Expected vc4 driver")`
+  5. If DRM master unavailable: return `DisplayError::DeviceOpen("DRM master busy — is another compositor running?")`
+  6. Store DRM device file descriptor in `DisplayManager`
+
+### S3.2 Plane and CRTC enumeration
+
+- **Crate:** `bogdan-display`
+- **Depends on:** S3.1
+- **Effort:** 1.5 days
+- **Description:** Enumerate DRM planes and CRTCs on Pi 4. Record plane
+  IDs, supported formats, Z-positions. Record CRTC IDs and current modes.
+- **Acceptance:** `planes()` returns at least 2 planes (Plane 0 for video,
+  Plane 1 for OSD); `crtcs()` returns at least 1 CRTC on Pi 4.
+- **Key steps:**
+  1. `drmModeGetResources()` → enumerate CRTCs and connectors
+  2. `drmModeGetPlaneResources()` → enumerate planes
+  3. For each plane: record `plane_id`, `formats` (DRM fourcc), `possible_crtcs`
+  4. Get `zpos` property for each plane
+  5. For each CRTC: record current mode (width, height, refresh)
+  6. Validate: at least one plane supports NV12 (video), one supports ARGB8888 (OSD)
+
+### S3.3 HDMI connector detection and mode selection
+
+- **Crate:** `bogdan-display`
+- **Depends on:** S3.1
+- **Effort:** 1 day
+- **Description:** Find the connected HDMI connector, read EDID, select
+  preferred display mode (1080p60). Fall back to best available mode.
+- **Acceptance:** `acquire()` selects 1080p60 on a standard HDMI monitor.
+  Falls back to highest available resolution/refresh if 1080p60 unavailable.
+- **Key steps:**
+  1. Enumerate connectors, filter for `DRM_MODE_CONNECTED`
+  2. Prefer HDMIA connector type
+  3. From available modes: prefer 1920x1080 @ 60Hz
+  4. Store selected connector ID and mode
+  5. Log available modes for debugging
+
+### S3.4 Atomic modesetting implementation
+
+- **Crate:** `bogdan-display`
+- **Depends on:** S3.2, S3.3
+- **Effort:** 3 days
+- **Description:** Implement `acquire()` using `drmModeAtomicCommit` to set
+  the CRTC mode and enable Plane 0 (video). Implement `release()` to
+  disable planes and restore previous state.
+- **Acceptance:** After `acquire()`, HDMI output shows a black frame at
+  1080p60. After `release()`, display returns to previous state (or off).
+  No visual tearing during plane updates.
+- **Key steps:**
+  1. Save previous CRTC/connector state before modesetting
+  2. Create atomic request: `drmModeAtomicAlloc()`
+  3. Set CRTC properties: mode, active
+  4. Set Plane 0 properties: CRTC_ID, SRC_*, CRTC_*, FB_ID
+  5. Commit with `DRM_MODE_ATOMIC_ALLOW_MODESET | DRM_MODE_PAGE_FLIP_EVENT`
+  6. Wait for vblank event via `drmHandleEvent()`
+  7. `release()`: restore saved state, release DRM master
+
+### S3.5 GBM device and surface initialization
+
+- **Crate:** `bogdan-display`
+- **Depends on:** S3.1
+- **Effort:** 2 days
+- **Description:** Initialize GBM on the DRM device. Allocate a GBM surface
+  for Plane 1 (OSD overlay) with ARGB8888 format. Verify the surface can
+  be imported into DRM for scanout.
+- **Acceptance:** GBM surface allocated with `GBM_BO_USE_RENDERING |
+  GBM_BO_USE_SCANOUT` flags. Buffer import into DRM via
+  `drmModeAddFB2()` succeeds.
 - **Key steps:**
   1. `gbm::Device::new(drm_device)` → create GBM device
-  2. `gbm_device.create_surface(width, height, GBM_FORMAT_ARGB8888, GBM_BO_USE_RENDERING | GBM_BO_USE_SCANOUT)`
-  3. Verify surface creation succeeds
-  4. Test buffer lock/unlock cycle
-  5. Import GBM buffer into DRM: `gbm_bo_get_handle()` → `drmModeAddFB2()`
+  2. Allocate GBM surface: ARGB8888, 1920x1080, RENDERING + SCANOUT
+  3. Test buffer lock/unlock cycle
+  4. Import GBM buffer into DRM: `gbm_bo_get_handle()` → `drmModeAddFB2()`
+  5. Store GBM device and surface in `DisplayManager`
 
-### T-2.6 Mock display mode for x86 testing ✅
-- **Crate:** `bogdan-display`
-- **Depends on:** T-0.5
-- **Effort:** 0.5 day
-- **Description:** Implement `DisplayManager::new("mock")` that skips real DRM
-  and returns hardcoded values. This enables unit testing and CI on x86.
-- **Acceptance:** All `DisplayManager` methods work without real hardware.
-- **Key steps:**
-  1. If `device_path == "mock"`, set `is_mock = true`
-  2. `planes()` returns `[DrmPlane { plane_id: 0, zpos: 0, .. }, DrmPlane { plane_id: 1, zpos: 1, .. }]`
-  3. `crtcs()` returns `[DrmCrtc { crtc_id: 0, width: 1920, height: 1080, .. }]`
-  4. `acquire()` and `release()` are no-ops
-  5. `resolution()` returns `(1920, 1080)`
+### S3.6 Display integration test on Pi
 
-### T-2.7 Display integration test on Pi
 - **Crate:** `bogdan-display`
-- **Depends on:** T-2.4, T-2.5
+- **Depends on:** S3.4, S3.5
 - **Effort:** 1 day
-- **Description:** On-Pi test that opens DRM, enumerates resources, acquires
-  CRTC, and verifies HDMI output. Skip in CI.
-- **Acceptance:** Test passes on Pi 4 with HDMI monitor connected.
+- **Description:** On-Pi integration test that opens DRM, enumerates
+  resources, acquires CRTC, verifies HDMI output, and releases cleanly.
+  Skip in CI (requires Pi hardware).
+- **Acceptance:** Test passes on Pi 4 with HDMI monitor connected. Test
+  is skipped on x86 CI (`#[cfg(feature = "hw")]`).
 - **Key steps:**
   1. `#[cfg(feature = "hw")] #[tokio::test] async fn test_display_lifecycle()`
-  2. Open DRM, enumerate, acquire, verify resolution, release
+  2. Open DRM, enumerate, acquire, verify resolution (1920x1080), release
   3. Verify Plane 0 and Plane 1 are available
   4. Verify GBM surface allocation succeeds
+  5. Verify `release()` cleans up without errors
 
 ---
 
-## Phase 3 — GStreamer Playback Engine
+## Sprint 4 — Full Playback Pipeline on Pi
 
-### T-3.1 GStreamer initialization and pipeline construction ✅
+**Duration:** 2 weeks (10 working days)
+**Goal:** End-to-end video playback on Raspberry Pi with the appsrc/StreamSource
+architecture, V4L2 hardware decode, and DRM/KMS output.
+
+**Definition of Done (DoD):**
+- The appsrc + parsebin + v4l2h264dec + kmssink pipeline works on Pi 4
+- Progressive download through SOCKS forwarder delivers data to appsrc
+- HLS segmented download works end-to-end on Pi
+- Audio plays through HDMI or 3.5mm jack
+- Software decode fallback works when V4L2 is unavailable
+- Buffer health monitoring reports accurate state during Tor-routed playback
+- `cargo test -p bogdan-playback --features hw` passes on Pi 4
+
+**Sprint Acceptance Criteria:**
+1. On Pi 4: Cast a YouTube URL → video plays at 1080p60 through V4L2 HW decode
+2. On Pi 4: Cast a Voe URL → video plays through custom resolver + StreamSource
+3. On Pi 4: HLS URL → segments download and play through appsrc
+4. Pause/resume/seek/stop work correctly during playback
+5. Audio is in sync with video (no measurable A/V drift after 5 minutes)
+
+### S4.1 Validate appsrc + parsebin pipeline on Pi
+
 - **Crate:** `bogdan-playback`
-- **Depends on:** T-0.5, T-2.6 (for mock display)
-- **Effort:** 2 days
-- **Description:** Initialize GStreamer (`gst::init()`), construct the pipeline
-  from individual elements, and manage element lifecycle. Use programmatic
-  element creation (not `parse_launch`) for type safety.
-- **Acceptance:** `PlaybackEngine::new()` creates a `gst::Pipeline` with all
-  elements linked.
-- **Key steps:**
-  1. `gst::init()` in `PlaybackEngine::new()`
-  2. Create elements: `souphttpsrc`, `queue2`, `h264parse`, `v4l2h264dec`, `kmssink`, `alsasink`
-  3. Add all elements to pipeline
-  4. Link elements: `src → queue2 → parse → decoder → video_sink` (video branch)
-  5. Add `audioconvert → volume → alsasink` for audio branch
-  6. Use `gst::Pipeline::get_by_name()` for element access
-  7. Handle link failures gracefully
-
-### T-3.2 Pipeline playback with direct URL
-- **Crate:** `bogdan-playback`
-- **Depends on:** T-3.1
-- **Effort:** 2 days
-- **Description:** Set a URL on `souphttpsrc`, transition pipeline to `Playing`,
-  and verify bus messages indicate successful playback.
-- **Acceptance:** `play("http://...test.mp4")` returns `Ok(())` and pipeline
-  reaches `Playing` state.
-- **Key steps:**
-  1. `souphttpsrc.set_property("location", url)`
-  2. `pipeline.set_state(gst::State::Playing)`
-  3. Listen on bus for `GST_MESSAGE_STATE_CHANGED` → confirm `Playing`
-  4. Handle `GST_MESSAGE_ERROR` → return `PlaybackError::Gstreamer`
-  5. Timeout: if not playing within 30s, return error
-
-### T-3.3 Tor SOCKS5 proxy in souphttpsrc
-- **Crate:** `bogdan-playback`
-- **Depends on:** T-3.2, T-1.3
-- **Effort:** 1 day
-- **Description:** Configure `souphttpsrc` with SOCKS5 proxy from `TorManager`.
-  Set `socks5-proxy-ip`, `socks5-proxy-port`, and `socks5-proxy-username` for
-  stream isolation.
-- **Acceptance:** Media fetched through Tor; `used_tor = true` in playback status.
-- **Key steps:**
-  1. `souphttpsrc.set_property("socks5-proxy-ip", proxy_ip)`
-  2. `souphttpsrc.set_property("socks5-proxy-port", proxy_port)`
-  3. `souphttpsrc.set_property("socks5-proxy-username", stream_id)`
-  4. `souphttpsrc.set_property("proxy-id", "")` (disable HTTP proxy)
-  5. Test: verify media URL resolves through Tor (check IPs if possible)
-
-### T-3.4 Play/Pause/Resume/Stop state transitions ✅
-- **Crate:** `bogdan-playback`
-- **Depends on:** T-3.2
-- **Effort:** 2 days
-- **Description:** Implement `pause()`, `resume()`, and `stop()` by setting
-  GStreamer pipeline state and listening for confirmation on the bus.
-- **Acceptance:** All four state transitions work and return correct state.
-- **Key steps:**
-  1. `pause()`: `pipeline.set_state(gst::State::Paused)` → wait for confirmation
-  2. `resume()`: `pipeline.set_state(gst::State::Playing)` → wait for confirmation
-  3. `stop()`: `pipeline.set_state(gst::State::Null)` → clean up resources
-  4. Track current state internally, return `PlaybackError::InvalidState` for
-     illegal transitions (e.g., pause when already paused)
-  5. Add `current_state()` method returning `PlayerState`
-
-### T-3.5 Seek implementation ✅
-- **Crate:** `bogdan-playback`
-- **Depends on:** T-3.4
-- **Effort:** 1 day
-- **Description:** Implement `seek()` using `gst_element_seek_simple()` with
-  `FLUSH_KEY_UNITS` flag. After seek, query position to confirm.
-- **Acceptance:** `seek(60_000)` seeks to 1 minute; `position_ms()` returns ~60000.
-- **Key steps:**
-  1. `pipeline.seek_simple(gst::Format::Time, gst::SeekFlags::FLUSH_KEY_UNITS, position_ns)`
-  2. Wait for `GST_MESSAGE_ASYNC_DONE` on bus
-  3. Query position: `pipeline.query_position(gst::Format::Time)`
-  4. Handle seek failures: `PlaybackError::SeekFailed`
-
-### T-3.6 Volume control ✅
-- **Crate:** `bogdan-playback`
-- **Depends on:** T-3.1
-- **Effort:** 0.5 day
-- **Description:** Insert a `volume` element before `alsasink`. Expose
-  `set_volume(0.0–1.0)` by setting the `volume` property.
-- **Acceptance:** `set_volume(0.5)` audibly reduces volume; `set_volume(0.0)` mutes.
-- **Key steps:**
-  1. Create `gst::ElementFactory::make("volume")` during pipeline construction
-  2. Insert between `audioconvert` and `alsasink`
-  3. `volume_element.set_property("volume", value as f64)`
-  4. `get_volume()` reads the property back
-
-### T-3.7 Buffer health monitoring ✅
-- **Crate:** `bogdan-playback`
-- **Depends on:** T-3.2
-- **Effort:** 1.5 days
-- **Description:** Listen for `GST_MESSAGE_BUFFERING` from `queue2`. Parse
-  buffering percentage and populate `BufferHealth` struct. Expose for polling
-  by the session manager.
-- **Acceptance:** `buffer_health()` returns real fill percentage during playback
-  over Tor (where buffering is expected).
-- **Key steps:**
-  1. Set `queue2` property: `use-buffering=true`, `max-size-bytes=52428800`
-  2. On `GST_MESSAGE_BUFFERING`: parse `percent` from message
-  3. Store in `Arc<Mutex<BufferHealth>>`
-  4. Calculate `buffered_seconds` from `fill_percent × buffer_duration_ms`
-  5. Detect stalls: `is_buffering = true` when `percent < 100` and pipeline auto-pauses
-  6. Resume playback when `percent >= 80` (high threshold)
-
-### T-3.8 Software decode fallback ✅
-- **Crate:** `bogdan-playback`
-- **Depends on:** T-3.2
-- **Effort:** 1.5 days
-- **Description:** If `v4l2h264dec` fails to negotiate (not available, wrong
-  format, DMA-BUF allocation failure), fall back to software decode via
-  `avdec_h264 → videoconvert → kmssink`.
-  **Implemented:** Auto-detects V4L2 decode failure and falls back to avdec_h264 with 720p30 caps filter.
-- **Acceptance:** On a system without V4L2 M2M, playback still works (albeit
-  with higher CPU usage).
-- **Key steps:**
-  1. Attempt `v4l2h264dec` pipeline first
-  2. If `GST_MESSAGE_ERROR` from decoder: catch error, construct fallback pipeline
-  3. Fallback: `souphttpsrc → queue2 → h264parse → avdec_h264 → videoconvert → kmssink`
-  4. Log warning: "Falling back to software decode — higher CPU usage expected"
-  5. Limit fallback to 720p30: add caps filter `video/x-raw, width<=1280, height<=720`
-
-### T-3.9 Pipeline error recovery ✅
-- **Crate:** `bogdan-playback`
-- **Depends on:** T-3.4
-- **Effort:** 1 day
-- **Description:** Handle `GST_MESSAGE_ERROR` and `GST_MESSAGE_WARNING` on the
-  bus. On error: extract debug string, clean up pipeline, return error to caller.
-  On warning: log but continue.
-- **Acceptance:** A broken URL returns `PlaybackError::Gstreamer` with descriptive
-  message; pipeline is in a clean state after error.
-- **Key steps:**
-  1. Spawn bus watch: `pipeline.bus().add_watch()`
-  2. On `GST_MESSAGE_ERROR`: `err.parse()` → extract error message and debug string
-  3. Set pipeline to `Null` state
-  4. Return error via `watch::Sender` or `oneshot` channel
-  5. On `GST_MESSAGE_WARNING`: log with `tracing::warn!`
-
-### T-3.10 Position and duration queries ✅
-- **Crate:** `bogdan-playback`
-- **Depends on:** T-3.4
-- **Effort:** 0.5 day
-- **Description:** Implement `position_ms()` and add `duration_ms()` method.
-  Use GStreamer query API.
-- **Acceptance:** During playback, `position_ms()` advances; `duration_ms()` matches known media length.
-- **Key steps:**
-  1. `position_ms()`: `pipeline.query_position(gst::Format::Time)` → convert nanos to millis
-  2. `duration_ms()`: `pipeline.query_duration(gst::Format::Time)` → convert nanos to millis
-  3. Return `0` if query fails (e.g., while seeking)
-
----
-
-## Phase 4 — Content Resolver (yt-dlp)
-
-### T-4.1 yt-dlp subprocess invocation ✅
-- **Crate:** `bogdan-resolver`
-- **Depends on:** T-1.3 (for stream isolation)
-- **Effort:** 1 day
-- **Description:** Implement `Resolver::resolve()` to spawn `yt-dlp -J <url>`
-  via `tokio::process::Command`. Capture stdout (JSON) and stderr (errors).
-  Apply timeout (60s).
-- **Acceptance:** `resolve("https://www.youtube.com/watch?v=...")` returns
-  `ResolveResult` with a direct media URL.
-- **Key steps:**
-  1. Build command: `Command::new("yt-dlp").arg("-J").arg("--no-warnings").arg(url)`
-  2. Add timeout: `.kill_on_drop(true)` + `tokio::time::timeout(Duration::from_secs(60), child.wait())`
-  3. Capture stdout → parse as JSON
-  4. Capture stderr → include in `ResolveError::Network` on failure
-  5. Map exit codes: 0 = success, 1 = no video found, other = network error
-
-### T-4.2 yt-dlp JSON output parsing ✅
-- **Crate:** `bogdan-resolver`
-- **Depends on:** T-4.1
-- **Effort:** 1.5 days
-- **Description:** Parse yt-dlp's JSON info dict. Extract: `url`, `formats`,
-  `title`, `duration`, `subtitles`, `thumbnail`. Select the best H.264 format.
-- **Acceptance:** Parsed `ResolveResult` contains correct `direct_url`, `category`,
-  `mime_type`, and subtitle list.
-- **Key steps:**
-  1. Deserialize yt-dlp JSON: `serde_json::from_value::<yt_dlp::Info>(json)?`
-  2. Define `struct YtdlpInfo` with relevant fields (url, formats, title, etc.)
-  3. From `formats[]`: find best `vcodec^=avc1` + `acodec^=mp4a` combo
-  4. Construct direct URL from selected format's `url` field
-  5. If merged format: yt-dlp returns `url` pointing to `manifest_url` — may need HLS/DASH handling
-
-### T-4.3 Format selection: force H.264 ✅
-- **Crate:** `bogdan-resolver`
-- **Depends on:** T-4.1
-- **Effort:** 0.5 day
-- **Description:** Pass `--format` flag to yt-dlp to force H.264 video selection.
-  Fallback chain: best H.264 → best any codec → error.
-- **Acceptance:** Resolved URLs always point to H.264 streams when available.
-- **Key steps:**
-  1. `--format "bestvideo[vcodec^=avc1]+bestaudio/best[vcodec^=avc1]/best"`
-  2. Verify in parsed JSON that selected format's `vcodec` starts with `avc1`
-  3. If no H.264 available: try `av1` or `vp9` software decode (limited resolution)
-  4. Log a warning if forced to use non-H.264 codec
-
-### T-4.4 Tor SOCKS5h proxy routing for yt-dlp ✅
-- **Crate:** `bogdan-resolver`
-- **Depends on:** T-4.1, T-1.3
-- **Effort:** 1 day
-- **Description:** Configure yt-dlp to route through Tor SOCKS proxy with
-  stream isolation. Use `--proxy socks5h://username@host:port/` format.
-- **Acceptance:** yt-dlp requests appear on Tor circuits; DNS doesn't leak.
-- **Key steps:**
-  1. Get `SocksProxy` from `TorManager`
-  2. Generate stream isolation ID: `bogdan-<sha256(domain)>`
-  3. `--proxy socks5h://bogdan-{hash}@127.0.0.1:9050/`
-  4. `socks5h` (h = remote DNS) ensures DNS goes through Tor, not local resolver
-  5. Test: resolve a URL, check Tor control port for circuit with matching username
-
-### T-4.5 Resolution cache with TTL ✅ (upgraded to SQLite)
-- **Crate:** `bogdan-resolver`
-- **Depends on:** T-4.2
-- **Effort:** 1.5 days
-- **Description:** Add a SQLite-backed cache for resolved URLs. Avoids repeated
-  yt-dlp invocations for the same URL within the TTL window (10 minutes).
-  **Upgraded from in-memory HashMap to SQLite with WAL mode.** Timestamps
-  stored as Unix epoch seconds for reliable cross-platform time comparison.
-- **Acceptance:** Second call to `resolve()` with same URL returns cached result
-  without spawning yt-dlp.
-- **Key steps:**
-  1. Create table: `resolved_urls (source_url TEXT PK, direct_url TEXT, category TEXT, mime_type TEXT, content_length INTEGER, used_tor INTEGER, title TEXT, duration INTEGER, thumbnail TEXT, vcodec TEXT, acodec TEXT, width INTEGER, height INTEGER, subtitle_tracks TEXT, resolved_at INTEGER)`
-  2. On `resolve()`: check cache first — `SELECT ... WHERE source_url = ? AND resolved_at > (now - TTL)`
-  3. Cache hit → return stored `ResolveResult`
-  4. Cache miss → resolve via yt-dlp → INSERT OR REPLACE into cache
-  5. Cleanup: `DELETE FROM resolved_urls WHERE resolved_at < (now - 1 hour)` on each resolve
-  6. WAL mode enabled for concurrent read access
-
-### T-4.6 Subtitle extraction ✅
-- **Crate:** `bogdan-resolver`
-- **Depends on:** T-4.1
-- **Effort:** 1 day
-- **Description:** Configure yt-dlp to extract available subtitles. Parse
-  subtitle list from JSON output. Download subtitle files to temp directory.
-- **Acceptance:** `ResolveResult` includes `available_subtitles: ["en", "es", "fr"]`.
-- **Key steps:**
-  1. `--write-subs --sub-langs "en,es,fr,de" --sub-format vtt`
-  2. Parse `subtitles` field from yt-dlp JSON: map of language code → subtitle URL list
-  3. Add `available_subtitles: Vec<String>` to `ResolveResult`
-  4. Download subtitle files to `/tmp/bogdan-subs/{session_id}/`
-  5. Clean up subtitle files on session stop
-
-### T-4.7 Direct media passthrough ✅
-- **Crate:** `bogdan-resolver`
-- **Depends on:** T-0.5
-- **Effort:** 0.5 day
-- **Description:** URLs classified as `DirectMedia` or `HlsManifest` or
-  `DashManifest` skip yt-dlp entirely and return immediately.
-- **Acceptance:** `resolve("http://example.com/video.mp4")` returns in <1ms
-  without spawning yt-dlp.
-- **Key steps:**
-  1. `classify()` already handles this — check `category` before spawning yt-dlp
-  2. For `DirectMedia`: `direct_url = source_url`, `mime_type` from extension
-  3. For `HlsManifest`/`DashManifest`: pass through to GStreamer's adaptive demuxer
-  4. Only `WebPage` category triggers yt-dlp resolution
-
-### T-4.8 Error handling and timeout ✅
-- **Crate:** `bogdan-resolver`
-- **Depends on:** T-4.1
-- **Effort:** 0.5 day
-- **Description:** Map yt-dlp exit codes and stderr to `ResolveError` variants.
-  Kill subprocess on timeout.
-- **Acceptance:** All error paths return descriptive `ResolveError` variants.
-- **Key steps:**
-  1. Exit code 0 → `Ok(ResolveResult)`
-  2. Exit code 1 + "Unsupported URL" → `ResolveError::NoMediaFound`
-  3. Exit code 1 + "HTTP Error" → `ResolveError::Network`
-  4. Timeout (60s) → kill child → `ResolveError::Network("yt-dlp timed out")`
-  5. Binary not found → `ResolveError::TorUnavailable("yt-dlp not installed")` (or new variant)
-
-### T-4.9 Resolver integration test ✅
-- **Crate:** `bogdan-resolver`
-- **Depends on:** T-4.3, T-4.4, T-4.5
-- **Effort:** 1 day
-- **Description:** End-to-end test: resolve URLs of each category, verify
-  result fields, test cache hit on second call, verify error handling for
-  invalid URLs and magnet links. WebPage/Onion tests gracefully handle
-  the case where yt-dlp is not installed.
-- **Acceptance:** Tests resolve direct media, HLS, DASH URLs correctly;
-  cache hit verified on second call; invalid URLs return `InvalidUrl`;
-  magnet links return `NoMediaFound`; WebPage/Onion tests pass with or
-  without yt-dlp.
-- **Key steps:**
-  1. `#[tokio::test] async fn test_resolve_youtube()`
-  2. Requires running Tor + yt-dlp
-  3. `resolver.resolve("https://www.youtube.com/watch?v=dQw4w9WgXcQ").await?`
-  4. Verify `category == WebPage`, `direct_url` contains `googlevideo.com`
-  5. Second resolve → cache hit (verify no new subprocess spawned)
-
----
-
-## Phase 5 — Session Manager
-
-### T-5.1 Trait-object wiring ✅
-- **Crate:** `bogdan-session`
-- **Depends on:** T-1.3, T-2.6, T-3.4, T-4.2
-- **Effort:** 1 day
-- **Description:** Replace `Arc<()>` stubs in `SessionManager` with real
-  `Arc<dyn ResolverTrait>`, `Arc<dyn PlaybackTrait>`, `Arc<dyn DisplayTrait>`,
-  `Arc<dyn TorTrait>`. Update constructor.
-- **Acceptance:** `SessionManager::new(resolver, playback, display, tor)` compiles
-  and stores trait objects.
-- **Key steps:**
-  1. Update `SessionManager` struct: add `resolver`, `playback`, `display`, `tor` fields
-  2. Implement `From` for concrete types → trait objects
-  3. Ensure all trait methods are `async` and `Send`
-  4. Write test: create mock implementations, verify wiring
-
-### T-5.2 Load flow: resolve → create session → play ✅
-- **Crate:** `bogdan-session`
-- **Depends on:** T-5.1
-- **Effort:** 2 days
-- **Description:** Implement `load()` to: (1) call `resolver.resolve()`,
-  (2) create `MediaSession` in SQLite, (3) call `playback.play()`, (4) return
-  session ID.
-- **Acceptance:** `load("https://youtube.com/...")` returns a UUID; SQLite
-  contains the session; playback starts.
-- **Key steps:**
-  1. `self.resolver.resolve(url).await?` → `ResolveResult`
-  2. Create `MediaSession { source_url: url, resolved_url: Some(result.direct_url), state: Resolving, .. }`
-  3. Insert into SQLite: `INSERT INTO sessions (...) VALUES (...)`
-  4. Update state: `Resolving → Buffering`
-  5. `self.playback.play(&result.direct_url).await?`
-  6. Update state: `Buffering → Playing`
-  7. Return `session.id`
-
-### T-5.3 State machine implementation ✅
-- **Crate:** `bogdan-session`
-- **Depends on:** T-5.2
-- **Effort:** 2 days
-- **Description:** Implement the 7-state state machine with valid transitions
-  only. Invalid transitions return `SessionError`.
-- **Acceptance:** Attempting `pause()` when `Idle` returns error; valid
-  transitions update state in SQLite and broadcast via watch channel.
-- **Key steps:**
-  1. Define transition table: `(from_state, command) → Option<to_state>`
-  2. `Idle + load → Resolving`, `Resolving + resolved → Buffering`, etc.
-  3. Before each command: `validate_transition(current_state, command)?`
-  4. After transition: `UPDATE sessions SET state = ? WHERE id = ?`
-  5. Broadcast: `watch_tx.send(current_state)?`
-
-### T-5.4 Play/Pause/Stop/Seek/SetVolume delegation ✅
-- **Crate:** `bogdan-session`
-- **Depends on:** T-5.3
-- **Effort:** 1.5 days
-- **Description:** Implement each command method: validate state, delegate to
-  subsystem, update SQLite, broadcast state change.
-- **Acceptance:** Each command produces correct state transition and subsystem call.
-- **Key steps:**
-  1. `play()`: validate `Loaded/Paused` → `self.playback.resume()` → `Playing`
-  2. `pause()`: validate `Playing/Buffering` → `self.playback.pause()` → `Paused`
-  3. `stop()`: any state → `self.playback.stop()` → `Idle`, optionally delete session
-  4. `seek()`: validate `Playing/Paused` → `self.playback.seek()` → `Seeking` → `Playing`
-  5. `set_volume()`: any state → `self.playback.set_volume()` → update `volume` in SQLite
-
-### T-5.5 Watch channel for state broadcasting ✅
-- **Crate:** `bogdan-session`
-- **Depends on:** T-5.3
-- **Effort:** 0.5 day
-- **Description:** Add `tokio::sync::watch` channel to `SessionManager`. Protocol
-  handlers subscribe to receive real-time state updates.
-- **Acceptance:** Protocol handler receives state update within 10ms of transition.
-- **Key steps:**
-  1. `watch_tx: watch::Sender<MediaSession>`, `watch_rx: watch::Receiver<MediaSession>`
-  2. On state transition: `watch_tx.send(updated_session)?`
-  3. Expose `pub fn subscribe(&self) -> watch::Receiver<MediaSession>`
-  4. Protocol handlers: `tokio::spawn(async { while rx.changed().await.is_ok() { ... } })`
-
-### T-5.6 Session cleanup and persistence ✅
-- **Crate:** `bogdan-session`
-- **Depends on:** T-5.2
-- **Effort:** 1 day
-- **Description:** On startup, clean up stale sessions (>24h). On stop,
-  delete session or mark as stopped. Ensure SQLite is in WAL mode for
-  concurrent access.
-- **Acceptance:** After process restart, stale sessions are cleaned; active
-  sessions are recoverable.
-- **Key steps:**
-  1. `SessionManager::new()`: `DELETE FROM sessions WHERE updated_at < datetime('now', '-24 hours')`
-  2. Enable WAL mode: `PRAGMA journal_mode=WAL`
-  3. On `stop()`: `DELETE FROM sessions WHERE id = ?`
-  4. On process start: check if any session is in `Playing` → set to `Idle` (crash recovery)
-
-### T-5.7 Thread safety for concurrent access ✅
-- **Crate:** `bogdan-session`
-- **Depends on:** T-5.4
-- **Effort:** 0.5 day
-- **Description:** Ensure `SessionManager` is safe for concurrent access from
-  HTTP, WebSocket, and DLNA handlers. Use `Arc<Mutex<SessionManager>>` or
-  internal `Mutex` per field.
-- **Acceptance:** Multiple concurrent API calls don't cause data races or SQLite
-  corruption.
-- **Key steps:**
-  1. Wrap `SessionManager` in `Arc<Mutex<SessionManager>>` (coarse-grained)
-  2. Or: separate `Mutex<Connection>` for SQLite, atomic state for `PlayerState`
-  3. Write concurrent test: `tokio::join!(session.load(url1), session.load(url2))`
-  4. Second load should return `409 Conflict` (single session)
-
----
-
-## Phase 6 — Protocol Servers
-
-### T-6.1 HTTP API: POST /api/cast ✅
-- **Crate:** `bogdan-protocols`
-- **Depends on:** T-5.2
-- **Effort:** 1 day
-- **Description:** Implement the `/api/cast` endpoint using `hyper`. Parse JSON
-  body, delegate to `session.load()`, return `202 Accepted`.
-- **Acceptance:** `curl -X POST http://localhost:8585/api/cast -d '{"url":"..."}'`
-  returns `{"sessionId":"...","status":"resolving"}`.
-- **Key steps:**
-  1. Parse request body: `serde_json::from_slice::<CastRequest>(&body)?`
-  2. Validate `url` field is present and valid URI
-  3. `session.load(url).await?` → `Uuid`
-  4. Return `202 Accepted` with `{"sessionId": id, "status": "resolving"}`
-  5. Handle: `400` (bad URL), `409` (session active), `422` (resolution failed), `503` (pipeline error)
-
-### T-6.2 HTTP API: POST /api/stop ✅
-- **Crate:** `bogdan-protocols`
-- **Depends on:** T-5.4
-- **Effort:** 0.5 day
-- **Description:** Implement `/api/stop`. Stop current session, release resources.
-- **Acceptance:** `POST /api/stop` returns `200 OK` with `{"status":"idle"}`.
-- **Key steps:**
-  1. Parse optional `sessionId` from body
-  2. `session.stop(session_id).await?`
-  3. Return `200 OK` with previous session ID
-  4. `404` if no active session
-
-### T-6.3 HTTP API: POST /api/pause ✅
-- **Crate:** `bogdan-protocols`
-- **Depends on:** T-5.4
-- **Effort:** 0.5 day
-- **Description:** Implement `/api/pause` to toggle pause state.
-- **Acceptance:** `POST /api/pause` when playing returns `{"status":"paused"}`.
-  When paused, returns `{"status":"playing"}`.
-- **Key steps:**
-  1. `session.pause(session_id).await?`
-  2. Return current state + position + duration
-  3. `409` if no active session
-
-### T-6.4 HTTP API: POST /api/seek ✅
-- **Crate:** `bogdan-protocols`
-- **Depends on:** T-5.4
-- **Effort:** 0.5 day
-- **Description:** Implement `/api/seek` with absolute and relative modes.
-- **Acceptance:** `POST /api/seek -d '{"seconds":120}'` seeks to 2:00.
-- **Key steps:**
-  1. Parse `SeekRequest { seconds: f64, mode: Option<String> }`
-  2. Default mode: `"absolute"`
-  3. If relative: add to current position
-  4. Validate bounds: 0 ≤ position ≤ duration
-  5. `session.seek(id, position_ms).await?`
-
-### T-6.5 HTTP API: GET /api/status ✅
-- **Crate:** `bogdan-protocols`
-- **Depends on:** T-5.4
-- **Effort:** 1 day
-- **Description:** Implement `/api/status` returning full session state as JSON.
-  Includes all fields from the SPECIFICATION.
-- **Acceptance:** `GET /api/status` returns complete JSON matching the spec.
-- **Key steps:**
-  1. `session.status(session_id).await?`
-  2. Map `MediaSession` → `StatusResponse` with all spec fields
-  3. Include `bufferPercent` from `playback.buffer_health()`
-  4. Include `videoCodec`, `videoResolution`, `audioCodec` from pipeline queries
-  5. When idle: return `{"sessionId": null, "status": "idle"}`
-
-### T-6.6 HTTP API: POST /api/volume ✅
-- **Crate:** `bogdan-protocols`
-- **Depends on:** T-5.4
-- **Effort:** 0.5 day
-- **Description:** Implement `/api/volume` to set volume and mute state.
-- **Acceptance:** `POST /api/volume -d '{"level":0.5}'` sets volume to 50%.
-- **Key steps:**
-  1. Parse `VolumeRequest { level: Option<f64>, muted: Option<bool> }`
-  2. Validate: `0.0 ≤ level ≤ 1.0`
-  3. `session.set_volume(id, (level * 100.0) as u8).await?`
-
-### T-6.7 CORS headers for browser extension ✅
-- **Crate:** `bogdan-protocols`
-- **Depends on:** T-6.1
-- **Effort:** 0.5 day
-- **Description:** Add `Access-Control-Allow-Origin: *` and other CORS headers
-  to all HTTP responses. Handle OPTIONS preflight requests.
-- **Acceptance:** Browser extension can make cross-origin requests to the API.
-- **Key steps:**
-  1. Add CORS middleware to hyper service
-  2. Set headers: `Access-Control-Allow-Origin: *`, `Allow-Methods: GET, POST, OPTIONS`, `Allow-Headers: Content-Type`
-  3. Handle `OPTIONS` requests with `204 No Content`
-  4. Apply to all `/api/*` routes
-
-### T-6.8 WebSocket server ✅
-- **Crate:** `bogdan-protocols`
-- **Depends on:** T-5.5
+- **Depends on:** S3.4
 - **Effort:** 3 days
-- **Description:** Implement WebSocket server on port 8586 using `tokio-tungstenite`.
-  Accept connections, parse client messages, broadcast state changes.
-- **Acceptance:** WebSocket client connects, sends `CAST` message, receives
-  `MEDIA_STATUS` updates.
+- **Description:** Validate the current pipeline architecture (appsrc →
+  queue2 → parsebin → dynamic decode chain → kmssink) on real Pi 4
+  hardware. Test with local MP4 files first (no Tor), then with CDN URLs
+  through StreamSource.
+- **Acceptance:** Local MP4 file plays at 1080p60 with V4L2 HW decode on
+  Pi 4. CPU usage < 10% during playback. No GStreamer warnings or errors.
 - **Key steps:**
-  1. TCP listener on `0.0.0.0:8586`
-  2. WebSocket upgrade via `tokio-tungstenite::accept_async()`
-  3. Maintain `Arc<Mutex<Vec<WebSocketSender>>>` for connected clients
-  4. Parse incoming messages: `CAST`, `STOP`, `PAUSE`, `SEEK`, `VOLUME`, `SUBTITLE`
-  5. Delegate to `SessionManager` methods
-  6. Subscribe to `watch` channel: broadcast `MEDIA_STATUS` to all clients
-  7. Ping/pong every 30s; disconnect unresponsive clients after 10s
+  1. Build `bogdan-server` with `--features hw` on Pi 4
+  2. Test with local file: `curl -X POST /api/cast -d '{"url":"file:///tmp/test.mp4"}'`
+  3. Verify V4L2 decoder is used: check GStreamer debug logs for "v4l2h264dec"
+  4. Verify zero-copy: check for DMA-BUF in debug logs
+  5. Verify kmssink uses vc4 driver
+  6. Measure CPU usage with `top` during playback — target < 10%
 
-### T-6.9 WebSocket: RESOLVE_PROGRESS messages ✅
-- **Crate:** `bogdan-protocols`
-- **Depends on:** T-6.8, T-4.1
-- **Effort:** 1 day
-- **Description:** During yt-dlp resolution, send periodic `RESOLVE_PROGRESS`
-  messages to WebSocket clients. Parse yt-dlp stderr for progress indication.
-- **Acceptance:** WebSocket client receives `RESOLVE_PROGRESS` every ~5s during
-  resolution.
-- **Key steps:**
-  1. Capture yt-dlp stderr line-by-line
-  2. Parse common patterns: "Downloading webpage", "Extracting info", etc.
-  3. Map to `phase` enum values
-  4. Send `RESOLVE_PROGRESS` to all WebSocket clients
-  5. Also send `RESOLVE_PROGRESS` via HTTP (polling) as fallback
+### S4.2 StreamSource integration with appsrc on Pi
 
-### T-6.10 DLNA via gmediarender ✅
-- **Crate:** `bogdan-protocols`
-- **Depends on:** T-5.4
+- **Crate:** `bogdan-playback`
+- **Depends on:** S4.1
 - **Effort:** 3 days
-- **Description:** Spawn `gmediarender` as a subprocess with a custom GStreamer
-  pipeline string that matches boGDan's V4L2 + kmssink configuration. Monitor
-  state changes and synchronize with `SessionManager`.
-  **Implemented:** gmediarender subprocess spawned with boGDan GStreamer pipeline, SSDP discovery working, session sync via D-Bus monitoring.
-- **Acceptance:** VLC discovers boGDan as a renderer; casting a URL from VLC
-  plays video on the Pi's HDMI output.
+- **Description:** Validate the full StreamSource → appsrc data flow on Pi 4
+  with Tor-routed CDN downloads. Test both MP4 and HLS download modes.
+  Verify the SOCKS forwarder maintains circuit isolation throughout playback.
+- **Acceptance:** CDN URL fetched through Tor, data delivered to appsrc,
+  video plays without interruption (assuming sufficient bandwidth). HLS
+  segments download and play sequentially.
 - **Key steps:**
-  1. Spawn `gmediarender -f "boGDan" --gstout-audiosink=alsasink --gstout-videosink=kmssink`
-  2. Wait for SSDP advertisement
-  3. Monitor D-Bus or GStreamer bus for state changes
-  4. On `SetAVTransportURI`: extract URL, call `session.load()`
-  5. On `Play`/`Pause`/`Stop`: call corresponding session methods
-  6. Handle gmediarender crashes: restart subprocess
+  1. Cast a direct MP4 URL through Tor
+  2. Verify SOCKS forwarder starts and routes through correct circuit
+  3. Verify data flows: CDN → reqwest → channel → appsrc → pipeline
+  4. Monitor throughput: log download speed vs video bitrate
+  5. Test HLS: cast .m3u8 URL, verify segments download and play
+  6. Test cookie forwarding: Voe CDN download includes session cookies
+  7. Test CDN 403: verify error propagates to user with clear message
 
-### T-6.11 HTTP API integration tests ✅
+### S4.3 Audio pipeline validation on Pi
+
+- **Crate:** `bogdan-playback`
+- **Depends on:** S4.1
+- **Effort:** 2 days
+- **Description:** Validate the audio branch of the GStreamer pipeline on
+  Pi 4. Test HDMI audio output and 3.5mm jack output. Verify A/V sync
+  with the `ts-offset` compensation.
+- **Acceptance:** Audio plays in sync with video on HDMI output. Volume
+  control works. Switching to 3.5mm jack output via config works.
+- **Key steps:**
+  1. Default: HDMI audio via `alsasink` (device `hw:0,0` or `default`)
+  2. Test volume control: `POST /api/volume {"level": 0.5}` reduces volume
+  3. Test mute: `POST /api/volume {"level": 0.0}` silences audio
+  4. Verify A/V sync: play content with obvious lip sync, check for drift
+  5. Test 3.5mm jack: configure `alsasink device=hw:1,0` in bogdan.toml
+  6. If `avdec_aac` unavailable: verify fallback to `fdkaacdec` or `fakesink`
+
+### S4.4 Software decode fallback validation on Pi
+
+- **Crate:** `bogdan-playback`
+- **Depends on:** S4.1
+- **Effort:** 1 day
+- **Description:** Validate the software decode fallback path on Pi 4.
+  Force V4L2 failure (e.g., by sending non-H.264 content) and verify
+  avdec_h264 + videoconvert + kmssink works at reduced resolution.
+- **Acceptance:** When V4L2 decode fails, playback continues with software
+  decode at 720p30. A warning is logged about higher CPU usage.
+- **Key steps:**
+  1. Send VP9 video URL (yt-dlp may return VP9 if H.264 unavailable)
+  2. Verify GStreamer falls back to software decode
+  3. Verify 720p30 caps filter is applied
+  4. Verify CPU usage is higher but playback is smooth
+  5. Verify warning logged: "Falling back to software decode"
+
+### S4.5 End-to-end playback test script
+
+- **Crate:** `bogdan-playback` / integration
+- **Depends on:** S4.2, S4.3
+- **Effort:** 1 day
+- **Description:** Write a shell script that automates the full playback
+  test on Pi 4: start boGDan, cast URLs of different types, verify
+  playback state, stop, verify clean shutdown.
+- **Acceptance:** Script runs on Pi 4 and reports pass/fail for each test
+  case. Can be run manually or from CI with Pi runner.
+- **Key steps:**
+  1. `scripts/test-playback-pi.sh`
+  2. Test cases: direct MP4, YouTube, Voe, HLS, DoodStream
+  3. For each: cast → wait for Playing → pause → resume → seek → stop
+  4. Verify HTTP API responses at each step
+  5. Check for GStreamer errors in logs
+  6. Check for resource leaks (open file descriptors, memory)
+
+---
+
+## Sprint 5 — Extension & Protocol Hardening
+
+**Duration:** 2 weeks (10 working days)
+**Goal:** Browser extension is production-ready. Protocol servers are hardened
+with proper error handling, rate limiting, and security measures.
+
+**Definition of Done (DoD):**
+- Browser extension passes Chrome Web Store review and Firefox Add-on review
+- WebSocket server handles reconnection, ping/pong, and client limits
+- HTTP API returns proper error codes and messages for all edge cases
+- DLNA renderer works with VLC and Home Assistant
+- No unwraps in protocol handler code paths
+- All extension JS passes linting
+
+**Sprint Acceptance Criteria:**
+1. Extension installs and works on Chrome 120+ and Firefox 120+
+2. Casting from the extension to a running boGDan instance works end-to-end
+3. WebSocket reconnection works after server restart
+4. HTTP API returns 429 for >10 requests/second from a single IP
+5. DLNA renderer appears in VLC's renderer list on the same LAN
+
+### S5.1 Extension Chrome Web Store packaging
+
+- **Crate:** `src/extension`
+- **Depends on:** nothing
+- **Effort:** 2 days
+- **Description:** Prepare the browser extension for Chrome Web Store
+  submission. Fix any issues found during review preparation. Create
+  proper extension icons, screenshots, and store listing.
+- **Acceptance:** Extension loads in Chrome via `chrome://extensions`
+  developer mode. All APIs (cast, stop, pause, seek, volume, status) work.
+  No console errors. Content Security Policy is properly configured.
+- **Key steps:**
+  1. Verify `manifest.json` is valid Manifest V3
+  2. Add `icons/` directory with 16, 32, 48, 128px PNGs
+  3. Verify content script doesn't conflict with page CSP
+  4. Test: detect video URL on YouTube, click "Cast", verify API call
+  5. Test: popup shows playback status via WebSocket
+  6. Test: options page saves Pi address and port
+  7. Run Chrome Lighthouse audit on extension pages
+
+### S5.2 Extension Firefox compatibility
+
+- **Crate:** `src/extension`
+- **Depends on:** S5.1
+- **Effort:** 1.5 days
+- **Description:** Ensure Firefox compatibility using the `browser.*`
+  namespace and dual manifest. Test on Firefox 120+.
+- **Acceptance:** Extension loads in Firefox via `about:debugging`. All
+  functionality works identically to Chrome version.
+- **Key steps:**
+  1. Verify `manifest-firefox.json` has correct format
+  2. Use `browser=chrome || browser` pattern for API compatibility
+  3. Test: same test suite as Chrome on Firefox
+  4. Fix any Firefox-specific issues (e.g., `browser.storage` differences)
+  5. Build script creates separate Chrome and Firefox ZIP packages
+
+### S5.3 WebSocket reconnection and resilience
+
 - **Crate:** `bogdan-protocols`
-- **Depends on:** T-6.1 through T-6.7
-- **Effort:** 1 day
-- **Description:** Integration tests using `reqwest` against a real HTTP server
-  with a mock session manager.
-  **Implemented:** reqwest-based integration tests covering all endpoints, CORS, and error codes (400/404/409/422/503).
-- **Acceptance:** All HTTP endpoints tested; error cases covered.
-- **Key steps:**
-  1. Spin up `HttpApiServer` on `127.0.0.1:18585` with mock session manager
-  2. Test `POST /api/cast` with valid and invalid URLs
-  3. Test `POST /api/stop`, `/api/pause`, `/api/seek`, `/api/volume`
-  4. Test `GET /api/status` in various states
-  5. Test CORS headers on all responses
-  6. Test error codes: 400, 404, 409, 422, 503
-
----
-
-## Phase 7 — Server Orchestration
-
-### T-7.1 Real component initialization ✅
-- **Crate:** `bogdan-server`
-- **Depends on:** T-1.4, T-2.4, T-3.4, T-4.2, T-5.4, T-6.1
-- **Effort:** 1 day
-- **Description:** Replace all `Arc::new(())` stubs in `main.rs` with real
-  component construction. Handle errors with clear diagnostics.
-- **Acceptance:** `bogdan-server` binary starts and initializes all subsystems.
-- **Key steps:**
-  1. `TorManager::new(&config.tor_socks)` → `ensure_running()`
-  2. `DisplayManager::new("/dev/dri/card0")`
-  3. `PlaybackEngine::new(pipeline_config)`
-  4. `Resolver::new(tor.clone())`
-  5. `SessionManager::new(&db_path, resolver, playback, display, tor)`
-  6. `HttpApiServer::new(&config.http_addr, session.clone())`
-  7. `WebSocketServer::new(&config.ws_addr, session.clone())`
-  8. `DlnaRenderer::new(&config.dlna_name, session.clone())`
-
-### T-7.2 Task spawning and concurrent execution ✅
-- **Crate:** `bogdan-server`
-- **Depends on:** T-7.1
-- **Effort:** 1 day
-- **Description:** Spawn each protocol server as a `tokio::spawn` task. All
-  tasks receive the shutdown signal via `broadcast::Receiver`.
-- **Acceptance:** All three protocol servers run concurrently; none blocks the others.
-- **Key steps:**
-  1. `tokio::spawn(http.start(shutdown_rx.resubscribe()))`
-  2. `tokio::spawn(ws.start(shutdown_rx.resubscribe()))`
-  3. `tokio::spawn(dlna.start(shutdown_rx.resubscribe()))`
-  4. Wait for shutdown signal
-  5. Broadcast shutdown to all tasks
-
-### T-7.3 Graceful shutdown sequence ✅
-- **Crate:** `bogdan-server`
-- **Depends on:** T-7.2
-- **Effort:** 1 day
-- **Description:** On SIGINT/SIGTERM: stop playback → release display → kill
-  Tor → wait for protocol tasks to finish → exit.
-- **Acceptance:** Shutdown completes in <5s with no orphan processes.
-- **Key steps:**
-  1. Receive signal → `shutdown_tx.send(())`
-  2. `session.stop()` → stop GStreamer pipeline
-  3. `display.release()` → release DRM master
-  4. `tor.shutdown()` → SIGTERM Tor process
-  5. `tokio::join!(http_task, ws_task, dlna_task)` with 10s timeout
-  6. Force kill any remaining tasks after timeout
-
-### T-7.4 Startup ordering validation ✅
-- **Crate:** `bogdan-server`
-- **Depends on:** T-7.1
-- **Effort:** 0.5 day
-- **Description:** Enforce sequential startup: Tor → Display → Playback →
-  Resolver → Session → Protocols. Each step must succeed before the next.
-  On failure: log clear error and exit.
-- **Acceptance:** If Tor fails to start, the binary exits with error immediately
-  rather than hanging.
-- **Key steps:**
-  1. `tor.ensure_running().await?` → if fails, log and exit
-  2. `DisplayManager::new()` → if fails, log and exit
-  3. Continue through chain
-  4. Each failure: `tracing::error!()` with actionable message
-
-### T-7.5 Health check endpoint ✅
-- **Crate:** `bogdan-server`
-- **Depends on:** T-7.1
-- **Effort:** 0.5 day
-- **Description:** Add `GET /api/health` endpoint that returns status of all
-  subsystems: Tor (connected?), Display (DRM master?), Playback (ready?),
-  Resolver (yt-dlp available?).
-- **Acceptance:** `GET /api/health` returns `{"tor":"ok","display":"ok","playback":"ok","resolver":"ok"}`.
-- **Key steps:**
-  1. Query each subsystem's health
-  2. `tor.health_check()`, `display.resolution()`, playback status, `which yt-dlp`
-  3. Return `200 OK` if all healthy, `503` if any degraded
-
-### T-7.6 Configuration file support ✅
-- **Crate:** `bogdan-server`
-- **Depends on:** T-0.1
-- **Effort:** 1 day
-- **Description:** Add TOML config file support alongside env vars. Search
-  `/etc/bogdan/bogdan.conf`, `~/.config/bogdan/bogdan.conf`, `./bogdan.conf`.
-- **Acceptance:** `bogdan.conf` settings override defaults; env vars override config file.
-- **Key steps:**
-  1. Add `toml` dependency
-  2. Define `Config` struct with `Deserialize`
-  3. Load: env vars > config file > defaults
-  4. Validate on startup: ports in range, paths exist, etc.
-
-### T-7.7 End-to-end smoke test on Pi
-- **Crate:** `bogdan-server`
-- **Depends on:** T-7.3, T-7.4
-- **Effort:** 1 day
-- **Description:** Full integration test on Raspberry Pi: boot → start boGDan →
-  cast YouTube URL → verify HDMI output → stop → clean shutdown.
-- **Acceptance:** Video appears on HDMI; API responds correctly; shutdown is clean.
-- **Key steps:**
-  1. Build `bogdan-server` for aarch64
-  2. Copy to Pi, run with `./bogdan-server`
-  3. `curl POST /api/cast -d '{"url":"https://www.youtube.com/watch?v=dQw4w9WgXcQ"}'`
-  4. Verify video on HDMI monitor
-  5. `curl POST /api/pause`, `/api/seek`, `/api/stop`
-  6. Ctrl+C → verify clean shutdown in logs
-
----
-
-## Phase 8 — Browser Extension Production
-
-### T-8.1 Generate extension icons ✅
-- **Crate:** `src/extension/`
-- **Depends on:** nothing
-- **Effort:** 0.5 day
-- **Description:** Create `icon16.png`, `icon48.png`, `icon128.png` for the
-  browser extension. Use a simple, recognizable boGDan logo.
-  **Implemented:** 16/48/128px PNG icons placed in src/extension/icons/.
-- **Acceptance:** Icons appear in Chrome/Firefox extension management UI.
-- **Key steps:**
-  1. Design simple logo (cast icon + Pi silhouette, or abstract)
-  2. Export at 16×16, 48×48, 128×128
-  3. Place in `src/extension/icons/`
-  4. Verify `manifest.json` references match filenames
-
-### T-8.2 Content script for page URL detection ✅
-- **Crate:** `src/extension/`
 - **Depends on:** nothing
 - **Effort:** 2 days
-- **Description:** Inject a content script into web pages that detects `<video>`
-  and `<source>` elements, extracts their `src` attributes, and reports them
-  to the background service worker.
-  **Implemented:** content.js detects video/source elements and iframes, uses MutationObserver for dynamic content.
-- **Acceptance:** On a page with a `<video>` element, the extension's popup
-  shows the video URL as a castable item.
+- **Description:** Harden the WebSocket server for real-world use. Add
+  client limits, ping/pong keepalive, reconnection handling, and proper
+  cleanup on client disconnect.
+- **Acceptance:** 100+ concurrent WebSocket clients can connect without
+  issues. Disconnected clients are cleaned up within 30 seconds. Server
+  survives client flood (1000 connect/disconnect cycles).
 - **Key steps:**
-  1. Create `src/extension/src/content.js`
-  2. `document.querySelectorAll('video, source, iframe')` → extract URLs
-  3. Also detect `video.src`, `video.currentSrc`, `source.src`
-  4. Send detected URLs to background: `chrome.runtime.sendMessage({ type: 'DETECTED_MEDIA', urls })`
-  5. Watch for dynamically added video elements via `MutationObserver`
-  6. Register content script in `manifest.json`: `"content_scripts": [{"matches": ["<all_urls>"], "js": ["src/content.js"]}]`
+  1. Limit concurrent WebSocket connections (default: 50)
+  2. Ping/pong every 30 seconds; disconnect after 10s no pong
+  3. On client disconnect: remove from broadcast list, log
+  4. On server shutdown: send close frame to all clients, wait 5s
+  5. Test: rapid connect/disconnect doesn't leak memory or tasks
+  6. Test: broadcast to 50 clients simultaneously
 
-### T-8.3 Firefox Manifest V2/V3 compatibility ✅
-- **Crate:** `src/extension/`
+### S5.4 HTTP API error handling hardening
+
+- **Crate:** `bogdan-protocols`
 - **Depends on:** nothing
-- **Effort:** 1 day
-- **Description:** Ensure the extension works on both Chrome (Manifest V3) and
-  Firefox (V2 or V3). Use `browser.*` namespace with `chrome.*` fallback.
-  Create separate build configs if needed.
-  **Implemented:** webextension-polyfill for cross-browser API, separate manifest-firefox.json with MV2 format.
-- **Acceptance:** Extension loads and works in both Chrome and Firefox.
+- **Effort:** 1.5 days
+- **Description:** Audit all HTTP API endpoints for proper error handling.
+  Ensure every error path returns a descriptive JSON error response with
+  the correct HTTP status code. Remove all `unwrap()` and `expect()` from
+  handler code.
+- **Acceptance:** Every API endpoint returns proper error JSON for invalid
+  input, missing resources, and internal errors. No handler panics.
+  Response format: `{"error": "description", "code": "ERROR_CODE"}`.
 - **Key steps:**
-  1. Replace `chrome.*` calls with `browser.*` + `chrome.*` fallback wrapper
-  2. Or: use `webextension-polyfill` npm package
-  3. Firefox supports MV2 with `browser.webRequest.onBeforeRequest`
-  4. Firefox MV3 support is still evolving — test both
-  5. Create `manifest-firefox.json` if necessary (different permissions model)
-  6. Build script: `cp manifest-firefox.json manifest.json` for Firefox build
+  1. Audit each endpoint: /api/cast, /api/stop, /api/pause, /api/seek,
+     /api/volume, /api/status, /api/health
+  2. Add `ErrorResponse` struct with `error`, `code`, `detail` fields
+  3. Replace `unwrap()` with proper error mapping
+  4. Add rate limiting: 10 req/s per IP, 429 Too Many Requests
+  5. Add request body size limit: 1KB max for POST bodies
+  6. Test: malformed JSON → 400 with clear message
+  7. Test: rate limit exceeded → 429 with Retry-After header
 
-### T-8.4 Popup: detected media list with cast buttons ✅
-- **Crate:** `src/extension/`
-- **Depends on:** T-8.2
-- **Effort:** 1 day
-- **Description:** Update popup to show intercepted media URLs with a "Cast"
-  button for each. Show URL type (direct, HLS, page) and confidence level.
-  **Implemented:** popup queries background for media queue, renders list with type badges and cast buttons.
-- **Acceptance:** Popup displays list of detected media; clicking "Cast" sends
-  URL to boGDan server.
-- **Key steps:**
-  1. Query background: `chrome.runtime.sendMessage({ type: 'GET_MEDIA_QUEUE', tabId })`
-  2. Render list with type badges and cast buttons
-  3. On "Cast" click: `chrome.runtime.sendMessage({ type: 'CAST', url, title })`
-  4. Show "Casting..." status after successful cast
+### S5.5 DLNA renderer integration
 
-### T-8.5 Popup: playback controls ✅
-- **Crate:** `src/extension/`
-- **Depends on:** T-8.4
-- **Effort:** 1 day
-- **Description:** Add play/pause, stop, seek bar, and volume slider to the
-  popup. All controls wired to the boGDan HTTP API.
-  **Implemented:** play/pause, stop, seek bar, and volume slider wired to HTTP API.
-- **Acceptance:** Popup controls work: pause pauses, stop stops, seek bar seeks.
-- **Key steps:**
-  1. Play/pause button: `POST /api/pause`
-  2. Stop button: `POST /api/stop`
-  3. Seek bar: range input, `POST /api/seek` on change
-  4. Volume slider: range input 0-100, `POST /api/volume`
-  5. Disable controls when no session is active
-
-### T-8.6 Popup: WebSocket status updates ✅
-- **Crate:** `src/extension/`
-- **Depends on:** T-8.5
-- **Effort:** 1 day
-- **Description:** Connect popup to boGDan's WebSocket server for real-time
-  status updates (position, buffer %, state changes). Update UI without polling.
-  **Implemented:** WebSocket connection for live position, buffer %, and state updates with reconnect backoff.
-- **Acceptance:** Popup shows live position counter and buffer percentage during
-  playback without page refresh.
-- **Key steps:**
-  1. `new WebSocket('ws://bogdan.local:8586/ws')` on popup open
-  2. Handle `MEDIA_STATUS` messages: update position, state, buffer
-  3. Handle `RESOLVE_PROGRESS` messages: show "Resolving..." with phase
-  4. Handle `ERROR` messages: show error notification
-  5. Reconnect on disconnect with exponential backoff
-
-### T-8.7 Options page: full settings ✅
-- **Crate:** `src/extension/`
+- **Crate:** `bogdan-protocols`
 - **Depends on:** nothing
-- **Effort:** 0.5 day
-- **Description:** Complete the options page with all configurable settings:
-  Pi address, port, Tor mode, auto-detect toggle, default cast behavior.
-  **Implemented:** options page with Pi address, port, Tor mode, auto-detect toggle, and test connection button.
-- **Acceptance:** Settings persist across browser restarts; changing Pi address
-  updates API calls.
-- **Key steps:**
-  1. `chrome.storage.local.set/get` for all settings
-  2. Pi address: text input (default: `bogdan.local`)
-  3. Port: number input (default: `8585`)
-  4. Tor mode: dropdown (`full`, `resolution-only`, `off`)
-  5. Auto-detect: toggle (automatically detect media on page load)
-  6. Test connection button: `GET /api/health`
-
-### T-8.8 Chrome and Firefox packaging ✅
-- **Crate:** `src/extension/`
-- **Depends on:** T-8.3
-- **Effort:** 1 day
-- **Description:** Package the extension for Chrome Web Store and Firefox Add-ons.
-  Create build scripts for both targets.
-  **Implemented:** build-extension.sh produces Chrome .zip and Firefox .xpi with correct manifests.
-- **Acceptance:** Extension loads in Chrome via developer mode; loads in Firefox
-  via `about:debugging`.
-- **Key steps:**
-  1. Chrome: `zip -r bogdan-chrome.zip src/extension/*` (excluding Firefox-specific files)
-  2. Firefox: create `manifest-firefox.json`, adjust permissions, zip
-  3. Test load in both browsers
-  4. Create `scripts/build-extension.sh` for automated packaging
-  5. Document loading instructions in `docs/extension/`
-
-### T-8.9 Error handling in extension ✅
-- **Crate:** `src/extension/`
-- **Depends on:** T-8.4
-- **Effort:** 0.5 day
-- **Description:** Handle API unreachable, timeout, and server error cases
-  gracefully in the extension UI.
-  **Implemented:** graceful error display for unreachable server, timeouts, and retry with exponential backoff.
-- **Acceptance:** When boGDan server is unreachable, popup shows "boGDan not
-  found" instead of a blank or error state.
-- **Key steps:**
-  1. Catch `fetch()` errors → show "boGDan not found at [address]:[port]"
-  2. Timeout after 5s → show "Connection timed out"
-  3. Retry with exponential backoff (1s, 2s, 4s, max 30s)
-  4. Show last known status when offline
-  5. "Retry" button to manually re-check connection
-
----
-
-## Phase 9 — Testing & Quality Assurance
-
-### T-9.1 Unit test coverage for all crates ✅
-- **Crate:** all
-- **Depends on:** T-7.1
 - **Effort:** 3 days
-- **Description:** Achieve ≥80% line coverage for `tor`, `resolver`, `session`
-  crates. ≥60% for `playback`, `display` (harder to test without hardware).
-- **Acceptance:** `cargo tarpaulin --workspace` reports ≥75% average coverage.
+- **Description:** Implement the DLNA MediaRenderer via gmediarender
+  subprocess. Spawn gmediarender with custom GStreamer pipeline string.
+  Monitor state via D-Bus. Implement SSDP advertisement on LAN.
+- **Acceptance:** boGDan appears as a renderer in VLC's "Render" menu.
+  Casting from VLC starts playback on Pi. Stop/pause from VLC works.
 - **Key steps:**
-  1. `bogdan-tor`: test all `TorError` variants, `SocksProxy` methods, stream ID generation
-  2. `bogdan-resolver`: test `classify()` exhaustively, cache TTL, error mapping
-  3. `bogdan-session`: test state machine transitions (valid and invalid), persistence, watch channel
-  4. `bogdan-playback`: test `PipelineConfig` serialization, `BufferHealth` defaults
-  5. `bogdan-display`: test mock mode, `DrmPlane`/`DrmCrtc` construction
-  6. `bogdan-protocols`: test HTTP request/response types, WebSocket message parsing
-
-### T-9.2 Integration test: full playback flow ✅
-- **Crate:** `tests/`
-- **Depends on:** T-7.7
-- **Effort:** 2 days
-- **Description:** End-to-end test: load URL → resolve → play → pause → seek →
-  stop. Uses real components with mock display and (optionally) real Tor.
-  **Implemented:** end-to-end test with mock display/Tor, real SQLite session, verifying load→play→pause→seek→stop flow.
-- **Acceptance:** Test passes with mock display; all state transitions verified.
-- **Key steps:**
-  1. Create `tests/integration.rs`
-  2. Set up: `TorManager` (or mock), `DisplayManager::new("mock")`, `PlaybackEngine` (or mock), `Resolver` (or mock with canned response)
-  3. `SessionManager::new(...)` with real SQLite
-  4. `session.load(test_url).await?` → verify `status == Playing`
-  5. `session.pause().await?` → verify `status == Paused`
-  6. `session.seek(60_000).await?` → verify position
-  7. `session.stop().await?` → verify `status == Idle`
-
-### T-9.3 Pi hardware smoke test script ✅
-- **Crate:** `scripts/`
-- **Depends on:** T-7.7
-- **Effort:** 1 day
-- **Description:** Automated smoke test script for Pi hardware. Tests: boot,
-  Tor connectivity, HDMI output, API responses, clean shutdown.
-- **Acceptance:** `./scripts/smoke-test.sh` exits 0 on a Pi 4 with all hardware connected.
-- **Key steps:**
-  1. Start `bogdan-server`
-  2. Wait for `/api/health` → 200 OK
-  3. Verify Tor: `curl --socks5 127.0.0.1:9050 https://check.torproject.org/`
-  4. Cast test URL → verify `202 Accepted`
-  5. Wait for `Playing` status
-  6. Test pause/seek/stop
-  7. Verify HDMI: `modetest -M vc4` shows active planes
-
-### T-9.4 Network isolation verification ✅
-- **Crate:** `config/`
-- **Depends on:** T-7.1
-- **Effort:** 0.5 day
-- **Description:** Verify iptables rules block all outbound traffic except
-  through Tor. Test DNS leak prevention.
-- **Acceptance:** `tcpdump` shows no non-SOCKS outbound connections during
-  playback; DNS queries only to Tor's DNSPort.
-- **Key steps:**
-  1. Apply `config/iptables.rules`
-  2. Start boGDan and play a video
-  3. `tcpdump -i eth0 not port 9050 and not port 53` → should be empty
-  4. Verify DNS goes through Tor: `dig +short @127.0.0.1 -p 5353 google.com`
-  5. Test that direct HTTP fails: `curl --noproxy '*' http://example.com` → timeout
-
-### T-9.5 Memory leak test
-- **Crate:** all
-- **Depends on:** T-7.7
-- **Effort:** 1 day
-- **Description:** Run 8-hour continuous playback session. Monitor RSS growth.
-  Target: <10 MB/hour leak rate.
-- **Acceptance:** RSS growth < 80 MB over 8 hours; no GStreamer pipeline leaks.
-- **Key steps:**
-  1. Start boGDan, cast a long video
-  2. Log RSS every 60s: `ps -o rss= -p $(pidof bogdan-server)`
-  3. After 8 hours: calculate leak rate
-  4. Monitor GStreamer: `GST_TRACE=1` to track buffer allocations
-  5. If leak detected: use `valgrind --leak-check=full` on x86 build
-
-### T-9.6 Soak test: 100 cast/stop cycles
-- **Crate:** all
-- **Depends on:** T-7.7
-- **Effort:** 1 day
-- **Description:** Run 100 cast/stop cycles in a loop. Verify no resource
-  exhaustion: GStreamer pipelines fully cleaned up, SQLite DB stays small,
-  no fd leaks.
-- **Acceptance:** After 100 cycles: RSS < 2× initial, open fds < 100, SQLite < 1 MB.
-- **Key steps:**
-  1. Script: `for i in $(seq 1 100); do curl POST /api/cast; sleep 5; curl POST /api/stop; sleep 1; done`
-  2. Before/after: `lsof -p $(pidof bogdan-server) | wc -l` → fd count
-  3. Before/after: `du -h /var/lib/bogdan/sessions.db`
-  4. Monitor RSS trend
-
-### T-9.7 Security audit checklist ✅
-- **Crate:** all
-- **Depends on:** T-9.4
-- **Effort:** 1 day
-- **Description:** Walk through security checklist: no DNS leaks, circuit
-  isolation works, iptables enforced, no root beyond DRM, no unnecessary
-  services running.
-- **Acceptance:** All checklist items pass; document findings.
-- **Key steps:**
-  1. Verify: all outbound via Tor SOCKS (iptables + tcpdump)
-  2. Verify: DNS queries only to Tor DNSPort
-  3. Verify: stream isolation (different domains → different circuits)
-  4. Verify: DRM master is only boGDan (no X11/Wayland)
-  5. Verify: process runs as `bogdan` user, not root (DRM via group membership)
-  6. Verify: no unnecessary listening ports (only 8585, 8586, 49152, 9050)
-  7. Verify: systemd service has `ProtectSystem`, `NoNewPrivileges`, etc.
-
-### T-9.8 CI pipeline finalization ✅
-- **Crate:** `.github/`
-- **Depends on:** T-9.1
-- **Effort:** 1 day
-- **Description:** Finalize GitHub Actions CI: x86 check + test, aarch64
-  cross-compile check, clippy, rustfmt, security audit (`cargo audit`).
-- **Acceptance:** CI runs on every PR; all checks must pass before merge.
-- **Key steps:**
-  1. `cargo check --workspace` (x86, no `hw` feature)
-  2. `cargo test --workspace` (x86, no `hw` feature)
-  3. `cargo check --target aarch64-unknown-linux-gnu --workspace`
-  4. `cargo clippy --workspace -- -D warnings`
-  5. `cargo fmt --check`
-  6. `cargo audit` (security vulnerabilities)
-  7. Branch protection: require all checks pass
+  1. Spawn `gmediarender` with `--gstout-audiosink=alsasink`
+     and `--gstout-videosink=kmssink`
+  2. Monitor gmediarender process: restart on crash
+  3. D-Bus integration: listen for PlaybackStatus changes
+  4. Map D-Bus state to SessionManager state
+  5. SSDP: verify gmediarender broadcasts on LAN
+  6. Test: cast from VLC → verify playback starts
+  7. Test: stop from VLC → verify playback stops
 
 ---
 
-## Phase 10 — Distribution & Documentation
+## Sprint 6 — Integration Testing & QA
 
-### T-10.1 Setup script overhaul ✅
-- **Crate:** `scripts/`
-- **Depends on:** T-7.3
-- **Effort:** 1 day
-- **Description:** Rewrite `scripts/setup.sh` for one-command install on
-  fresh Raspberry Pi OS. Install all system deps, build boGDan, configure
-  Tor, iptables, and systemd.
-- **Acceptance:** On a fresh Pi OS Lite image, `curl -sSL setup.sh | bash`
-  results in a running boGDan service.
-- **Key steps:**
-  1. `apt install build-essential libgstreamer1.0-dev ... tor yt-dlp`
-  2. `cargo build --release --target aarch64-unknown-linux-gnu`
-  3. Copy binary to `/usr/local/bin/bogdan-server`
-  4. Install `config/bogdan.service` → `systemctl enable bogdan`
-  5. Install `config/torrc` → `systemctl restart tor`
-  6. Install `config/iptables.rules` → apply on boot
-  7. Create `bogdan` user, add to `video` and `render` groups
+**Duration:** 2 weeks (10 working days)
+**Goal:** Comprehensive test coverage, soak tests, memory leak detection,
+and security audit.
 
-### T-10.2 Debian package ✅
-- **Crate:** `scripts/`
-- **Depends on:** T-10.1
+**Definition of Done (DoD):**
+- Memory leak test: 8-hour playback with <10 MB/hour RSS growth
+- Soak test: 100 cast/stop cycles without resource exhaustion
+- Network isolation verified: all outbound traffic through Tor
+- Security audit checklist complete
+- `cargo test --workspace` passes with >400 tests
+- Integration tests for full cast→play→control→stop flow
+
+**Sprint Acceptance Criteria:**
+1. 8-hour continuous playback shows <80 MB RSS growth
+2. 100 cast/stop cycles complete without GStreamer pipeline leaks
+3. `iptables -L` confirms no outbound traffic bypasses Tor
+4. No root privileges required beyond DRM master
+5. All error paths tested: Tor down, yt-dlp missing, CDN 403, bad URLs
+
+### S6.1 Memory leak test
+
+- **Crate:** integration
+- **Depends on:** S4.2
 - **Effort:** 2 days
-- **Description:** Build a `.deb` package containing the binary, configs,
-  systemd service, and postinst scripts for auto-configuration.
-- **Acceptance:** `dpkg -i bogdan_0.1.0_arm64.deb` installs and starts boGDan.
+- **Description:** Run an 8-hour continuous playback session on Pi 4.
+  Monitor RSS growth, open file descriptors, and GStreamer buffer pool
+  usage. Target <10 MB/hour leak rate.
+- **Acceptance:** After 8 hours, RSS growth <80 MB. No open FD leak
+  (check `ls /proc/<pid>/fd | wc -l`). No GStreamer pipeline leak
+  (check `GST_TRACER` stats).
 - **Key steps:**
-  1. Create `debian/` directory structure
-  2. `DEBIAN/control`: Package, Version, Architecture, Depends, Description
-  3. `DEBIAN/postinst`: add user, enable service, apply iptables
-  4. `DEBIAN/prerm`: stop service
-  5. Build: `dpkg-deb --build bogdan_0.1.0`
-  6. Test on fresh Pi OS
+  1. Write `scripts/mem-test.sh`: start boGDan, cast URL, monitor RSS hourly
+  2. Log RSS, FD count, and GStreamer stats every 5 minutes
+  3. After 8 hours: generate report with growth rate analysis
+  4. If leak detected: use `valgrind --leak-check=full` to identify source
+  5. Common leak sources: GStreamer element refs, tokio task handles,
+     SQLite connections, SOCKS forwarder sockets
 
-### T-10.3 Pre-built SD card image
-- **Crate:** `scripts/`
-- **Depends on:** T-10.2
+### S6.2 Soak test: 100 cast/stop cycles
+
+- **Crate:** integration
+- **Depends on:** S4.2
 - **Effort:** 2 days
-- **Description:** Create a flash-and-boot Raspberry Pi OS image with boGDan
-  pre-installed. Compatible with Raspberry Pi Imager.
-- **Acceptance:** Flash image to SD card → boot Pi → boGDan is running.
+- **Description:** Run 100 cast/stop cycles with varying URLs (YouTube,
+  Voe, direct MP4, HLS). Verify no resource exhaustion, no GStreamer
+  pipeline leaks, and SQLite DB stays under 1 MB.
+- **Acceptance:** 100 cycles complete without errors. RSS returns to
+  baseline within 10 MB after each cycle. SQLite DB < 1 MB. No zombie
+  processes.
 - **Key steps:**
-  1. Start with Raspberry Pi OS Lite (64-bit) base image
-  2. Use `pi-gen` or manual `chroot` to customize
-  3. Install boGDan .deb package
-  4. Disable desktop: `systemctl set-default multi-user.target`
-  5. Enable: `bogdan.service`, `tor.service`
-  6. Set hostname: `bogdan`
-  7. Compress: `xz -z bogdan.img`
-  8. Test: flash → boot → verify API responds
+  1. Write `scripts/soak-test.sh`: loop 100 times, cast → play 30s → stop
+  2. Vary URL types: 25 YouTube, 25 Voe, 25 direct MP4, 25 HLS
+  3. After each cycle: check RSS, FD count, SQLite DB size
+  4. After all cycles: verify RSS within 10 MB of start value
+  5. Check for zombie processes: `ps aux | grep bogdan | grep Z`
+  6. Check SQLite: `ls -la bogdan.db` < 1 MB
 
-### T-10.4 README.md rewrite ✅
-- **Crate:** root
-- **Depends on:** T-10.1
-- **Effort:** 0.5 day
-- **Description:** Rewrite README as a quick start guide: what boGDan is,
-  hardware requirements, one-command install, extension install, cast first
-  video.
-- **Acceptance:** A new user can go from "never heard of boGDan" to "watching
-  a casted video" using only the README.
+### S6.3 Network isolation verification
+
+- **Crate:** integration
+- **Depends on:** S4.2
+- **Effort:** 1.5 days
+- **Description:** Verify all outbound traffic goes through Tor. Set up
+  iptables rules that REJECT any outbound traffic NOT going through the
+  Tor SOCKS port. Run the full system and verify no traffic is blocked
+  (which would indicate a leak).
+- **Acceptance:** `iptables -L OUTPUT` shows REJECT rule for non-Tor
+  traffic. No packets are rejected during normal operation. DNS queries
+  go through Tor (socks5h, not socks5).
 - **Key steps:**
-  1. One-paragraph description
-  2. Hardware requirements: Pi 4B+, HDMI monitor, SD card, network
-  3. Quick install: `curl | bash` command
-  4. Extension install: Chrome Web Store / Firefox Add-on link
-  5. Cast first video: open YouTube → click extension → "Cast"
-  6. Architecture diagram (from ARCHITECTURE.md)
+  1. Add iptables rules: allow ESTABLISHED, allow lo, allow Tor SOCKS,
+     REJECT everything else
+  2. Start boGDan and cast URLs
+  3. Monitor REJECT counter: should stay at 0
+  4. Verify DNS: no UDP port 53 traffic from bogdan process
+  5. Test: disable Tor → all requests should fail (no fallback)
+  6. Document iptables rules in `docs/SECURITY.md`
 
-### T-10.5 User guide
+### S6.4 Security audit checklist
+
+- **Crate:** all
+- **Depends on:** S6.3
+- **Effort:** 2 days
+- **Description:** Complete the security audit checklist covering: Tor
+  circuit isolation, DNS leak prevention, iptables enforcement, privilege
+  minimization, TLS configuration, input validation, and extension
+  security model.
+- **Acceptance:** All checklist items pass or have documented exceptions.
+  No high-severity findings remain open.
+- **Key steps:**
+  1. Tor circuit isolation: verify different domains use different circuits
+  2. DNS leak: verify all DNS goes through Tor SOCKS5h
+  3. iptables: verify REJECT rules for non-Tor traffic
+  4. Privilege minimization: verify only DRM requires root/CAP_SYS_ADMIN
+  5. TLS: verify rustls config, no TLS 1.0/1.1
+  6. Input validation: fuzz HTTP API endpoints with malformed input
+  7. Extension: verify message passing is validated, no eval(), no innerHTML
+  8. Document findings in `docs/SECURITY_AUDIT.md`
+
+### S6.5 Integration test: full cast→play→control→stop flow
+
+- **Crate:** integration (`src/server/tests/`)
+- **Depends on:** S4.2
+- **Effort:** 2.5 days
+- **Description:** Write comprehensive integration tests that exercise the
+  full user flow: cast URL → resolve → play → pause → resume → seek →
+  stop. Test with mock subsystems (no Pi hardware required).
+- **Acceptance:** Integration tests pass on x86 CI. Every API endpoint and
+  state transition is tested. Error paths (resolve failure, pipeline error)
+  are tested.
+- **Key steps:**
+  1. Create mock `ResolverTrait`, `PlaybackTrait`, `DisplayTrait`, `TorTrait`
+  2. Test: `POST /api/cast` → `202` → `GET /api/status` → `Playing`
+  3. Test: `POST /api/pause` → `Paused` → `POST /api/pause` → `Playing`
+  4. Test: `POST /api/seek {"seconds": 60}` → `Seeking` → `Playing`
+  5. Test: `POST /api/stop` → `Idle`
+  6. Test: resolve failure → `422 Unprocessable Entity`
+  7. Test: concurrent cast → `409 Conflict`
+  8. Test: WebSocket receives `MEDIA_STATUS` on state change
+
+---
+
+## Sprint 7 — Distribution, Documentation & Release
+
+**Duration:** 2 weeks (10 working days)
+**Goal:** boGDan can be installed on a fresh Raspberry Pi OS image with a
+single command and minimal configuration. Documentation is complete.
+
+**Definition of Done (DoD):**
+- `dpkg -i bogdan.deb` installs and configures everything
+- User guide covers installation, configuration, troubleshooting
+- Security hardening guide documents iptables, Tor verification
+- Pre-built SD card image available for download
+- GitHub Release with binary, deb, SHA-256 checksums, release notes
+- README has quick-start guide: flash → boot → install extension → cast
+
+**Sprint Acceptance Criteria:**
+1. Fresh Pi OS Lite → `curl setup.sh | bash` → working boGDan in <15 minutes
+2. `dpkg -i bogdan.deb` → `systemctl start bogdan` → working service
+3. User can cast from browser extension within 5 minutes of installation
+4. All documentation is accurate and matches current code behavior
+5. GitHub Release v0.1.0-alpha is published with all artifacts
+
+### S7.1 Debian package finalization
+
+- **Crate:** `packaging/`
+- **Depends on:** S4.2
+- **Effort:** 2 days
+- **Description:** Finalize the Debian package with all required files:
+  binary, config, systemd service, torrc, provider configs, extension
+  files. Ensure `dpkg -i` installs and configures everything correctly.
+- **Acceptance:** `dpkg -i bogdan_0.1.0_arm64.deb` on a fresh Pi OS Lite
+  installs everything and `systemctl start bogdan` works.
+- **Key steps:**
+  1. Verify `debian/control` has all dependencies
+  2. Include provider configs: `providers.d/*.toml`
+  3. Include extension files: `src/extension/`
+  4. Include systemd service: `bogdan.service`
+  5. Include torrc: `config/torrc`
+  6. Include example config: `bogdan.toml.example` → `/etc/bogdan/bogdan.toml`
+  7. Postinst script: enable and start service, configure iptables
+  8. Prerm script: stop service, clean up iptables
+
+### S7.2 User guide
+
 - **Crate:** `docs/`
-- **Depends on:** T-10.4
-- **Effort:** 1 day
-- **Description:** Write `docs/USER_GUIDE.md` covering: configuration options,
-  troubleshooting (Tor won't start, no video, no audio), FAQ.
-- **Acceptance:** Common issues have documented solutions.
+- **Depends on:** S7.1
+- **Effort:** 2 days
+- **Description:** Write comprehensive user guide covering installation,
+  configuration, browser extension setup, daily usage, and troubleshooting.
+- **Acceptance:** A new user can follow the guide from a fresh Pi to
+  working boGDan without reading any other documentation.
 - **Key steps:**
-  1. Configuration: `bogdan.conf` format and all options
-  2. Tor: checking circuit status, bridge configuration, bandwidth tips
-  3. Display: selecting resolution, multi-monitor (unsupported), EDID issues
-  4. Playback: codec support, subtitle configuration, ABR behavior
-  5. Extension: installing, configuring Pi address, permissions
-  6. DLNA: discovering from VLC, Home Assistant, Android
-  7. Troubleshooting: `journalctl -u bogdan`, `GST_DEBUG`, `tor-log`
+  1. Quick start: flash Pi OS → install boGDan → install extension → cast
+  2. Configuration: bogdan.toml options explained
+  3. Browser extension: install, configure Pi address, usage
+  4. DLNA: connect from VLC, Home Assistant
+  5. Troubleshooting: common errors and solutions
+  6. FAQ: supported codecs, Tor requirements, network setup
 
-### T-10.6 Security hardening guide
+### S7.3 Security hardening guide
+
 - **Crate:** `docs/`
-- **Depends on:** T-9.7
-- **Effort:** 0.5 day
-- **Description:** Write `docs/SECURITY.md` documenting the security model,
-  iptables rules, Tor configuration, and physical security recommendations.
-- **Acceptance:** Security reviewer can verify boGDan's security properties
-  using this document.
+- **Depends on:** S6.4
+- **Effort:** 1.5 days
+- **Description:** Write security hardening guide documenting iptables
+  rules, Tor verification procedures, physical security recommendations,
+  and attack surface analysis.
+- **Acceptance:** Guide includes copy-paste iptables rules that work on
+  Pi OS. Tor verification procedure confirms all traffic is routed
+  through Tor.
 - **Key steps:**
-  1. Threat model: what boGDan defends against and what it doesn't
-  2. iptables rules explanation (line by line)
-  3. Tor configuration: circuit isolation, DNS leak prevention
-  4. Process privileges: `bogdan` user, group memberships, capabilities
-  5. Physical security: SD card encryption, UART disabled, GPIO locked
-  6. Update policy: Tor updates, yt-dlp updates, boGDan updates
+  1. iptables rules: allow Tor SOCKS, allow lo, allow ESTABLISHED, REJECT rest
+  2. Tor verification: `systemctl status tor`, check SOCKS port, test with curl
+  3. DNS leak test: `tcpdump -i eth0 port 53` during resolve
+  4. Physical security: disable SSH password auth, use keys only
+  5. Attack surface: list all listening ports and their purposes
+  6. Recommend: change default API port, use HTTPS for API
 
-### T-10.7 Release checklist and GitHub Release
-- **Crate:** root
-- **Depends on:** T-10.3, T-10.4, T-10.5, T-10.6
-- **Effort:** 0.5 day
-- **Description:** Create release checklist. Tag v1.0.0. Upload binary, .deb,
-  SD image, and SHA-256 checksums to GitHub Releases.
-- **Acceptance:** GitHub Release page has all artifacts with checksums and
-  release notes.
+### S7.4 Pre-built SD card image
+
+- **Crate:** `packaging/`
+- **Depends on:** S7.1
+- **Effort:** 2 days
+- **Description:** Create a pre-built Raspberry Pi OS Lite image with
+  boGDan pre-installed. Image should be flash-and-boot: insert SD card,
+  power on, boGDan is running.
+- **Acceptance:** Raspberry Pi Imager can flash the image. After boot,
+  boGDan service is running and API is accessible. Image size < 2 GB.
 - **Key steps:**
-  1. Tag: `git tag v1.0.0 -m "boGDan v1.0.0 release"`
-  2. Build: binary, .deb, SD image, extension zip
-  3. Checksums: `sha256sum * > SHA256SUMS`
-  4. Release notes: features, known issues, upgrade instructions
-  5. Upload all artifacts to GitHub Release
+  1. Start with Pi OS Lite (64-bit) base image
+  2. Install boGDan deb package
+  3. Pre-configure: enable Tor, set up iptables, start boGDan
+  4. Shrink filesystem to minimum size
+  5. Create image with `dd` or `rpi-image-gen`
+  6. Test: flash image → boot → verify boGDan running
+  7. Compress with `xz` for download
+
+### S7.5 Release checklist and GitHub Release
+
+- **Crate:** project
+- **Depends on:** S7.2, S7.3, S7.4
+- **Effort:** 2.5 days
+- **Description:** Create release checklist, tag v0.1.0-alpha, build all
+  artifacts, compute SHA-256 checksums, write release notes, and publish
+  GitHub Release.
+- **Acceptance:** GitHub Release page has: binary, deb, SD image, checksums,
+  release notes. All artifacts pass verification (`sha256sum -c`).
+- **Key steps:**
+  1. Release checklist: verify all Sprint 1-7 DoD items
+  2. Build on Pi 4: `cargo build --release --features hw`
+  3. Build deb: `cargo deb --target aarch64-unknown-linux-gnu`
+  4. Build SD image: run S7.4 image creation
+  5. Compute SHA-256 for all artifacts
+  6. Write release notes: features, known issues, installation instructions
+  7. Tag: `git tag v0.1.0-alpha && git push --tags`
+  8. Create GitHub Release with all artifacts
+  9. Update README with link to release
 
 ---
 
-## Dependency Graph (Simplified)
+## Sprint Dependency Graph
 
 ```
-T-0.1 ──► T-0.2 (cross-compile)
-  │    ──► T-0.3 (CI)
-  │    ──► T-0.4 (smoke tests)
-  │    ──► T-0.5 (feature flags)
-  │
-  ├──► T-1.1 ──► T-1.2 ──► T-1.3 (stream isolation)
-  │              │         ──► T-1.5 (control port)
-  │              └──► T-1.4 (lifecycle)
-  │                        ──► T-1.6 (integration test)
-  │
-  ├──► T-2.1 ──► T-2.2 (enumerate)
-  │              ──► T-2.3 (connector)
-  │              ──► T-2.5 (GBM)
-  │              ──► T-2.6 (mock mode)
-  │         T-2.2 + T-2.3 ──► T-2.4 (atomic modeset) ──► T-2.7 (Pi test)
-  │
-  ├──► T-3.1 ──► T-3.2 ──► T-3.3 (Tor proxy)
-  │                     ──► T-3.4 (state transitions)
-  │                              ──► T-3.5 (seek)
-  │                              ──► T-3.9 (error recovery)
-  │                              ──► T-3.10 (position/duration)
-  │         T-3.1 ──► T-3.6 (volume)
-  │         T-3.2 ──► T-3.7 (buffer health)
-  │         T-3.2 ──► T-3.8 (sw decode fallback)
-  │
-  ├──► T-4.1 ──► T-4.2 (JSON parsing)
-  │              ──► T-4.3 (H.264 forcing)
-  │              ──► T-4.5 (cache) ──► T-4.6 (subtitles)
-  │              ──► T-4.7 (direct passthrough)
-  │              ──► T-4.8 (error handling)
-  │         T-4.1 + T-1.3 ──► T-4.4 (Tor routing)
-  │         T-4.3 + T-4.4 + T-4.5 ──► T-4.9 (integration test)
-  │
-  │    T-1.3 + T-2.6 + T-3.4 + T-4.2 ──► T-5.1 (wiring)
-  │                                        ──► T-5.2 (load flow)
-  │                                           ──► T-5.3 (state machine)
-  │                                              ──► T-5.4 (commands)
-  │                                              ──► T-5.5 (watch channel)
-  │                                           ──► T-5.6 (cleanup)
-  │                                           ──► T-5.7 (thread safety)
-  │
-  │    T-5.2 ──► T-6.1 (POST /api/cast)
-  │    T-5.4 ──► T-6.2 (stop) ──► T-6.3 (pause) ──► T-6.4 (seek)
-  │           ──► T-6.5 (status) ──► T-6.6 (volume)
-  │    T-6.1 ──► T-6.7 (CORS)
-  │    T-5.5 ──► T-6.8 (WebSocket) ──► T-6.9 (progress)
-  │    T-5.4 ──► T-6.10 (DLNA) ──► T-6.11 (HTTP tests)
-  │
-  │    All Phase 6 ──► T-7.1 (init) ──► T-7.2 (spawn) ──► T-7.3 (shutdown)
-  │                                    ──► T-7.4 (ordering) ──► T-7.5 (health)
-  │                                    ──► T-7.6 (config)
-  │                                    ──► T-7.7 (E2E test)
-  │
-  │    T-8.1 (icons) — independent
-  │    T-8.2 (content script) ──► T-8.4 (media list) ──► T-8.5 (controls)
-  │                                                       ──► T-8.6 (WebSocket)
-  │    T-8.3 (Firefox compat) ──► T-8.8 (packaging)
-  │    T-8.4 ──► T-8.9 (error handling)
-  │    T-8.7 (options) — independent
-  │
-  │    T-7.7 ──► T-9.1 (unit tests) ──► T-9.2 (integration) ──► T-9.3 (smoke)
-  │           ──► T-9.4 (network isolation) ──► T-9.7 (security audit)
-  │           ──► T-9.5 (memory leak) ──► T-9.6 (soak test)
-  │           ──► T-9.8 (CI finalization)
-  │
-  │    T-7.3 ──► T-10.1 (setup script) ──► T-10.2 (deb) ──► T-10.3 (image)
-  │           ──► T-10.4 (README) ──► T-10.5 (user guide) ──► T-10.6 (security)
-  │           ──► T-10.7 (release)
+Sprint 1 (Provider Extraction) ──── independent, start immediately
+       │
+Sprint 2 (Resolver Testing) ─────── depends on S1
+       │
+Sprint 3 (DRM/KMS Display) ──────── independent, can parallel with S1/S2
+       │
+Sprint 4 (Full Playback on Pi) ──── depends on S3
+       │
+Sprint 5 (Extension & Protocols) ── independent, can parallel with S3/S4
+       │
+Sprint 6 (Integration Testing) ──── depends on S4
+       │
+Sprint 7 (Distribution & Release) ─ depends on S5, S6
 ```
+
+**Parallelism opportunity:** Sprints 1, 3, and 5 can run in parallel
+(3 workstreams). Sprint 2 depends on Sprint 1. Sprint 4 depends on Sprint 3.
+Sprint 6 depends on Sprint 4. Sprint 7 depends on Sprints 5 and 6.
+
+**Critical path:** S3 → S4 → S6 → S7 (6 weeks minimum for Pi hardware bringup)
+
+**Total estimated duration:**
+- Serial (1 developer): 14 weeks
+- Parallel (3 developers): 7-8 weeks
 
 ---
 
 ## Effort Summary
 
-| Phase | Tasks | Total Effort |
-|-------|-------|-------------|
-| 0 — Build & CI | T-0.1 to T-0.5 | 3.5 days |
-| 1 — Tor | T-1.1 to T-1.6 | 6 days |
-| 2 — Display | T-2.1 to T-2.7 | 8 days |
-| 3 — Playback | T-3.1 to T-3.10 | 13 days |
-| 4 — Resolver | T-4.1 to T-4.9 | 9 days |
-| 5 — Session | T-5.1 to T-5.7 | 9 days |
-| 6 — Protocols | T-6.1 to T-6.11 | 12 days |
-| 7 — Server | T-7.1 to T-7.7 | 6 days |
-| 8 — Extension | T-8.1 to T-8.9 | 8 days |
-| 9 — Testing | T-9.1 to T-9.8 | 10.5 days |
-| 10 — Distribution | T-10.1 to T-10.7 | 7.5 days |
-| **Total** | **72 tasks** | **~92 days** |
+| Sprint | Description | Effort | Dependencies |
+|--------|-------------|--------|--------------|
+| 1 | Provider Extraction & Resolver Architecture | 10 days | None |
+| 2 | Resolver Testing & CDN Resilience | 10 days | S1 |
+| 3 | DRM/KMS Display & Pi Hardware | 10 days | None |
+| 4 | Full Playback Pipeline on Pi | 10 days | S3 |
+| 5 | Extension & Protocol Hardening | 10 days | None |
+| 6 | Integration Testing & QA | 10 days | S4 |
+| 7 | Distribution, Documentation & Release | 10 days | S5, S6 |
+| **Total** | | **70 days** | |
+
+---
+
+## Historical Task Reference
+
+The original phase-based task breakdown (T-0.x through T-10.x) is preserved
+below for reference. Tasks marked with ✅ are complete; their implementation
+details remain valid. Tasks without ✅ have been incorporated into the sprint
+plan above with updated descriptions and acceptance criteria.
+
+### Completed Tasks (Phase 0 through Phase 7)
+
+<details>
+<summary>Click to expand completed task list</summary>
+
+- T-0.1 Workspace compilation fix ✅
+- T-0.2 `.cargo/config.toml` cross-compilation ✅
+- T-0.3 GitHub Actions CI workflow ✅
+- T-0.4 Smoke test infrastructure ✅
+- T-0.5 Conditional compilation for Pi deps ✅
+- T-1.1 Tor process spawning ✅
+- T-1.2 SOCKS5 connectivity verification ✅
+- T-1.3 Stream isolation via SOCKS5 username ✅
+- T-1.4 Tor process lifecycle management ✅
+- T-1.5 Circuit health monitoring via control port ✅
+- T-1.6 Tor integration test ✅
+- T-2.6 Mock display mode for x86 testing ✅
+- T-3.1 GStreamer initialization and pipeline construction ✅
+- T-3.4 Play/Pause/Resume/Stop state transitions ✅
+- T-3.5 Seek implementation ✅
+- T-3.6 Volume control ✅
+- T-3.7 Buffer health monitoring ✅
+- T-3.8 Software decode fallback ✅
+- T-3.9 Pipeline error recovery ✅
+- T-3.10 Position and duration queries ✅
+- T-4.1 yt-dlp subprocess invocation ✅
+- T-4.2 yt-dlp JSON output parsing ✅
+- T-4.3 Format selection: force H.264 ✅
+- T-4.4 Tor SOCKS5h proxy routing for yt-dlp ✅
+- T-4.5 Resolution cache with TTL ✅ (upgraded to SQLite)
+- T-4.6 Subtitle extraction ✅
+- T-4.7 Direct media passthrough ✅
+- T-4.8 Error handling and timeout ✅
+- T-4.9 Resolver integration test ✅
+- T-5.1 Trait-object wiring ✅
+- T-5.2 Load flow: resolve → create session → play ✅
+- T-5.3 State machine implementation ✅
+- T-5.4 Play/Pause/Stop/Seek/SetVolume delegation ✅
+- T-5.5 Watch channel for state broadcasting ✅
+- T-5.6 Session cleanup and persistence ✅
+- T-5.7 Thread safety for concurrent access ✅
+- T-6.1 HTTP API: POST /api/cast ✅
+- T-6.2 HTTP API: POST /api/stop ✅
+- T-6.3 HTTP API: POST /api/pause ✅
+- T-6.4 HTTP API: POST /api/seek ✅
+- T-6.5 HTTP API: GET /api/status ✅
+- T-6.6 HTTP API: POST /api/volume ✅
+- T-6.7 CORS headers for browser extension ✅
+- T-6.8 WebSocket server ✅
+- T-6.9 WebSocket: RESOLVE_PROGRESS messages ✅
+- T-7.1 Real component initialization ✅
+- T-7.2 Task spawning and concurrent execution ✅
+- T-7.3 Graceful shutdown sequence ✅
+- T-7.4 Startup ordering validation ✅
+- T-7.5 Health check endpoint ✅
+- T-7.6 Configuration file support ✅
+- T-9.1 Unit test coverage for all crates ✅
+- T-9.2 Integration test: full playback flow ✅
+- T-9.3 Pi hardware smoke test script ✅
+- T-9.4 Network isolation verification ✅
+- T-9.7 Security audit checklist ✅
+- T-9.8 CI pipeline finalization ✅
+- T-10.1 Setup script overhaul ✅
+- T-10.2 Debian package ✅
+- T-10.4 README.md rewrite ✅
+
+</details>
+
+### Superseded Tasks
+
+These tasks from the original breakdown have been superseded by the
+appsrc/StreamSource architecture and are no longer directly applicable:
+
+- **T-3.2 Pipeline playback with direct URL** — Superseded by S4.1/S4.2
+  (appsrc + StreamSource replaces souphttpsrc direct URL)
+- **T-3.3 Tor SOCKS5 proxy in souphttpsrc** — Superseded by S4.2
+  (SOCKS forwarder + reqwest replaces souphttpsrc SOCKS5 properties)
