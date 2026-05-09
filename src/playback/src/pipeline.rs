@@ -261,9 +261,8 @@ impl GstPipeline {
             .map_err(|e| PlaybackError::PipelineCreation(e))?;
 
             // Preflight CDN check — verify the CDN accepts this Tor circuit.
-            // The preflight_check method tries sp= bypass URLs first, then
-            // falls back to the original rate-limited URL. Only if the
-            // original URL also returns 403 does it return an error (IP block).
+            // For MP4: verifies the CDN URL via Range request. For HLS:
+            // fetches and parses the master/variant playlists.
             if let Err(e) = source.preflight_check().await {
                 tracing::warn!(
                     error = %e,

@@ -23,6 +23,13 @@
 //! - Pre-buffers data aggressively when throughput < video bitrate
 //! - Provides download progress to the user
 //!
+//! ## HLS Support
+//!
+//! When the CDN URL is an HLS playlist (.m3u8), StreamSource fetches the
+//! master playlist, selects the highest-bandwidth variant, then downloads
+//! each .ts segment sequentially. The MPEG-TS data is pushed into the same
+//! channel as MP4 data — parsebin handles both formats natively.
+//!
 //! ## Flow Control
 //!
 //! Data flows from the CDN download task into a bounded channel, then into
@@ -54,6 +61,19 @@ pub struct DataChunk {
     pub offset: u64,
 }
 
+/// Download mode: direct MP4 or HLS segmented.
+#[derive(Debug, Clone, PartialEq)]
+enum DownloadMode {
+    /// Direct MP4 download — single URL, streaming response.
+    Mp4,
+    /// HLS download — fetch master playlist, then variant playlist,
+    /// then download each .ts segment sequentially.
+    Hls {
+        /// Parsed segment URLs from the variant playlist.
+        segment_urls: Vec<String>,
+    },
+}
+
 /// A progressive download source that streams CDN data into a bounded channel.
 ///
 /// The source handles:
@@ -62,6 +82,7 @@ pub struct DataChunk {
 /// - Downloading from the CDN with throughput measurement
 /// - Providing data chunks via a channel
 /// - Preflight CDN checks (403 detection)
+/// - HLS playlist parsing and segment downloading
 ///
 /// When `socks_addr` is empty, the source connects directly to the CDN
 /// without Tor (no SOCKS forwarder). This is used when the resolver
@@ -77,17 +98,10 @@ pub struct StreamSource {
     _socks_forwarder: Option<SocksForwarder>,
     /// The reqwest client used for CDN requests.
     client: reqwest::Client,
-    /// CDN URL being downloaded (may be the speed-unlimited or original URL
-    /// depending on fallback state).
+    /// CDN URL being downloaded.
     cdn_url: String,
-    /// The original CDN URL (with sp= if present). Used as fallback if
-    /// all sp= bypass URLs are rejected by the CDN (403).
-    original_cdn_url: String,
-    /// Remaining sp= bypass URLs to try. Each entry is (url, strategy_name).
-    /// When a bypass URL is rejected (403), we pop it and try the next.
-    /// When all bypasses are exhausted, we fall back to original_cdn_url.
-    /// Empty Vec means the original URL had no sp= (no bypass needed).
-    sp_bypass_urls: Vec<(String, String)>,
+    /// Download mode: MP4 (direct) or HLS (segmented).
+    mode: DownloadMode,
     /// Source URL for Referer header.
     source_url: String,
     /// Cookies from the resolver session.
@@ -148,6 +162,12 @@ impl ProgressState {
             content_type,
         }
     }
+}
+
+/// Check if a URL points to an HLS playlist (.m3u8).
+fn is_hls_url(url: &str) -> bool {
+    let lower = url.to_lowercase();
+    lower.contains(".m3u8")
 }
 
 impl StreamSource {
@@ -213,6 +233,11 @@ impl StreamSource {
         // The sp= parameter caps CDN download speed (e.g. sp=380 = 380 kbps).
         // This information is used by the pipeline to log bitrate mismatch
         // warnings and adjust buffering strategy.
+        //
+        // NOTE: The sp= bypass logic (replacing/stripping sp=) has been removed
+        // because it ALWAYS fails — modifying the URL's query parameters
+        // invalidates the CDN's &t= signature, causing 403/404. The sp= value
+        // is kept only for diagnostic logging.
         let cdn_rate_limit = extract_cdn_speed_param(&cdn_url);
         if let Some(speed) = cdn_rate_limit {
             tracing::warn!(
@@ -232,40 +257,21 @@ impl StreamSource {
         // Store CDN rate limit in shared progress state for the pipeline
         *progress.cdn_rate_limit_kbps.lock().unwrap() = cdn_rate_limit;
 
-        // Try to bypass the CDN speed limit (sp= parameter).
-        //
-        // Strategy: Instead of just stripping sp= (which causes CDN 403),
-        // try replacing sp=380 with sp=99999 first. The CDN may accept a
-        // higher value, effectively removing the speed cap. If the CDN
-        // rejects the modified value (403), fall back to the original URL.
-        //
-        // We generate up to two bypass URLs to try:
-        //   1. sp=99999 (replace with high value — CDN may accept)
-        //   2. sp= stripped entirely (last resort — usually 403)
-        // If all bypasses fail, we fall back to the original rate-limited URL.
-        let original_cdn_url = cdn_url.clone();
-        let sp_bypass_urls = generate_sp_bypass_urls(&cdn_url);
-        let cdn_url = if let Some((ref first_bypass, _strategy)) = sp_bypass_urls.first() {
+        // Determine download mode based on URL type.
+        let mode = if is_hls_url(&cdn_url) {
             tracing::info!(
-                original_url = %original_cdn_url,
-                bypass_url = %first_bypass,
-                "stream source: generated sp= bypass URLs — will try speed-unlimited URL first"
+                cdn_url = %cdn_url,
+                "stream source: HLS URL detected — will use HLS client (master playlist → variant playlist → .ts segments)"
             );
-            first_bypass.clone()
+            // Preflight will parse the playlist and fill segment_urls.
+            DownloadMode::Hls { segment_urls: Vec::new() }
         } else {
-            cdn_url
+            DownloadMode::Mp4
         };
 
         let (data_tx, data_rx) = mpsc::channel(CHANNEL_CAPACITY);
 
         let cancel = Arc::new(AtomicBool::new(false));
-
-        // Wrap sp_bypass_urls in a Vec of (url, strategy_name) to track
-        // which bypass URLs we've tried. When all bypasses fail, we fall
-        // back to the original URL.
-        //   Empty Vec   — original URL had no sp= (no bypass possible)
-        //   Non-empty   — bypass URLs to try; pop as each fails
-        let sp_bypass_field: Vec<(String, String)> = sp_bypass_urls;
 
         Ok(Self {
             data_rx,
@@ -273,8 +279,7 @@ impl StreamSource {
             _socks_forwarder: socks_forwarder,
             client,
             cdn_url,
-            original_cdn_url,
-            sp_bypass_urls: sp_bypass_field,
+            mode,
             source_url,
             cookies,
             progress,
@@ -294,97 +299,21 @@ impl StreamSource {
     /// Preflight check: verify the CDN accepts requests from this
     /// Tor circuit before starting the download.
     ///
-    /// Returns the CDN's Content-Length header if available, which
-    /// is used to estimate the video bitrate.
+    /// For MP4 URLs: Uses GET with `Range: bytes=0-0` to verify the CDN
+    /// accepts the URL. Returns Content-Length for bitrate estimation.
     ///
-    /// ## Implementation
-    ///
-    /// Uses GET with `Range: bytes=0-0` instead of HEAD because many
-    /// CDNs (including Voe's CDN) return 404 for HEAD requests on
-    /// download URLs. The Range header limits the response to 1 byte,
-    /// so the bandwidth cost is negligible. A 206 Partial Content
-    /// response confirms the URL is valid and the CDN supports Range.
-    ///
-    /// ## Bypass URL Strategy
-    ///
-    /// If the CDN URL has an `sp=` rate-limit parameter, this method
-    /// first tries bypass URLs (sp=99999, sp= stripped) in order.
-    /// If a bypass URL is accepted, the CDN rate limit is effectively
-    /// removed and playback proceeds at full speed.
-    ///
-    /// If ALL bypass URLs are rejected (403), this method falls back
-    /// to the original unmodified URL (with sp=380 or similar). The
-    /// CDN should accept the original URL since it was generated by
-    /// the CDN itself. Playback will proceed at the rate-limited speed.
-    ///
-    /// Only if the **original** URL also returns 403 is an error
-    /// returned — this indicates an IP block, not a bypass failure,
-    /// and the session layer should re-resolve through a different
-    /// Tor circuit.
+    /// For HLS URLs: Fetches the master playlist, selects the best quality
+    /// variant, fetches the variant playlist, and parses segment URLs.
+    /// The segment URLs are stored in the mode for later download.
     pub async fn preflight_check(&mut self) -> Result<Option<u64>, String> {
-        loop {
-            let result = self.do_preflight_request().await;
-
-            match result {
-                Ok(content_length) => {
-                    // If a bypass URL was accepted, the CDN rate limit no
-                    // longer applies — clear it so the pipeline doesn't use
-                    // rate-limited buffering parameters.
-                    if !self.sp_bypass_urls.is_empty() {
-                        tracing::info!(
-                            "stream source: CDN accepted sp= bypass URL — \
-                             rate limit bypassed, clearing cdn_rate_limit_kbps"
-                        );
-                        *self.progress.cdn_rate_limit_kbps.lock().unwrap() = None;
-                    }
-                    return Ok(content_length);
-                },
-                Err(e) if e.contains("403") => {
-                    // CDN returned 403. Try next bypass URL if available.
-                    if let Some((next_url, strategy)) = self.try_next_bypass_url() {
-                        tracing::info!(
-                            error = %e,
-                            next_bypass_url = %next_url,
-                            strategy = %strategy,
-                            "stream source: CDN rejected bypass URL, trying next bypass"
-                        );
-                        self.cdn_url = next_url;
-                        continue; // Try next bypass URL
-                    }
-
-                    // All bypass URLs exhausted — try the original
-                    // unmodified URL (with sp=380). The CDN generated this
-                    // URL and should accept it for the correct exit IP.
-                    if self.fallback_to_rate_limited_url() {
-                        tracing::info!(
-                            "stream source: all sp= bypass URLs rejected (403), \
-                             trying original rate-limited URL as final fallback"
-                        );
-                        continue; // Try original URL
-                    }
-
-                    // Already using the original URL and it returned 403 —
-                    // this is a genuine IP block or CDN rejection, not a
-                    // bypass URL issue. Return error so the session layer
-                    // can re-resolve through a different Tor circuit.
-                    tracing::warn!(
-                        "stream source: CDN 403 on ORIGINAL URL (not a bypass) — \
-                         exit IP may be blocked by CDN anti-bot, re-resolve needed"
-                    );
-                    return Err(e);
-                },
-                Err(e) => return Err(e), // Non-403 errors
-            }
+        match &self.mode {
+            DownloadMode::Mp4 => self.preflight_mp4().await,
+            DownloadMode::Hls { .. } => self.preflight_hls().await,
         }
     }
 
-    /// Internal: perform a single preflight HTTP request.
-    ///
-    /// Uses GET with `Range: bytes=0-0` instead of HEAD because many
-    /// CDNs (including Voe's CDN) return 404 for HEAD requests on
-    /// download URLs — they only support GET. The Range header ensures
-    /// we only download 1 byte, so bandwidth is minimal.
-    async fn do_preflight_request(&self) -> Result<Option<u64>, String> {
+    /// Preflight for MP4: verify CDN accepts the URL via Range request.
+    async fn preflight_mp4(&self) -> Result<Option<u64>, String> {
         let mut req = self
             .client
             .get(&self.cdn_url)
@@ -400,14 +329,9 @@ impl StreamSource {
 
         if !self.source_url.is_empty() {
             req = req.header("Referer", &self.source_url);
-            // Add Origin header — browsers send this for cross-origin video requests.
-            // Some CDNs (including Voe's orbitcache/cloudwindow-route CDN) may
-            // check for the Origin header to verify the request comes from a
-            // legitimate page. Without it, the CDN may return 403.
             if let Ok(parsed) = url::Url::parse(&self.source_url) {
                 let origin = format!("{}://{}", parsed.scheme(), parsed.host_str().unwrap_or(""));
                 if parsed.port().is_some() {
-                    // Include port if present
                     req = req.header("Origin", &self.source_url);
                 } else {
                     req = req.header("Origin", &origin);
@@ -435,12 +359,10 @@ impl StreamSource {
             content_length = ?headers.get("content-length").and_then(|v| v.to_str().ok()),
             content_type = ?headers.get("content-type").and_then(|v| v.to_str().ok()),
             content_range = ?headers.get("content-range").and_then(|v| v.to_str().ok()),
-            "stream source: preflight CDN check"
+            "stream source: preflight CDN check (MP4)"
         );
 
         if status.as_u16() == 403 {
-            // Log the response body for 403 diagnosis — the CDN might include
-            // an error message or a redirect URL in the body.
             let body = response.text().await.unwrap_or_default();
             let body_snippet = if body.len() > 200 { &body[..200] } else { &body };
             tracing::warn!(
@@ -454,10 +376,7 @@ impl StreamSource {
             );
         }
 
-        // 206 Partial Content = CDN supports Range and URL is valid.
-        // 200 OK = CDN doesn't support Range but URL is valid.
         if !status.is_success() && status.as_u16() != 206 {
-            // Log the response body for non-2xx diagnosis
             let body = response.text().await.unwrap_or_default();
             let body_snippet = if body.len() > 200 { &body[..200] } else { &body };
             tracing::warn!(
@@ -472,39 +391,25 @@ impl StreamSource {
             ));
         }
 
-        // Consume the tiny response body for 206 (just 1 byte) to keep
-        // the connection clean. For 200 (CDN ignored Range header), do
-        // NOT consume the full body — just drop the response to abort
-        // the download. The connection will be closed, which is fine
-        // since we'll start a fresh download connection anyway.
+        // Consume the tiny response body for 206 (just 1 byte).
         if status.as_u16() == 206 {
             let _ = response.bytes().await;
         }
-        // For 200 OK, response is dropped here without consuming body
 
         // Extract total file size for bitrate estimation.
-        //
-        // For 206 Partial Content: Content-Range header has the format
-        // "bytes 0-0/12345678" where 12345678 is the total file size.
-        // Content-Length is just the size of the partial content (1 byte).
-        //
-        // For 200 OK: Content-Length is the full file size.
         let content_length = if status.as_u16() == 206 {
-            // Parse Content-Range: "bytes 0-0/<total>"
             headers
                 .get("content-range")
                 .and_then(|v| v.to_str().ok())
                 .and_then(|v| v.split('/').last())
                 .and_then(|v| v.parse::<u64>().ok())
         } else {
-            // 200 OK — Content-Length is the full file size
             headers
                 .get("content-length")
                 .and_then(|v| v.to_str().ok())
                 .and_then(|v| v.parse::<u64>().ok())
         };
 
-        // Store file size in shared progress state for the pipeline.
         if let Some(cl) = content_length {
             *self.progress.total_bytes.lock().unwrap() = Some(cl);
         }
@@ -512,15 +417,151 @@ impl StreamSource {
         Ok(content_length)
     }
 
+    /// Preflight for HLS: fetch master playlist, select best variant,
+    /// fetch variant playlist, parse segment URLs.
+    async fn preflight_hls(&mut self) -> Result<Option<u64>, String> {
+        // Step 1: Fetch the master playlist
+        let master_playlist = self.fetch_playlist_text(&self.cdn_url).await?;
+
+        tracing::info!(
+            playlist_len = master_playlist.len(),
+            "stream source: HLS master playlist fetched"
+        );
+
+        // Step 2: Parse master playlist to find the best quality variant URL
+        let variant_url = parse_master_playlist(&master_playlist, &self.cdn_url)
+            .ok_or_else(|| "HLS: could not parse master playlist — no variant found".to_string())?;
+
+        tracing::info!(
+            variant_url = %variant_url,
+            "stream source: HLS selected best quality variant"
+        );
+
+        // Step 3: Fetch the variant playlist
+        let variant_playlist = self.fetch_playlist_text(&variant_url).await?;
+
+        tracing::info!(
+            playlist_len = variant_playlist.len(),
+            "stream source: HLS variant playlist fetched"
+        );
+
+        // Step 4: Parse variant playlist to get segment URLs
+        let segment_urls = parse_variant_playlist(&variant_playlist, &variant_url)
+            .ok_or_else(|| "HLS: could not parse variant playlist — no segments found".to_string())?;
+
+        tracing::info!(
+            segment_count = segment_urls.len(),
+            "stream source: HLS parsed segment URLs from variant playlist"
+        );
+
+        if segment_urls.is_empty() {
+            return Err("HLS: variant playlist contains no segments".to_string());
+        }
+
+        // Store parsed segment URLs in the mode
+        let total_segments = segment_urls.len();
+        self.mode = DownloadMode::Hls { segment_urls };
+
+        // Estimate total size: we don't know segment sizes until we download,
+        // so return None for content_length. The pipeline will estimate from
+        // throughput instead.
+        *self.progress.total_bytes.lock().unwrap() = None;
+
+        tracing::info!(
+            segments = total_segments,
+            "stream source: HLS preflight complete — ready to download segments"
+        );
+
+        Ok(None)
+    }
+
+    /// Fetch a playlist (master or variant) as text via the reqwest client.
+    async fn fetch_playlist_text(&self, url: &str) -> Result<String, String> {
+        let mut req = self
+            .client
+            .get(url)
+            .header("Accept", "*/*")
+            .header("Accept-Encoding", "identity;q=1, *;q=0")
+            .header("sec-ch-ua", r#""Chromium";v="131", "Not_A Brand";v="24""#)
+            .header("sec-ch-ua-mobile", "?0")
+            .header("sec-ch-ua-platform", "\"Windows\"")
+            .header("Sec-Fetch-Dest", "video")
+            .header("Sec-Fetch-Mode", "no-cors")
+            .header("Sec-Fetch-Site", "cross-site");
+
+        if !self.source_url.is_empty() {
+            req = req.header("Referer", &self.source_url);
+            if let Ok(parsed) = url::Url::parse(&self.source_url) {
+                let origin = format!("{}://{}", parsed.scheme(), parsed.host_str().unwrap_or(""));
+                if parsed.port().is_some() {
+                    req = req.header("Origin", &self.source_url);
+                } else {
+                    req = req.header("Origin", &origin);
+                }
+            }
+        }
+
+        if !self.cookies.is_empty() {
+            let cookie_header = self.cookies.join("; ");
+            req = req.header("Cookie", &cookie_header);
+        }
+
+        let response = self
+            .client
+            .execute(req.build().map_err(|e| format!("HLS: build playlist request: {}", e))?)
+            .await
+            .map_err(|e| format!("HLS: playlist request failed: {}", e))?;
+
+        let status = response.status();
+        if status.as_u16() == 403 {
+            let body = response.text().await.unwrap_or_default();
+            let body_snippet = if body.len() > 200 { &body[..200] } else { &body };
+            tracing::warn!(
+                body = %body_snippet,
+                "stream source: HLS playlist 403 Forbidden"
+            );
+            return Err(
+                "CDN 403 Forbidden on HLS playlist — re-resolve needed".into(),
+            );
+        }
+
+        if !status.is_success() {
+            return Err(format!(
+                "HLS playlist request returned {} {}",
+                status.as_u16(),
+                status.canonical_reason().unwrap_or("Unknown")
+            ));
+        }
+
+        response
+            .text()
+            .await
+            .map_err(|e| format!("HLS: failed to read playlist body: {}", e))
+    }
+
     /// Start downloading from the CDN. Data chunks are sent to the
     /// channel and can be read via `recv_chunk()`.
+    ///
+    /// For MP4: streams the response body into the data channel.
+    /// For HLS: downloads each .ts segment sequentially and pushes data.
     ///
     /// This spawns a background tokio task that:
     /// 1. Sends a GET request to the CDN with browser-like headers
     /// 2. Streams the response body into the data channel
     /// 3. Measures throughput and updates shared progress state
     /// 4. Handles CDN errors (403, etc.)
-    pub fn start_download(&mut self, range: Option<String>) {
+    pub fn start_download(&mut self, _range: Option<String>) {
+        match &self.mode {
+            DownloadMode::Mp4 => self.start_download_mp4(),
+            DownloadMode::Hls { segment_urls } => {
+                let segment_urls = segment_urls.clone();
+                self.start_download_hls(segment_urls);
+            },
+        }
+    }
+
+    /// Start MP4 download: stream the CDN response into the data channel.
+    fn start_download_mp4(&mut self) {
         let client = self.client.clone();
         let cdn_url = self.cdn_url.clone();
         let source_url = self.source_url.clone();
@@ -551,7 +592,6 @@ impl StreamSource {
 
             if !source_url.is_empty() {
                 req = req.header("Referer", &source_url);
-                // Add Origin header — browsers send this for cross-origin video requests.
                 if let Ok(parsed) = url::Url::parse(&source_url) {
                     let origin = format!("{}://{}", parsed.scheme(), parsed.host_str().unwrap_or(""));
                     if parsed.port().is_some() {
@@ -560,11 +600,6 @@ impl StreamSource {
                         req = req.header("Origin", &origin);
                     }
                 }
-            }
-
-            if let Some(range) = &range {
-                req = req.header("Range", range);
-                tracing::info!(range = %range, "stream source: forwarding Range header to CDN");
             }
 
             if !cookies.is_empty() {
@@ -609,7 +644,7 @@ impl StreamSource {
                 http_version = ?response.version(),
                 content_type = ?headers.get("content-type").and_then(|v| v.to_str().ok()),
                 content_length = ?headers.get("content-length").and_then(|v| v.to_str().ok()),
-                "stream source: CDN response received"
+                "stream source: CDN response received (MP4)"
             );
 
             if status.as_u16() == 403 {
@@ -639,15 +674,11 @@ impl StreamSource {
                         let chunk_len = chunk.len() as u64;
                         let chunk_offset = offset;
 
-                        // Send chunk to the channel. If the channel is full
-                        // (appsrc's queue is full), this will wait until
-                        // space is available, providing natural backpressure.
                         if data_tx
                             .send(DataChunk { data: chunk, offset: chunk_offset })
                             .await
                             .is_err()
                         {
-                            // Receiver dropped — pipeline was destroyed
                             tracing::debug!(
                                 total_bytes = offset,
                                 "stream source: receiver dropped, stopping download"
@@ -659,7 +690,6 @@ impl StreamSource {
                         bytes_since_last_update += chunk_len;
                         progress.downloaded_bytes.store(offset, Ordering::Relaxed);
 
-                        // Update throughput measurement periodically
                         if last_progress_update.elapsed() >= progress_update_interval {
                             let elapsed = last_progress_update.elapsed().as_secs_f64();
                             if elapsed > 0.0 {
@@ -670,7 +700,6 @@ impl StreamSource {
                             bytes_since_last_update = 0;
                             last_progress_update = Instant::now();
 
-                            // Log progress periodically (every ~10 MB)
                             if offset % (10 * 1024 * 1024) < chunk_len {
                                 let total_elapsed = progress
                                     .start_time
@@ -685,7 +714,7 @@ impl StreamSource {
                                     file_size = ?total,
                                     throughput_kbps = throughput,
                                     elapsed_s = total_elapsed,
-                                    "stream source: download progress"
+                                    "stream source: download progress (MP4)"
                                 );
                             }
                         }
@@ -706,7 +735,216 @@ impl StreamSource {
             tracing::info!(
                 total_bytes = offset,
                 elapsed_s = total_elapsed,
-                "stream source: download completed"
+                "stream source: download completed (MP4)"
+            );
+        });
+    }
+
+    /// Start HLS download: download each .ts segment and push data into
+    /// the channel.
+    fn start_download_hls(&mut self, segment_urls: Vec<String>) {
+        let client = self.client.clone();
+        let source_url = self.source_url.clone();
+        let cookies = self.cookies.clone();
+        let progress = self.progress.clone();
+        let cancel = self.cancel.clone();
+        let data_tx = self.data_tx.clone();
+        let total_segments = segment_urls.len();
+
+        // Reset cancel token and progress
+        cancel.store(false, Ordering::Relaxed);
+        progress.downloaded_bytes.store(0, Ordering::Relaxed);
+        progress.throughput_kbps.store(0, Ordering::Relaxed);
+        *progress.start_time.lock().unwrap() = Some(Instant::now());
+
+        // Store content type as MPEG-TS for HLS
+        *progress.content_type.lock().unwrap() = Some("video/MP2T".to_string());
+
+        tracing::info!(
+            segments = total_segments,
+            "stream source: starting HLS segment download"
+        );
+
+        tokio::spawn(async move {
+            let mut offset: u64 = 0;
+            let mut last_progress_update = Instant::now();
+            let mut bytes_since_last_update: u64 = 0;
+            let progress_update_interval = std::time::Duration::from_secs(2);
+
+            for (idx, seg_url) in segment_urls.iter().enumerate() {
+                // Check cancellation between segments
+                if cancel.load(Ordering::Relaxed) {
+                    tracing::info!(
+                        total_bytes = offset,
+                        segment = idx,
+                        "stream source: HLS download cancelled"
+                    );
+                    return;
+                }
+
+                // Build segment request
+                let mut req = client
+                    .get(seg_url)
+                    .header("Accept", "*/*")
+                    .header("Accept-Encoding", "identity;q=1, *;q=0")
+                    .header("sec-ch-ua", r#""Chromium";v="131", "Not_A Brand";v="24""#)
+                    .header("sec-ch-ua-mobile", "?0")
+                    .header("sec-ch-ua-platform", "\"Windows\"")
+                    .header("Sec-Fetch-Dest", "video")
+                    .header("Sec-Fetch-Mode", "no-cors")
+                    .header("Sec-Fetch-Site", "cross-site");
+
+                if !source_url.is_empty() {
+                    req = req.header("Referer", &source_url);
+                    if let Ok(parsed) = url::Url::parse(&source_url) {
+                        let origin =
+                            format!("{}://{}", parsed.scheme(), parsed.host_str().unwrap_or(""));
+                        if parsed.port().is_some() {
+                            req = req.header("Origin", &source_url);
+                        } else {
+                            req = req.header("Origin", &origin);
+                        }
+                    }
+                }
+
+                if !cookies.is_empty() {
+                    let cookie_header = cookies.join("; ");
+                    req = req.header("Cookie", &cookie_header);
+                }
+
+                // Fetch segment
+                let built_req = match req.build() {
+                    Ok(r) => r,
+                    Err(e) => {
+                        tracing::error!(
+                            error = %e,
+                            segment = idx,
+                            url = %seg_url,
+                            "stream source: HLS failed to build segment request"
+                        );
+                        break;
+                    },
+                };
+
+                let response = match client.execute(built_req).await {
+                    Ok(r) => r,
+                    Err(e) => {
+                        tracing::warn!(
+                            error = %e,
+                            segment = idx,
+                            url = %seg_url,
+                            "stream source: HLS segment request failed"
+                        );
+                        break;
+                    },
+                };
+
+                let status = response.status();
+
+                if status.as_u16() == 403 {
+                    tracing::warn!(
+                        segment = idx,
+                        url = %seg_url,
+                        "stream source: HLS segment 403 Forbidden"
+                    );
+                    break;
+                }
+
+                if !status.is_success() {
+                    tracing::warn!(
+                        status = %status,
+                        segment = idx,
+                        url = %seg_url,
+                        "stream source: HLS segment returned non-2xx"
+                    );
+                    break;
+                }
+
+                // Store HTTP status from first segment
+                if idx == 0 {
+                    *progress.http_status.lock().unwrap() = Some(status.as_u16());
+                }
+
+                // Stream the segment body into the data channel
+                let mut body_stream = response.bytes_stream();
+                let mut segment_bytes: u64 = 0;
+
+                while let Some(chunk_result) = body_stream.next().await {
+                    if cancel.load(Ordering::Relaxed) {
+                        tracing::info!(
+                            total_bytes = offset,
+                            segment = idx,
+                            "stream source: HLS download cancelled during segment"
+                        );
+                        return;
+                    }
+
+                    match chunk_result {
+                        Ok(chunk) => {
+                            if chunk.is_empty() {
+                                continue;
+                            }
+
+                            let chunk_len = chunk.len() as u64;
+                            let chunk_offset = offset;
+
+                            if data_tx
+                                .send(DataChunk { data: chunk, offset: chunk_offset })
+                                .await
+                                .is_err()
+                            {
+                                tracing::debug!(
+                                    total_bytes = offset,
+                                    "stream source: receiver dropped, stopping HLS download"
+                                );
+                                return;
+                            }
+
+                            offset += chunk_len;
+                            segment_bytes += chunk_len;
+                            bytes_since_last_update += chunk_len;
+                            progress.downloaded_bytes.store(offset, Ordering::Relaxed);
+
+                            // Update throughput measurement periodically
+                            if last_progress_update.elapsed() >= progress_update_interval {
+                                let elapsed = last_progress_update.elapsed().as_secs_f64();
+                                if elapsed > 0.0 {
+                                    let kbps =
+                                        (bytes_since_last_update * 8) / (elapsed * 1000.0) as u64;
+                                    progress.throughput_kbps.store(kbps, Ordering::Relaxed);
+                                }
+                                bytes_since_last_update = 0;
+                                last_progress_update = Instant::now();
+                            }
+                        },
+                        Err(e) => {
+                            tracing::warn!(
+                                error = %e,
+                                segment = idx,
+                                segment_bytes = segment_bytes,
+                                "stream source: error reading HLS segment stream"
+                            );
+                            break;
+                        },
+                    }
+                }
+
+                tracing::debug!(
+                    segment = idx,
+                    total_segments = total_segments,
+                    segment_bytes = segment_bytes,
+                    total_bytes = offset,
+                    "stream source: HLS segment downloaded"
+                );
+            }
+
+            let total_elapsed =
+                progress.start_time.lock().unwrap().map(|t| t.elapsed().as_secs()).unwrap_or(0);
+            tracing::info!(
+                total_bytes = offset,
+                segments = total_segments,
+                elapsed_s = total_elapsed,
+                "stream source: HLS download completed"
             );
         });
     }
@@ -717,49 +955,6 @@ impl StreamSource {
     /// have been consumed.
     pub async fn recv_chunk(&mut self) -> Option<DataChunk> {
         self.data_rx.recv().await
-    }
-
-    /// Fall back to the original rate-limited CDN URL.
-    ///
-    /// Called when all sp= bypass URLs are rejected by the CDN (403).
-    /// Switches `cdn_url` back to the original URL that includes
-    /// the sp= parameter and clears the bypass URL list.
-    ///
-    /// Returns `true` if fallback happened (was using a bypass URL),
-    /// `false` if already using the original URL (no fallback needed).
-    pub fn fallback_to_rate_limited_url(&mut self) -> bool {
-        if !self.sp_bypass_urls.is_empty() || self.cdn_url != self.original_cdn_url {
-            tracing::info!(
-                bypass_url = %self.cdn_url,
-                original_url = %self.original_cdn_url,
-                "stream source: falling back from sp= bypass URL to original rate-limited URL"
-            );
-            self.cdn_url = self.original_cdn_url.clone();
-            self.sp_bypass_urls.clear(); // all bypasses exhausted
-            // Update rate limit in progress state since we're now using
-            // the rate-limited URL again
-            let rate_limit = extract_cdn_speed_param(&self.cdn_url);
-            *self.progress.cdn_rate_limit_kbps.lock().unwrap() = rate_limit;
-            true
-        } else {
-            false
-        }
-    }
-
-    /// Try the next sp= bypass URL. Called when the current bypass URL
-    /// is rejected by the CDN (403). Pops the current URL and returns
-    /// the next one, or None if all bypasses are exhausted.
-    fn try_next_bypass_url(&mut self) -> Option<(String, String)> {
-        // Pop the current bypass URL (the one that failed)
-        if !self.sp_bypass_urls.is_empty() {
-            self.sp_bypass_urls.remove(0);
-        }
-        // Return the next bypass URL if available
-        if let Some((url, strategy)) = self.sp_bypass_urls.first() {
-            Some((url.clone(), strategy.clone()))
-        } else {
-            None
-        }
     }
 
     /// Get the current download progress.
@@ -805,136 +1000,269 @@ fn extract_cdn_speed_param(url: &str) -> Option<u64> {
     None
 }
 
-/// Generate a list of sp= bypass URLs to try before falling back to the
-/// original rate-limited URL.
+// ── HLS Playlist Parsing ─────────────────────────────────────────────
+
+/// Parse a master playlist and return the variant URL with the highest
+/// bandwidth.
 ///
-/// Returns a Vec of (url, strategy_name) pairs, in order of preference:
-///   1. sp=99999 — replace the speed limit with a very high value.
-///      The CDN may accept a higher sp= value, effectively removing
-///      the speed cap while keeping the required parameter present.
-///   2. sp= stripped — remove the parameter entirely. This usually
-///      results in 403 from the CDN but is tried as a last resort.
+/// Master playlist format:
+/// ```text
+/// #EXTM3U
+/// #EXT-X-STREAM-INF:BANDWIDTH=800000,RESOLUTION=640x360
+/// https://cdn.example.com/360p.m3u8
+/// #EXT-X-STREAM-INF:BANDWIDTH=2800000,RESOLUTION=1280x720
+/// https://cdn.example.com/720p.m3u8
+/// ```
 ///
-/// Returns an empty Vec if the URL has no sp= parameter (no bypass needed).
-fn generate_sp_bypass_urls(url: &str) -> Vec<(String, String)> {
-    let has_sp = url.contains("?sp=") || url.contains("&sp=");
-    if !has_sp {
-        return Vec::new();
+/// Returns `None` if no variant is found.
+fn parse_master_playlist(playlist: &str, base_url: &str) -> Option<String> {
+    let mut best_bandwidth: u64 = 0;
+    let mut best_url: Option<String> = None;
+
+    let lines: Vec<&str> = playlist.lines().collect();
+    let mut i = 0;
+
+    while i < lines.len() {
+        let line = lines[i].trim();
+
+        if line.starts_with("#EXT-X-STREAM-INF:") {
+            // Parse BANDWIDTH from the attributes
+            let bandwidth = parse_bandwidth_from_stream_inf(line);
+
+            // The next non-empty, non-comment line is the variant URL
+            let mut j = i + 1;
+            while j < lines.len() {
+                let next_line = lines[j].trim();
+                if next_line.is_empty() || next_line.starts_with('#') {
+                    j += 1;
+                    continue;
+                }
+                // This is the variant URL
+                if bandwidth > best_bandwidth {
+                    best_bandwidth = bandwidth;
+                    best_url = Some(resolve_url(next_line, base_url));
+                }
+                break;
+            }
+            i = j + 1;
+            continue;
+        }
+
+        i += 1;
     }
 
-    let mut bypasses = Vec::new();
-
-    // Strategy 1: Replace sp=NNN with sp=99999
-    if let Some(modified) = replace_cdn_speed_param(url, 99999) {
-        bypasses.push((modified, "sp=99999 (high-value replacement)".to_string()));
+    if let Some(ref url) = best_url {
+        tracing::info!(
+            bandwidth = best_bandwidth,
+            url = %url,
+            "HLS: selected highest bandwidth variant from master playlist"
+        );
+    } else {
+        tracing::warn!("HLS: no variant found in master playlist");
     }
 
-    // Strategy 2: Strip sp= entirely (usually 403 but worth trying)
-    if let Some(modified) = strip_cdn_speed_param(url) {
-        bypasses.push((modified, "sp= stripped".to_string()));
-    }
-
-    bypasses
+    best_url
 }
 
-/// Replace the CDN speed-limit parameter (`sp=`) value with a new value.
+/// Parse BANDWIDTH value from an #EXT-X-STREAM-INF line.
+fn parse_bandwidth_from_stream_inf(line: &str) -> u64 {
+    // Format: #EXT-X-STREAM-INF:BANDWIDTH=2800000,RESOLUTION=1280x720,CODECS="avc1..."
+    for attr in line.split(',') {
+        let attr = attr.trim();
+        if let Some(rest) = attr.strip_prefix("BANDWIDTH=") {
+            if let Ok(bw) = rest.parse::<u64>() {
+                return bw;
+            }
+        }
+    }
+    // Also check the first attribute (after the colon, before the first comma)
+    // Format: #EXT-X-STREAM-INF:BANDWIDTH=2800000
+    if let Some(pos) = line.find("BANDWIDTH=") {
+        let after = &line[pos + "BANDWIDTH=".len()..];
+        let value = after.split(',').next().unwrap_or("0");
+        if let Ok(bw) = value.parse::<u64>() {
+            return bw;
+        }
+    }
+    0
+}
+
+/// Parse a variant playlist and return the list of segment URLs.
 ///
-/// Returns `Some(modified_url)` if the `sp=` parameter was found and
-/// replaced, or `None` if there was no `sp=` parameter in the URL.
+/// Variant playlist format:
+/// ```text
+/// #EXTM3U
+/// #EXT-X-VERSION:3
+/// #EXT-X-TARGETDURATION:10
+/// #EXTINF:9.9,
+/// https://cdn.example.com/seg001.ts
+/// #EXTINF:9.9,
+/// https://cdn.example.com/seg002.ts
+/// #EXT-X-ENDLIST
+/// ```
 ///
-/// # Examples
-/// ```
-/// assert_eq!(
-///     replace_cdn_speed_param("https://cdn.example.com/video.mp4?t=abc&sp=380&i=199.195", 99999),
-///     Some("https://cdn.example.com/video.mp4?t=abc&sp=99999&i=199.195".to_string())
-/// );
-/// ```
-fn replace_cdn_speed_param(url: &str, new_value: u64) -> Option<String> {
-    // Try &sp= first (middle or end of query string)
-    if let Some(pos) = url.find("&sp=") {
-        let before = &url[..pos];
-        let after = &url[pos + 4..]; // skip "&sp="
-        let value_len = after.find('&').unwrap_or(after.len());
-        let rest = &after[value_len..];
-        return Some(format!("{}&sp={}{}", before, new_value, rest));
+/// Returns `None` if no segments are found.
+fn parse_variant_playlist(playlist: &str, base_url: &str) -> Option<Vec<String>> {
+    let mut segments = Vec::new();
+
+    for line in playlist.lines() {
+        let line = line.trim();
+
+        // Skip empty lines and tags
+        if line.is_empty() || line.starts_with('#') {
+            continue;
+        }
+
+        // This is a segment URL
+        let resolved = resolve_url(line, base_url);
+        segments.push(resolved);
     }
 
-    // Try ?sp= (start of query string)
-    if let Some(pos) = url.find("?sp=") {
-        let before = &url[..pos];
-        let after = &url[pos + 4..]; // skip "?sp="
-        let value_len = after.find('&').unwrap_or(after.len());
-        let rest = &after[value_len..];
-        if rest.is_empty() {
-            Some(format!("{}?sp={}", before, new_value))
-        } else {
-            Some(format!("{}?sp={}{}", before, new_value, rest))
-        }
-    } else {
+    if segments.is_empty() {
         None
+    } else {
+        Some(segments)
     }
 }
 
-/// Strip the CDN speed-limit parameter (`sp=`) from a URL's query string.
+/// Resolve a potentially relative URL against a base URL.
 ///
-/// Returns `Some(modified_url)` if the `sp=` parameter was found and removed,
-/// or `None` if there was no `sp=` parameter in the URL.
+/// HLS segment URLs can be:
+/// - Absolute: `https://cdn.example.com/seg001.ts`
+/// - Relative: `seg001.ts` or `subdir/seg001.ts`
 ///
-/// Handles all positions of `sp=` in the query string:
-/// - `?sp=380` at the start of query string
-/// - `&sp=380` in the middle of query string
-/// - `&sp=380` at the end of query string (no trailing &)
-///
-/// # Examples
-/// ```
-/// // Middle of query string
-/// assert_eq!(
-///     strip_cdn_speed_param("https://cdn.example.com/video.mp4?t=abc&sp=380&i=199.195"),
-///     Some("https://cdn.example.com/video.mp4?t=abc&i=199.195".to_string())
-/// );
-/// // Start of query string
-/// assert_eq!(
-///     strip_cdn_speed_param("https://cdn.example.com/video.mp4?sp=380&t=abc"),
-///     Some("https://cdn.example.com/video.mp4?t=abc".to_string())
-/// );
-/// // End of query string
-/// assert_eq!(
-///     strip_cdn_speed_param("https://cdn.example.com/video.mp4?t=abc&sp=380"),
-///     Some("https://cdn.example.com/video.mp4?t=abc".to_string())
-/// );
-/// // No sp= parameter
-/// assert_eq!(strip_cdn_speed_param("https://cdn.example.com/video.mp4?t=abc"), None);
-/// ```
-fn strip_cdn_speed_param(url: &str) -> Option<String> {
-    // First check if there's an sp= parameter at all
-    let has_sp = url.contains("?sp=") || url.contains("&sp=");
-    if !has_sp {
-        return None;
+/// For relative URLs, we resolve against the directory of the base URL.
+fn resolve_url(url: &str, base_url: &str) -> String {
+    // If the URL is already absolute, return as-is
+    if url.starts_with("http://") || url.starts_with("https://") {
+        return url.to_string();
     }
 
-    // Try &sp= first (middle or end of query string)
-    if let Some(pos) = url.find("&sp=") {
-        let before = &url[..pos];
-        let after = &url[pos + 4..]; // skip "&sp="
-        let value_len = after.find('&').unwrap_or(after.len());
-        let rest = &after[value_len..];
-        return Some(format!("{}{}", before, rest));
+    // Parse the base URL to get the directory portion
+    // e.g. "https://cdn.example.com/path/to/playlist.m3u8?token=abc"
+    //   → base directory is "https://cdn.example.com/path/to/"
+    let parsed = match url::Url::parse(base_url) {
+        Ok(p) => p,
+        Err(_) => return url.to_string(),
+    };
+
+    // Join the relative URL against the base URL.
+    // url::Url::join handles both relative paths and query strings.
+    match parsed.join(url) {
+        Ok(resolved) => resolved.to_string(),
+        Err(_) => url.to_string(),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_extract_cdn_speed_param() {
+        assert_eq!(extract_cdn_speed_param("https://cdn.example.com/video.mp4?t=abc&sp=380&i=199.195"), Some(380));
+        assert_eq!(extract_cdn_speed_param("https://cdn.example.com/video.mp4?sp=380"), Some(380));
+        assert_eq!(extract_cdn_speed_param("https://cdn.example.com/video.mp4?t=abc"), None);
+        assert_eq!(extract_cdn_speed_param("https://cdn.example.com/video.mp4?sp=abc"), None);
     }
 
-    // Try ?sp= (start of query string)
-    if let Some(pos) = url.find("?sp=") {
-        let before = &url[..pos];
-        let after = &url[pos + 4..]; // skip "?sp="
-        let value_len = after.find('&').unwrap_or(after.len());
-        let rest = &after[value_len..];
-        if rest.is_empty() {
-            // sp= was the only query parameter — remove the ? entirely
-            Some(before.to_string())
-        } else {
-            // Replace ?sp=...& with ? (next param becomes first)
-            Some(format!("{}?{}", before, &rest[1..])) // rest starts with &
-        }
-    } else {
-        None
+    #[test]
+    fn test_parse_bandwidth_from_stream_inf() {
+        assert_eq!(parse_bandwidth_from_stream_inf("#EXT-X-STREAM-INF:BANDWIDTH=2800000,RESOLUTION=1280x720"), 2800000);
+        assert_eq!(parse_bandwidth_from_stream_inf("#EXT-X-STREAM-INF:BANDWIDTH=800000"), 800000);
+        assert_eq!(parse_bandwidth_from_stream_inf("#EXT-X-STREAM-INF:RESOLUTION=640x360"), 0);
+    }
+
+    #[test]
+    fn test_parse_master_playlist() {
+        let playlist = "#EXTM3U\n\
+            #EXT-X-STREAM-INF:BANDWIDTH=800000,RESOLUTION=640x360\n\
+            https://cdn.example.com/360p.m3u8\n\
+            #EXT-X-STREAM-INF:BANDWIDTH=2800000,RESOLUTION=1280x720\n\
+            https://cdn.example.com/720p.m3u8\n";
+
+        let result = parse_master_playlist(playlist, "https://cdn.example.com/master.m3u8");
+        assert_eq!(result, Some("https://cdn.example.com/720p.m3u8".to_string()));
+    }
+
+    #[test]
+    fn test_parse_master_playlist_relative_urls() {
+        let playlist = "#EXTM3U\n\
+            #EXT-X-STREAM-INF:BANDWIDTH=800000\n\
+            360p.m3u8\n\
+            #EXT-X-STREAM-INF:BANDWIDTH=2800000\n\
+            720p.m3u8\n";
+
+        let result = parse_master_playlist(playlist, "https://cdn.example.com/path/master.m3u8");
+        assert_eq!(result, Some("https://cdn.example.com/path/720p.m3u8".to_string()));
+    }
+
+    #[test]
+    fn test_parse_variant_playlist() {
+        let playlist = "#EXTM3U\n\
+            #EXT-X-VERSION:3\n\
+            #EXT-X-TARGETDURATION:10\n\
+            #EXTINF:9.9,\n\
+            https://cdn.example.com/seg001.ts\n\
+            #EXTINF:9.9,\n\
+            https://cdn.example.com/seg002.ts\n\
+            #EXT-X-ENDLIST\n";
+
+        let result = parse_variant_playlist(playlist, "https://cdn.example.com/playlist.m3u8");
+        assert_eq!(result, Some(vec![
+            "https://cdn.example.com/seg001.ts".to_string(),
+            "https://cdn.example.com/seg002.ts".to_string(),
+        ]));
+    }
+
+    #[test]
+    fn test_parse_variant_playlist_relative_urls() {
+        let playlist = "#EXTM3U\n\
+            #EXT-X-VERSION:3\n\
+            #EXT-X-TARGETDURATION:10\n\
+            #EXTINF:9.9,\n\
+            seg001.ts\n\
+            #EXTINF:9.9,\n\
+            seg002.ts\n\
+            #EXT-X-ENDLIST\n";
+
+        let result = parse_variant_playlist(playlist, "https://cdn.example.com/path/playlist.m3u8");
+        assert_eq!(result, Some(vec![
+            "https://cdn.example.com/path/seg001.ts".to_string(),
+            "https://cdn.example.com/path/seg002.ts".to_string(),
+        ]));
+    }
+
+    #[test]
+    fn test_resolve_url_absolute() {
+        assert_eq!(
+            resolve_url("https://cdn.example.com/seg.ts", "https://other.com/playlist.m3u8"),
+            "https://cdn.example.com/seg.ts"
+        );
+    }
+
+    #[test]
+    fn test_resolve_url_relative() {
+        assert_eq!(
+            resolve_url("seg.ts", "https://cdn.example.com/path/playlist.m3u8"),
+            "https://cdn.example.com/path/seg.ts"
+        );
+    }
+
+    #[test]
+    fn test_resolve_url_relative_with_query() {
+        assert_eq!(
+            resolve_url("seg.ts", "https://cdn.example.com/path/playlist.m3u8?token=abc"),
+            "https://cdn.example.com/path/seg.ts"
+        );
+    }
+
+    #[test]
+    fn test_is_hls_url() {
+        assert!(is_hls_url("https://cdn.example.com/stream.m3u8"));
+        assert!(is_hls_url("https://cdn.example.com/stream.m3u8?token=abc"));
+        assert!(is_hls_url("https://cdn.example.com/stream.M3U8"));
+        assert!(!is_hls_url("https://cdn.example.com/video.mp4"));
+        assert!(!is_hls_url("https://cdn.example.com/video.mp4?token=abc"));
     }
 }

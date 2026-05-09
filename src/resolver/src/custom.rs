@@ -181,14 +181,14 @@ const DOODSTREAM_DOMAINS: &[&str] = &[
 /// Check if a URL points to an HLS playlist (.m3u8).
 ///
 /// HLS playlists are text files that reference multiple segment URLs.
-/// The `appsrc` + `StreamSource` pipeline CANNOT handle HLS — it only
-/// supports sequential byte streams (single MP4 files). When an HLS URL
-/// is returned by the resolver, the pipeline downloads the tiny playlist
-/// text and pushes it into appsrc, but parsebin/hlsdemux can't fetch the
-/// individual segments because there's no souphttpsrc to make HTTP requests.
-/// The result is no video output or extremely low FPS (1 fps).
+/// The `StreamSource` now has an HLS client that fetches the master
+/// playlist, selects the best quality variant, and downloads each
+/// .ts segment sequentially. The segments are pushed into appsrc as
+/// MPEG-TS data, which parsebin handles natively via tsdemux.
 ///
-/// ALL HLS URLs must be skipped in favor of direct MP4 URLs.
+/// HLS URLs are still deprioritized in favor of direct MP4 URLs
+/// (fewer HTTP requests, lower latency), but are returned as a
+/// fallback when no MP4 URL is available.
 fn is_hls_url(url: &str) -> bool {
     let lower = url.to_lowercase();
     lower.contains(".m3u8")
@@ -267,49 +267,78 @@ fn typical_bitrate_kbps(quality: &str) -> Option<u64> {
 fn extract_media_from_json_value(value: &serde_json::Value) -> Option<String> {
     // Case 1: Simple string URL
     if let Some(url) = value.as_str() {
-        if !url.is_empty() && !is_hls_url(url) {
-            let sp = extract_cdn_speed_param(url);
-            if let Some(speed) = sp {
-                tracing::info!(
-                    sp_kbps = speed,
-                    url = %url,
-                    "Voe: single MP4 URL with CDN rate limit (sp= parameter)"
-                );
+        if !url.is_empty() {
+            if is_hls_url(url) {
+                tracing::info!(url = %url, "Voe: HLS URL found in JSON value — returning as fallback (StreamSource has HLS client)");
+            } else {
+                let sp = extract_cdn_speed_param(url);
+                if let Some(speed) = sp {
+                    tracing::info!(
+                        sp_kbps = speed,
+                        url = %url,
+                        "Voe: single MP4 URL with CDN rate limit (sp= parameter)"
+                    );
+                }
             }
             return Some(url.to_owned());
-        }
-        if is_hls_url(url) {
-            tracing::debug!(url = %url, "skipping HLS URL from JSON value — appsrc pipeline cannot handle HLS");
         }
         return None;
     }
 
     // Case 2: Object with quality levels (e.g., {"720": "url", "1080": "url"})
     if let Some(obj) = value.as_object() {
-        // Collect all non-HLS quality URLs with their CDN rate limits
-        let mut candidates: Vec<(&str, &str, Option<u64>)> = Vec::new(); // (quality, url, sp_value)
+        // Collect all quality URLs with their CDN rate limits.
+        // HLS URLs are included as fallback — StreamSource now has an
+        // HLS client that can download segments and feed them as MPEG-TS
+        // to appsrc/parsebin.
+        let mut mp4_candidates: Vec<(&str, &str, Option<u64>)> = Vec::new(); // (quality, url, sp_value)
+        let mut hls_candidates: Vec<(&str, &str)> = Vec::new(); // (quality, url)
 
         for (key, url_val) in obj.iter() {
             if let Some(url) = url_val.as_str() {
-                if !url.is_empty() && !is_hls_url(url) {
-                    let sp = extract_cdn_speed_param(url);
-                    candidates.push((key, url, sp));
-                } else if is_hls_url(url) {
-                    tracing::debug!(
-                        quality = %key,
-                        "skipping HLS URL at quality level"
-                    );
+                if !url.is_empty() {
+                    if is_hls_url(url) {
+                        tracing::info!(
+                            quality = %key,
+                            "Voe: HLS URL found at quality level — available as fallback (StreamSource has HLS client)"
+                        );
+                        hls_candidates.push((key, url));
+                    } else {
+                        let sp = extract_cdn_speed_param(url);
+                        mp4_candidates.push((key, url, sp));
+                    }
                 }
             }
         }
 
-        if candidates.is_empty() {
+        if mp4_candidates.is_empty() && hls_candidates.is_empty() {
             tracing::warn!(
                 keys = ?obj.keys().collect::<Vec<_>>(),
-                "Voe: mp4 object contained no usable non-HLS URLs"
+                "Voe: mp4 object contained no usable URLs"
             );
             return None;
         }
+
+        // Prefer MP4 URLs over HLS. Only use HLS if no MP4 candidates.
+        let mut candidates = if !mp4_candidates.is_empty() {
+            mp4_candidates
+        } else {
+            tracing::info!("Voe: no MP4 URLs available, using HLS URL as fallback");
+            // Return the highest quality HLS URL (prefer 720 > 480 > etc.)
+            let quality_rank = |q: &str| -> i32 {
+                match q {
+                    "720" => 0,
+                    "480" => 1,
+                    "360" => 2,
+                    "240" => 3,
+                    "1080" => 4,
+                    _ => 5,
+                }
+            };
+            let mut sorted_hls = hls_candidates;
+            sorted_hls.sort_by_key(|(q, _)| quality_rank(q));
+            return Some(sorted_hls[0].1.to_owned());
+        };
 
         // If only one candidate, return it (no choice to make)
         if candidates.len() == 1 {
@@ -883,41 +912,51 @@ fn deobfuscate_embedded_json(raw_json: &str) -> Option<String> {
                 }
             }
 
-            // Priority 2: "direct_access_url" — skip if HLS
+            // Priority 2: "direct_access_url" — allow HLS as fallback
             // Do NOT append &rq= — it breaks the CDN's &t= signature.
             if let Some(url) = obj.get("direct_access_url").and_then(|v| v.as_str()) {
-                if !url.is_empty() && !is_hls_url(url) {
-                    tracing::info!(url = %url, "Voe method8: extracted URL from 'direct_access_url' (no &rq= appended — breaks CDN signature)");
+                if !url.is_empty() {
+                    if is_hls_url(url) {
+                        tracing::info!(url = %url, "Voe method8: HLS URL in 'direct_access_url' — returning as fallback (StreamSource has HLS client)");
+                    } else {
+                        tracing::info!(url = %url, "Voe method8: extracted URL from 'direct_access_url' (no &rq= appended — breaks CDN signature)");
+                    }
                     return Some(url.to_owned());
-                }
-                if is_hls_url(url) {
-                    tracing::debug!(url = %url, "Voe method8: skipping HLS URL in 'direct_access_url'");
                 }
             }
 
-            // Priority 3: "source" — skip if HLS
+            // Priority 3: "source" — allow HLS as fallback
             // Do NOT append &rq= — the source URL already has it if needed,
             // and adding it would break non-HLS source URLs.
+            // StreamSource now has an HLS client, so HLS URLs are returned.
             if let Some(url) = obj.get("source").and_then(|v| v.as_str()) {
-                if !url.is_empty() && !is_hls_url(url) {
-                    tracing::info!(url = %url, "Voe method8: extracted URL from 'source' (using as-is)");
+                if !url.is_empty() {
+                    if is_hls_url(url) {
+                        tracing::info!(url = %url, "Voe method8: HLS URL in 'source' — returning as fallback (StreamSource has HLS client)");
+                    } else {
+                        tracing::info!(url = %url, "Voe method8: extracted URL from 'source' (using as-is)");
+                    }
                     return Some(url.to_owned());
-                }
-                if is_hls_url(url) {
-                    tracing::debug!(url = %url, "Voe method8: skipping HLS URL in 'source'");
                 }
             }
 
-            // NEVER use the "hls" key — it always returns an HLS playlist
-            // that the appsrc pipeline cannot handle.
-            if obj.contains_key("hls") {
-                tracing::debug!("Voe method8: 'hls' key present but skipped — appsrc pipeline cannot handle HLS");
+            // Priority 4: "hls" key — return HLS URL as final fallback
+            // StreamSource now has an HLS client that can download segments
+            // and feed them as MPEG-TS to appsrc/parsebin.
+            if let Some(url) = obj.get("hls").and_then(|v| v.as_str()) {
+                if !url.is_empty() {
+                    tracing::info!(url = %url, "Voe method8: extracted URL from 'hls' key — returning as fallback (StreamSource has HLS client)");
+                    return Some(url.to_owned());
+                }
             }
         }
     }
 
-    // Fallback: regex search for media URLs (MP4 only, no .m3u8)
-    extract_mp4_url_from_text(&step6)
+    // Fallback: regex search for media URLs (MP4 first, then HLS)
+    if let Some(url) = extract_mp4_url_from_text(&step6) {
+        return Some(url);
+    }
+    extract_m3u8_url_from_text(&step6)
 }
 
 // ── Method 7: MKGMa-encoded source ────────────────────────────────
@@ -939,7 +978,7 @@ fn try_method7(html: &str) -> Option<String> {
     let step6 = safe_b64_decode(&step5)?;
 
     // Try JSON parse — same priority as method 8:
-    // mp4 first, then direct_access_url, then source. Skip HLS.
+    // mp4 first, then direct_access_url, then source. HLS allowed as fallback.
     if let Ok(parsed) = serde_json::from_str::<serde_json::Value>(&step6) {
         if let Some(obj) = parsed.as_object() {
             // Priority 1: "mp4" key
@@ -951,24 +990,43 @@ fn try_method7(html: &str) -> Option<String> {
                 }
             }
 
-            // Priority 2: "direct_access_url" — skip if HLS
+            // Priority 2: "direct_access_url" — allow HLS as fallback
             if let Some(url) = obj.get("direct_access_url").and_then(|v| v.as_str()) {
-                if !url.is_empty() && !is_bait_source(url) && !is_hls_url(url) {
+                if !url.is_empty() && !is_bait_source(url) {
+                    if is_hls_url(url) {
+                        tracing::info!(url = %url, "Voe method7: HLS URL in 'direct_access_url' — returning as fallback (StreamSource has HLS client)");
+                    }
                     return Some(url.to_owned());
                 }
             }
 
-            // Priority 3: "source" — skip if HLS
+            // Priority 3: "source" — allow HLS as fallback
             if let Some(url) = obj.get("source").and_then(|v| v.as_str()) {
-                if !url.is_empty() && !is_bait_source(url) && !is_hls_url(url) {
+                if !url.is_empty() && !is_bait_source(url) {
+                    if is_hls_url(url) {
+                        tracing::info!(url = %url, "Voe method7: HLS URL in 'source' — returning as fallback (StreamSource has HLS client)");
+                    }
+                    return Some(url.to_owned());
+                }
+            }
+
+            // Priority 4: "hls" key — return HLS URL as final fallback
+            if let Some(url) = obj.get("hls").and_then(|v| v.as_str()) {
+                if !url.is_empty() && !is_bait_source(url) {
+                    tracing::info!(url = %url, "Voe method7: extracted URL from 'hls' key — returning as fallback (StreamSource has HLS client)");
                     return Some(url.to_owned());
                 }
             }
         }
     }
 
-    // Fallback: regex search (MP4 only)
+    // Fallback: regex search (MP4 first, then HLS)
     if let Some(url) = extract_mp4_url_from_text(&step6) {
+        if !is_bait_source(&url) {
+            return Some(url);
+        }
+    }
+    if let Some(url) = extract_m3u8_url_from_text(&step6) {
         if !is_bait_source(&url) {
             return Some(url);
         }
@@ -995,7 +1053,7 @@ fn try_method6(html: &str) -> Option<String> {
     let reversed: String = decoded.chars().rev().collect();
 
     // Try JSON parse — same priority as method 8:
-    // mp4 first, then direct_access_url, then source. Skip HLS.
+    // mp4 first, then direct_access_url, then source. HLS allowed as fallback.
     if let Ok(parsed) = serde_json::from_str::<serde_json::Value>(&reversed) {
         if let Some(obj) = parsed.as_object() {
             // Priority 1: "mp4" key
@@ -1007,24 +1065,43 @@ fn try_method6(html: &str) -> Option<String> {
                 }
             }
 
-            // Priority 2: "direct_access_url" — skip if HLS
+            // Priority 2: "direct_access_url" — allow HLS as fallback
             if let Some(url) = obj.get("direct_access_url").and_then(|v| v.as_str()) {
-                if !url.is_empty() && !is_bait_source(url) && !is_hls_url(url) {
+                if !url.is_empty() && !is_bait_source(url) {
+                    if is_hls_url(url) {
+                        tracing::info!(url = %url, "Voe method6: HLS URL in 'direct_access_url' — returning as fallback (StreamSource has HLS client)");
+                    }
                     return Some(url.to_owned());
                 }
             }
 
-            // Priority 3: "source" — skip if HLS
+            // Priority 3: "source" — allow HLS as fallback
             if let Some(url) = obj.get("source").and_then(|v| v.as_str()) {
-                if !url.is_empty() && !is_bait_source(url) && !is_hls_url(url) {
+                if !url.is_empty() && !is_bait_source(url) {
+                    if is_hls_url(url) {
+                        tracing::info!(url = %url, "Voe method6: HLS URL in 'source' — returning as fallback (StreamSource has HLS client)");
+                    }
+                    return Some(url.to_owned());
+                }
+            }
+
+            // Priority 4: "hls" key — return HLS URL as final fallback
+            if let Some(url) = obj.get("hls").and_then(|v| v.as_str()) {
+                if !url.is_empty() && !is_bait_source(url) {
+                    tracing::info!(url = %url, "Voe method6: extracted URL from 'hls' key — returning as fallback (StreamSource has HLS client)");
                     return Some(url.to_owned());
                 }
             }
         }
     }
 
-    // Fallback: regex search (MP4 only)
+    // Fallback: regex search (MP4 first, then HLS)
     if let Some(url) = extract_mp4_url_from_text(&reversed) {
+        if !is_bait_source(&url) {
+            return Some(url);
+        }
+    }
+    if let Some(url) = extract_m3u8_url_from_text(&reversed) {
         if !is_bait_source(&url) {
             return Some(url);
         }
@@ -1215,7 +1292,7 @@ fn is_bait_source(source: &str) -> bool {
 /// Extract a direct MP4 media URL from arbitrary text using regex.
 ///
 /// Only returns .mp4 URLs — .m3u8 (HLS) URLs are excluded because the
-/// appsrc pipeline cannot handle HLS streams.
+/// StreamSource now has an HLS client, but MP4 is still preferred.
 fn extract_mp4_url_from_text(text: &str) -> Option<String> {
     // Try mp4 only
     let re_mp4 = regex_lite::Regex::new(r#"(https?://[^\s"']+\.mp4[^\s"']*)"#).ok()?;
@@ -1228,8 +1305,26 @@ fn extract_mp4_url_from_text(text: &str) -> Option<String> {
         }
     }
 
-    // No .m3u8 search — HLS is incompatible with the appsrc pipeline.
-    // If no MP4 URL is found, return None (the pipeline cannot play HLS).
+    // If no MP4 URL is found, return None (caller may try extract_m3u8_url_from_text).
+    None
+}
+
+/// Extract an HLS (.m3u8) playlist URL from arbitrary text.
+///
+/// Used as a fallback when no MP4 URL is found. StreamSource's HLS client
+/// will fetch the master playlist, select the best quality variant, and
+/// download each .ts segment sequentially.
+fn extract_m3u8_url_from_text(text: &str) -> Option<String> {
+    let re_m3u8 = regex_lite::Regex::new(r#"(https?://[^\s"']+\.m3u8[^\s"']*)"#).ok()?;
+    for cap in re_m3u8.captures_iter(text) {
+        if let Some(m) = cap.get(1) {
+            let url = m.as_str();
+            if !is_bait_source(url) {
+                tracing::info!(url = %url, "Voe: found .m3u8 URL in text — returning as fallback (StreamSource has HLS client)");
+                return Some(url.to_owned());
+            }
+        }
+    }
     None
 }
 
