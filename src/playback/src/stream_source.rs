@@ -58,11 +58,15 @@ pub struct DataChunk {
 /// A progressive download source that streams CDN data into a bounded channel.
 ///
 /// The source handles:
-/// - Starting the SOCKS Forwarder for Tor circuit isolation
+/// - Starting the SOCKS Forwarder for Tor circuit isolation (optional)
 /// - Building a reqwest client with browser-like headers
 /// - Downloading from the CDN with throughput measurement
 /// - Providing data chunks via a channel
 /// - Preflight CDN checks (403 detection)
+///
+/// When `socks_addr` is empty, the source connects directly to the CDN
+/// without Tor (no SOCKS forwarder). This is used when the resolver
+/// didn't use Tor either, so the CDN URL is bound to the local IP.
 pub struct StreamSource {
     /// Receiver end of the data channel. The consumer (appsrc push task)
     /// reads from this to get downloaded data.
@@ -70,7 +74,8 @@ pub struct StreamSource {
     /// Sender end, kept here so we can clone it for reconnection scenarios.
     data_tx: mpsc::Sender<DataChunk>,
     /// Keeps the SOCKS forwarder alive for the download's lifetime.
-    _socks_forwarder: SocksForwarder,
+    /// `None` when connecting directly (no Tor).
+    _socks_forwarder: Option<SocksForwarder>,
     /// The reqwest client used for CDN requests.
     client: reqwest::Client,
     /// CDN URL being downloaded (may be the speed-unlimited or original URL
@@ -160,26 +165,48 @@ impl StreamSource {
         cookies: Vec<String>,
         progress: Arc<ProgressState>,
     ) -> Result<Self, String> {
-        // Start SOCKS forwarder for reqwest's Tor routing.
-        let socks_forwarder =
-            SocksForwarder::start(socks_addr.clone(), isolation_username.clone()).await?;
+        // Build reqwest client, optionally routing through SOCKS forwarder.
+        //
+        // When socks_addr is empty (direct resolution, no Tor), we skip
+        // the SOCKS forwarder entirely and connect directly to the CDN.
+        // The CDN URL was generated for the local IP (not a Tor exit),
+        // so direct download works without circuit isolation.
+        let (socks_forwarder, client) = if socks_addr.is_empty() || isolation_username.is_empty() {
+            tracing::info!(
+                cdn_url = %cdn_url,
+                "stream source: direct mode (no Tor) — connecting to CDN without SOCKS forwarder"
+            );
+            let client = reqwest::Client::builder()
+                .user_agent(BROWSER_UA)
+                .connect_timeout(std::time::Duration::from_secs(15))
+                .no_gzip()
+                .no_brotli()
+                .use_rustls_tls()
+                .build()
+                .map_err(|e| format!("stream source: failed to build reqwest client: {}", e))?;
+            (None, client)
+        } else {
+            // Start SOCKS forwarder for reqwest's Tor routing.
+            let forwarder =
+                SocksForwarder::start(socks_addr.clone(), isolation_username.clone()).await?;
 
-        let proxy_url = socks_forwarder.proxy_url();
+            let proxy_url = forwarder.proxy_url();
 
-        // Build reqwest client that routes through the SOCKS forwarder.
-        let reqwest_proxy = reqwest::Proxy::all(&proxy_url)
-            .map_err(|e| format!("stream source: failed to configure HTTP proxy: {}", e))?;
+            // Build reqwest client that routes through the SOCKS forwarder.
+            let reqwest_proxy = reqwest::Proxy::all(&proxy_url)
+                .map_err(|e| format!("stream source: failed to configure HTTP proxy: {}", e))?;
 
-        let client = reqwest::Client::builder()
-            .user_agent(BROWSER_UA)
-            .proxy(reqwest_proxy)
-            .connect_timeout(std::time::Duration::from_secs(15))
-            // No .timeout() — streaming a 400+ MB file takes minutes
-            .no_gzip()
-            .no_brotli()
-            .use_rustls_tls()
-            .build()
-            .map_err(|e| format!("stream source: failed to build reqwest client: {}", e))?;
+            let client = reqwest::Client::builder()
+                .user_agent(BROWSER_UA)
+                .proxy(reqwest_proxy)
+                .connect_timeout(std::time::Duration::from_secs(15))
+                .no_gzip()
+                .no_brotli()
+                .use_rustls_tls()
+                .build()
+                .map_err(|e| format!("stream source: failed to build reqwest client: {}", e))?;
+            (Some(forwarder), client)
+        };
 
         // Extract CDN rate limit from URL's sp= parameter for diagnostics.
         // The sp= parameter caps CDN download speed (e.g. sp=380 = 380 kbps).

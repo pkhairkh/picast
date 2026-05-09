@@ -206,12 +206,23 @@ impl GstPipeline {
         // The media proxy internally starts a SOCKS forwarder for Tor
         // circuit isolation (same exit IP as the resolver → CDN IP-
         // binding token matches).
+        //
+        // StreamSource supports two modes:
+        //   1. SOCKS mode (socks_addr + isolation_username provided):
+        //      Routes through Tor for CDN downloads. The CDN URL was
+        //      resolved through Tor, so it's bound to the Tor exit IP.
+        //   2. Direct mode (socks_addr or isolation_username empty):
+        //      Connects directly to the CDN without Tor. The CDN URL
+        //      was resolved without Tor, so it's bound to the local IP.
+        //      This avoids CDN blocking of Tor exit IPs.
         let is_loopback_url = url.starts_with("http://127.0.0.1:")
             || url.starts_with("http://localhost:")
             || url.starts_with("http://[::1]:");
 
-        let use_stream_source =
-            !is_loopback_url && !socks_addr.is_empty() && !isolation_username.is_empty();
+        // Use StreamSource for all non-loopback CDN URLs.
+        // When socks_addr/isolation_username are empty, StreamSource
+        // operates in direct mode (no SOCKS forwarder, no Tor).
+        let use_stream_source = !is_loopback_url;
 
         // ── Source element ──────────────────────────────────────────
         //
@@ -327,27 +338,9 @@ impl GstPipeline {
 
             stream_source = Some(source);
             appsrc
-        } else if is_loopback_url {
+        } else {
             // ── Loopback URL: souphttpsrc directly ──
             tracing::debug!("loopback media URL detected; connecting directly");
-            ElementFactory::make("souphttpsrc")
-                .property("location", url)
-                .property("timeout", 120u32)
-                .build()
-                .map_err(|e| PlaybackError::PipelineCreation(format!("souphttpsrc: {}", e)))?
-        } else if socks_addr.is_empty() {
-            // ── No Tor proxy: souphttpsrc directly ──
-            tracing::info!("no Tor SOCKS proxy configured; connecting directly to CDN");
-            ElementFactory::make("souphttpsrc")
-                .property("location", url)
-                .property("timeout", 120u32)
-                .build()
-                .map_err(|e| PlaybackError::PipelineCreation(format!("souphttpsrc: {}", e)))?
-        } else {
-            // ── No isolation username: souphttpsrc directly ──
-            tracing::warn!(
-                "no isolation username provided; connecting directly to CDN (not through Tor)"
-            );
             ElementFactory::make("souphttpsrc")
                 .property("location", url)
                 .property("timeout", 120u32)

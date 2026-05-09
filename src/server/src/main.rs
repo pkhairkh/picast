@@ -172,6 +172,7 @@ impl bogdan_session::interfaces::ResolverTrait for ResolverAdapter {
             title: result.title,
             duration_ms: result.duration,
             cookies: result.cookies,
+            used_tor: result.used_tor,
         })
     }
 

@@ -729,6 +729,7 @@ impl SessionManager {
                 title: None,
                 duration_ms: None,
                 cookies: vec![],
+                used_tor: false,
             }
         };
 
@@ -798,7 +799,13 @@ impl SessionManager {
         // retry-specific circuit. Using a different circuit would guarantee
         // an IP mismatch because the re-resolved URL's &i= parameter
         // reflects the resolver's exit IP, not the retry circuit's exit IP.
-        let socks_addr = self.tor.as_ref().map(|t| t.socks_addr()).unwrap_or_default();
+        //
+        // Direct Mode: When used_tor = false, the resolver didn't use Tor.
+        // The CDN URL is bound to the local IP, so playback should also
+        // connect directly (no SOCKS forwarder). We pass empty socks_addr
+        // and isolation_username, which tells the playback pipeline to use
+        // StreamSource in direct mode (no Tor).
+        let tor_socks_addr = self.tor.as_ref().map(|t| t.socks_addr()).unwrap_or_default();
         let base_isolation = self
             .tor
             .as_ref()
@@ -813,6 +820,18 @@ impl SessionManager {
             })
             .unwrap_or_default();
 
+        // Determine SOCKS routing based on whether the resolver used Tor.
+        // When used_tor = false, the CDN URL is bound to the local IP,
+        // so playback must also connect directly (no Tor SOCKS).
+        let (socks_addr, isolation_username) = if resolve_info.used_tor {
+            (tor_socks_addr, base_isolation)
+        } else {
+            tracing::info!(
+                "session: resolver did not use Tor — playback will connect directly to CDN (no SOCKS)"
+            );
+            (String::new(), String::new())
+        };
+
         let mut current_resolve = resolve_info;
         let max_retries = 2;
         let mut attempt = 0;
@@ -820,19 +839,27 @@ impl SessionManager {
         loop {
             attempt += 1;
 
-            // Always use the base isolation username for playback.
-            //
-            // The resolver uses the base circuit, so the CDN URL's &i=
-            // parameter always reflects the base circuit's exit IP.
-            // Using a different circuit for playback would cause a
-            // guaranteed CDN IP mismatch, making retries useless.
-            let isolation_username = base_isolation.clone();
+            // Determine SOCKS routing for this attempt based on whether
+            // the current resolve used Tor. After re-resolve, the
+            // used_tor flag may change (e.g., first attempt used Tor
+            // but re-resolve found a direct path).
+            let (attempt_socks, attempt_isolation) = if current_resolve.used_tor {
+                (tor_socks_addr.clone(), base_isolation.clone())
+            } else {
+                (String::new(), String::new())
+            };
 
             if attempt > 1 {
                 tracing::info!(
                     attempt = attempt,
-                    isolation_username = %isolation_username,
-                    "CDN retry: re-resolved URL, using same Tor circuit (resolver's exit IP)"
+                    isolation_username = %attempt_isolation,
+                    used_tor = current_resolve.used_tor,
+                    "CDN retry: re-resolved URL, {}",
+                    if current_resolve.used_tor {
+                        "using same Tor circuit (resolver's exit IP)"
+                    } else {
+                        "direct mode (no Tor)"
+                    }
                 );
             }
 
@@ -841,8 +868,8 @@ impl SessionManager {
                     .play(
                         &current_resolve.direct_url,
                         url,
-                        &socks_addr,
-                        &isolation_username,
+                        &attempt_socks,
+                        &attempt_isolation,
                         current_resolve.cookies.clone(),
                     )
                     .await;
@@ -1369,6 +1396,7 @@ mod tests {
                 title: Some("Mock Title".to_string()),
                 duration_ms: Some(300000),
                 cookies: vec![],
+                used_tor: false,
             })
         }
 

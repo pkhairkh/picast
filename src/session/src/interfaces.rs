@@ -32,6 +32,11 @@ pub struct ResolveInfo {
     pub duration_ms: Option<u64>,
     /// Cookies to send with the media request (from resolver).
     pub cookies: Vec<String>,
+    /// Whether Tor was used for resolution. When false, the CDN URL is
+    /// bound to the local IP (not a Tor exit), so playback should also
+    /// connect directly (no SOCKS forwarder). This avoids CDN blocking
+    /// of Tor exit IPs on backends that reject Tor traffic.
+    pub used_tor: bool,
 }
 
 /// Resolves a user-supplied URL into a direct, playable media URL.

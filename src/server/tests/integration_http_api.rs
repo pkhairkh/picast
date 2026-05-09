@@ -27,6 +27,7 @@ impl ResolverTrait for MockResolver {
             title: None,
             duration_ms: Some(300000),
             cookies: vec![],
+            used_tor: false,
         })
     }
 
