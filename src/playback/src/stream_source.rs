@@ -269,6 +269,14 @@ impl StreamSource {
     /// Returns the CDN's Content-Length header if available, which
     /// is used to estimate the video bitrate.
     ///
+    /// ## Implementation
+    ///
+    /// Uses GET with `Range: bytes=0-0` instead of HEAD because many
+    /// CDNs (including Voe's CDN) return 404 for HEAD requests on
+    /// download URLs. The Range header limits the response to 1 byte,
+    /// so the bandwidth cost is negligible. A 206 Partial Content
+    /// response confirms the URL is valid and the CDN supports Range.
+    ///
     /// ## Bypass URL Strategy
     ///
     /// If the CDN URL has an `sp=` rate-limit parameter, this method
@@ -342,13 +350,19 @@ impl StreamSource {
         }
     }
 
-    /// Internal: perform a single preflight HTTP HEAD request.
+    /// Internal: perform a single preflight HTTP request.
+    ///
+    /// Uses GET with `Range: bytes=0-0` instead of HEAD because many
+    /// CDNs (including Voe's CDN) return 404 for HEAD requests on
+    /// download URLs — they only support GET. The Range header ensures
+    /// we only download 1 byte, so bandwidth is minimal.
     async fn do_preflight_request(&self) -> Result<Option<u64>, String> {
         let mut req = self
             .client
-            .head(&self.cdn_url)
+            .get(&self.cdn_url)
             .header("Accept", "*/*")
             .header("Accept-Encoding", "identity;q=1, *;q=0")
+            .header("Range", "bytes=0-0")
             .header("sec-ch-ua", r#""Chromium";v="131", "Not_A Brand";v="24""#)
             .header("sec-ch-ua-mobile", "?0")
             .header("sec-ch-ua-platform", "\"Windows\"")
@@ -372,11 +386,14 @@ impl StreamSource {
             .map_err(|e| format!("preflight: CDN request failed: {}", e))?;
 
         let status = response.status();
+        let headers = response.headers().clone();
+
         tracing::info!(
             status = %status,
             http_version = ?response.version(),
-            content_length = ?response.headers().get("content-length").and_then(|v| v.to_str().ok()),
-            content_type = ?response.headers().get("content-type").and_then(|v| v.to_str().ok()),
+            content_length = ?headers.get("content-length").and_then(|v| v.to_str().ok()),
+            content_type = ?headers.get("content-type").and_then(|v| v.to_str().ok()),
+            content_range = ?headers.get("content-range").and_then(|v| v.to_str().ok()),
             "stream source: preflight CDN check"
         );
 
@@ -387,6 +404,8 @@ impl StreamSource {
             );
         }
 
+        // 206 Partial Content = CDN supports Range and URL is valid.
+        // 200 OK = CDN doesn't support Range but URL is valid.
         if !status.is_success() && status.as_u16() != 206 {
             return Err(format!(
                 "CDN returned {} {} — cannot stream",
@@ -395,18 +414,39 @@ impl StreamSource {
             ));
         }
 
-        // Extract Content-Length for bitrate estimation.
-        let content_length = response
-            .headers()
-            .get("content-length")
-            .and_then(|v| v.to_str().ok())
-            .and_then(|v| v.parse::<u64>().ok());
+        // Consume the tiny response body for 206 (just 1 byte) to keep
+        // the connection clean. For 200 (CDN ignored Range header), do
+        // NOT consume the full body — just drop the response to abort
+        // the download. The connection will be closed, which is fine
+        // since we'll start a fresh download connection anyway.
+        if status.as_u16() == 206 {
+            let _ = response.bytes().await;
+        }
+        // For 200 OK, response is dropped here without consuming body
 
-        // Store Content-Length in shared progress state for the pipeline.
-        // This fixes a bug where Content-Length was available from the
-        // preflight response but not stored in ProgressState, so the
-        // pipeline couldn't use it for bitrate estimation until the
-        // actual GET download started.
+        // Extract total file size for bitrate estimation.
+        //
+        // For 206 Partial Content: Content-Range header has the format
+        // "bytes 0-0/12345678" where 12345678 is the total file size.
+        // Content-Length is just the size of the partial content (1 byte).
+        //
+        // For 200 OK: Content-Length is the full file size.
+        let content_length = if status.as_u16() == 206 {
+            // Parse Content-Range: "bytes 0-0/<total>"
+            headers
+                .get("content-range")
+                .and_then(|v| v.to_str().ok())
+                .and_then(|v| v.split('/').last())
+                .and_then(|v| v.parse::<u64>().ok())
+        } else {
+            // 200 OK — Content-Length is the full file size
+            headers
+                .get("content-length")
+                .and_then(|v| v.to_str().ok())
+                .and_then(|v| v.parse::<u64>().ok())
+        };
+
+        // Store file size in shared progress state for the pipeline.
         if let Some(cl) = content_length {
             *self.progress.total_bytes.lock().unwrap() = Some(cl);
         }
