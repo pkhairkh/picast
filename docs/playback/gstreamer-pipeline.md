@@ -1,239 +1,164 @@
 # GStreamer Pipeline Definitions
 
-This document provides detailed, element-by-element definitions of the three GStreamer pipelines used by boGDan for media playback on the Raspberry Pi 4. Each pipeline template corresponds to a different media source type: progressive download (direct MP4/MKV/WebM), HLS adaptive streaming, and media with subtitles. All pipelines use hardware-accelerated V4L2 H.264 decoding with DMA-BUF zero-copy output to the DRM/KMS display via kmssink.
+This document describes the GStreamer pipelines used by boGDan for media playback on the Raspberry Pi 4. The pipeline is constructed dynamically at runtime based on the detected codec — the primary path uses progressive download via `appsrc` + `StreamSource` (not `souphttpsrc` for CDN URLs).
 
-## Pipeline 1: Progressive Download (Direct MP4/MKV/WebM)
+## Architecture: Progressive Download via appsrc
 
-Used when the resolver classifies a URL as `Direct` (the URL points directly to a media file). `parsebin` auto-detects the container format and codec, creates separate pads for video and audio streams, and the pipeline dynamically links them to the appropriate decoder branches.
-
-### Video Branch
+CDN URLs are fetched through boGDan's progressive download architecture, not through GStreamer's `souphttpsrc`:
 
 ```
-souphttpsrc location=<URL> timeout=30 proxy=socks5://127.0.0.1:9050 \
-  ! queue2 max-size-time=3000000000 max-size-buffers=0 max-size-bytes=52428800 \
-          use-buffering=true min-threshold-time=500000000 \
-          buffering-threshold-low=10 buffering-threshold-high=80 \
-  ! parsebin \
-  ! video/x-h264 \
-  ! h264parse config-interval=-1 \
-  ! v4l2h264dec io-mode=dmabuf capture-io-mode=dmabuf \
-  ! queue max-size-time=1000000000 \
-  ! kmssink driver-name=vc4 plane-id=0 can-scale=true sync=true force-modesetting=true
+CDN → Tor → SOCKS Forwarder → reqwest (HTTP/2 + rustls) → bounded channel → appsrc → queue2 → parsebin
 ```
 
-### Audio Branch
+**Why not souphttpsrc?** `souphttpsrc` uses HTTP/1.1 + GnuTLS, which CDN anti-bot systems flag as non-browser. The `reqwest` client uses HTTP/2 + rustls TLS, matching Chrome's fingerprint and eliminating 403 Forbidden errors from CDN TLS/HTTP fingerprinting.
+
+**SOCKS Forwarder:** A local SOCKS5→SOCKS5h forwarder routes reqwest through Tor with the same isolation username as the resolver. Same SOCKS5 username = same Tor circuit = same exit IP, so CDN IP-bound tokens match.
+
+**CDN Preflight Check:** Before starting the full download, boGDan performs a GET request with `Range: bytes=0-0` (not HEAD — many CDNs return 404 for HEAD). This verifies the CDN accepts the URL and returns the file size via `Content-Range`. If the CDN URL has a speed-limit parameter (`sp=380`), bypass URLs are tried first (sp=99999, sp= stripped). If all bypasses fail with 403, the original rate-limited URL is used as fallback.
+
+---
+
+## Pipeline 1: H.264 Progressive Download (Primary Path)
+
+Used for CDN URLs resolved by the resolver. `StreamSource` downloads data through Tor via reqwest, feeds it into `appsrc`, which pushes into the GStreamer pipeline.
+
+### Complete Pipeline Topology
 
 ```
-souphttpsrc location=<URL> timeout=30 proxy=socks5://127.0.0.1:9050 \
-  ! queue2 max-size-time=3000000000 use-buffering=true \
-  ! parsebin \
-  ! audio/mpeg \
-  ! avdec_aac \
-  ! audioconvert \
-  ! audioresample \
-  ! volume volume=0.75 \
-  ! alsasink device=hw:CARD=vc4hdmi sync=true
+┌──────────┐    ┌────────┐    ┌──────────┐    ┌───────┐    ┌────────────────────┐    ┌────────────┐    ┌──────────────┐
+│appsrc    │───►│queue2  │───►│parsebin  │──┬►│queue  │───►│v4l2h264dec(dmabuf) │───►│v4l2convert │───►│kmssink       │
+│(Stream   │    │(buffer)│    │(demux)   │  │ │(200buf│    │(zero-copy HW dec)  │    │(ISP:       │    │(DRM/KMS,     │
+│ Source)  │    │        │    │          │  │ │ 5s)   │    │                    │    │SAND→NV12)  │    │ max-lateness) │
+└──────────┘    └────────┘    └──────────┘  │ └───────┘    └────────────────────┘    └────────────┘    └──────────────┘
+                                               │
+                                               │ ┌───────┐    ┌──────────────┐    ┌──────────────┐    ┌────────┐    ┌─────────────────────┐
+                                               └►│queue  │───►│avdec_aac     │───►│audioresample │───►│volume │───►│alsasink / pulsesink │
+                                                 │(50buf │    │(or fdkaacdec)│    │              │    │        │    │(ts-offset=+100ms,   │
+                                                 │ 2s max)│    │              │    │              │    │        │    │ device=plughw:C,D) │
+                                                 └───────┘    └──────────────┘    └──────────────┘    └────────┘    └─────────────────────┘
 ```
+
+### Source Element Selection
+
+The source element depends on the URL type and proxy configuration:
+
+| Condition | Source Element | Reason |
+|-----------|---------------|--------|
+| CDN URL + Tor proxy + isolation username | `appsrc` + `StreamSource` | Progressive download through Tor with preflight check |
+| Loopback URL (`127.0.0.1` / `localhost`) | `souphttpsrc` | No Tor needed, direct connection |
+| No Tor proxy configured | `souphttpsrc` | Direct CDN access, no Tor routing |
+| No isolation username | `souphttpsrc` | Direct CDN access (warning logged) |
 
 ### Element Explanations
 
 | Element | Purpose | Key Properties |
 |---------|---------|----------------|
-| `souphttpsrc` | HTTP/HTTPS source using libsoup | `location` (URL), `timeout` (30s), `proxy` (SOCKS5 via Tor at 127.0.0.1:9050) |
-| `queue2` | Burst-absorption buffer with buffering signals | `max-size-time` (3s of data), `max-size-bytes` (50MB for Tor), `use-buffering=true`, `min-threshold-time` (0.5s before play), `buffering-threshold-low` (10%, pause below), `buffering-threshold-high` (80%, resume above) |
-| `parsebin` | Auto-detect container format and demux | Autoplugs: detects MP4, MKV, WebM, AVI, FLV. Emits dynamic pads for each stream. |
-| `h264parse` | H.264 bitstream parser | `config-interval=-1` (prepend SPS/PPS to every IDR frame — required for V4L2 stateful decoder) |
-| `v4l2h264dec` | Hardware H.264 decoder via V4L2 M2M | `io-mode=dmabuf` (compressed input via DMA-BUF), `capture-io-mode=dmabuf` (decoded output as DMA-BUF fds — **critical for zero-copy**) |
-| `kmssink` | DRM/KMS direct scanout sink | `driver-name=vc4` (select vc4 DRM driver), `plane-id=0` (primary video plane), `can-scale=true` (HVS scaling), `sync=true` (vsync), `force-modesetting=true` |
-| `avdec_aac` | AAC audio decoder (libav) | Handles most MP4/M4A audio tracks |
-| `audioconvert` | Audio format conversion | Ensures alsasink receives the correct sample format |
-| `audioresample` | Audio sample rate conversion | Handles mismatched sample rates between source and ALSA |
-| `volume` | Software volume control | `volume` property 0.0–1.0; used for both user volume control and mute |
-| `alsasink` | ALSA audio output | `device=hw:CARD=vc4hdmi` (HDMI audio), `sync=true` (A/V sync against GStreamer clock) |
+| `appsrc` | Pushes downloaded data into the GStreamer pipeline | `stream-type=stream`, `format=bytes`, `is-live=false`, `block=true` (flow control) |
+| `queue2` | Burst-absorption buffer with buffering signals | Standard: 400 MB / 300s / 95% high. Rate-limited: 500 MB / 600s / 99% high |
+| `parsebin` | Auto-detect container format and demux | Emits dynamic pads for each stream (video/audio). Includes internal parsers (h264parse, h265parse) |
+| `v4l2h264dec` | Hardware H.264 decoder via V4L2 M2M | `io-mode=dmabuf`, `capture-io-mode=dmabuf` (zero-copy DMA-BUF output) |
+| `v4l2convert` | Format conversion via bcm2835-ISP hardware | `output-io-mode=dmabuf`, `capture-io-mode=dmabuf`. Converts SAND128→NV12 for HEVC, or acts as passthrough for H.264 NV12 |
+| `kmssink` | DRM/KMS direct scanout sink | `driver-name=vc4`, `can-scale=true`, `force-modesetting=true`, `async=false` (avoids preroll deadlock) |
+| `avdec_aac` | AAC audio decoder (libav) | Fallback: `fdkaacdec`. If neither available, audio is disabled (video still works) |
+| `audioconvert` | Audio format conversion | Ensures sink receives correct sample format |
+| `audioresample` | Audio sample rate conversion | Handles mismatched sample rates |
+| `volume` | Software volume control | `volume` property 0.0–1.0; used for user volume and mute |
+| `alsasink` / `pulsesink` | Audio output | `ts-offset=+100ms` (A/V sync compensation for V4L2 decode latency). `device` configurable |
 
-### V4L2 M2M Decoder Fallback Strategy
+### Buffering Strategy
 
-```python
-# Pseudocode for decoder selection in build_pipeline()
-if element_exists("v4l2h264dec"):
-    if supports_format("video/x-h264"):
-        use("v4l2h264dec", io_mode="dmabuf", capture_io_mode="dmabuf")  # Hardware
-    else:
-        use("avdec_h264")  # Software fallback
-else:
-    use("avdec_h264")  # No V4L2 at all (dev machine, CI environment)
-```
+queue2 uses adaptive buffering based on whether the CDN stream is rate-limited:
 
-On a development machine (x86_64 without bcm2835-codec), the pipeline automatically falls back to `avdec_h264` software decoding. This fallback is essential for testing without Pi hardware. The software decoder uses `videoconvert` instead of DMA-BUF, and `ximagesink` or `autovideosink` instead of `kmssink`.
+| Profile | max-size-bytes | max-size-time | high-percent | low-percent | When |
+|---------|---------------|---------------|-------------|------------|------|
+| **Standard** | 400 MB | 300s | 95% | 10% | CDN has no speed limit |
+| **Rate-limited** | 500 MB | 600s | 99% | 5% | CDN has `sp=` parameter (speed cap) |
+
+Rate-limited streams have a fixed ceiling on download speed, so the buffer drains faster than it fills once playback starts. The rate-limited profile maximizes play time before rebuffering.
 
 ---
 
-## Pipeline 2: HLS Adaptive Streaming (.m3u8 Manifest)
+## Pipeline 2: HEVC/H.265 (Behind `hevc` Feature Flag)
 
-Used when the resolver classifies a URL as `Manifest` with an HLS `.m3u8` extension. `hlsdemux` handles master playlist parsing, variant selection based on the `bandwidth` property, and segment fetching with automatic retry on network errors.
-
-### Video Branch
+When HEVC content is detected by parsebin (media type contains `h265` or `hevc`), the video decode chain is built dynamically:
 
 ```
-souphttpsrc location=<M3U8_URL> timeout=30 proxy=socks5://127.0.0.1:9050 \
-  ! hlsdemux bandwidth=<target_bps> \
-  ! queue2 max-size-time=3000000000 use-buffering=true min-threshold-time=500000000 \
-          buffering-threshold-low=10 buffering-threshold-high=80 \
-  ! h264parse config-interval=-1 \
-  ! v4l2h264dec io-mode=dmabuf capture-io-mode=dmabuf \
-  ! queue max-size-time=1000000000 \
-  ! kmssink driver-name=vc4 plane-id=0 can-scale=true sync=true
+parsebin video pad → queue → v4l2slh265dec → v4l2convert(ISP: SAND→NV12) → kmssink
 ```
 
-### Audio Branch
-
-```
-souphttpsrc location=<M3U8_URL> timeout=30 proxy=socks5://127.0.0.1:9050 \
-  ! hlsdemux bandwidth=<target_bps> \
-  ! queue2 max-size-time=3000000000 use-buffering=true \
-  ! audio/mpeg \
-  ! avdec_aac \
-  ! audioconvert \
-  ! audioresample \
-  ! volume volume=0.75 \
-  ! alsasink device=hw:CARD=vc4hdmi sync=true
-```
-
-### HLS-Specific Elements
-
-| Element | Purpose | Notes |
-|---------|---------|-------|
-| `hlsdemux` | HLS manifest parser and segment fetcher | Downloads `.m3u8`, fetches segments, handles variant switching. The `bandwidth` property selects the variant from the master playlist. |
-
-### HLS Variant Selection via Bandwidth Property
-
-When `hlsdemux` encounters a master playlist with multiple variants (different resolutions/bitrates), it selects the variant whose bandwidth is closest to but not exceeding the `bandwidth` property value. This is the primary mechanism for ABR quality control in HLS streams.
-
-| ABR Tier | Target Bandwidth (bps) | hlsdemux bandwidth Property |
-|----------|----------------------|----------------------------|
-| 360p | 800,000 | `bandwidth=800000` |
-| 480p | 1,500,000 | `bandwidth=1500000` |
-| 720p | 3,000,000 | `bandwidth=3000000` |
-| 1080p | 5,000,000 | `bandwidth=5000000` |
-
-The ABR controller sets the `bandwidth` property dynamically when it decides to switch tiers. For HLS streams, this is much faster (~100ms) than rebuilding the entire pipeline because `hlsdemux` simply starts fetching from a different variant URL in the same master playlist.
+**Key differences from H.264 path:**
+- `v4l2slh265dec` is a stateless V4L2 decoder (not stateful like v4l2h264dec)
+- Does NOT have `output-io-mode` / `capture-io-mode` properties — DMA-BUF I/O is auto-negotiated
+- `v4l2convert` (bcm2835-ISP) is **required** to convert SAND128 (NC12) output to NV12 for kmssink
+- H.264 path with v4l2convert also works — it acts as a passthrough when input is already NV12
 
 ---
 
-## Pipeline 3: With Subtitles
+## Pipeline 3: Software Decode Fallback
 
-Used when the resolver provides a subtitle URL alongside the media URL. `subtitleoverlay` composites subtitle text onto the video frame before display. Note: this approach requires the video decoder to output frames to a software-accessible buffer (not DMA-BUF) so that subtitleoverlay can composite text onto it. This partially breaks the zero-copy pipeline for subtitled content. Future versions will render subtitles on the separate OSD plane via DRM Plane 1, preserving zero-copy for the video path.
-
-### Video + Subtitle Branch
+If V4L2 hardware decode fails to negotiate (e.g., non-H.264/HEVC codec, or running on x86_64 without bcm2835-codec), the pipeline falls back to software decode:
 
 ```
-souphttpsrc location=<MEDIA_URL> timeout=30 proxy=socks5://127.0.0.1:9050 \
-  ! queue2 max-size-time=3000000000 use-buffering=true \
-  ! parsebin name=demux \
-  demux. \
-  ! video/x-h264 \
-  ! h264parse config-interval=-1 \
-  ! v4l2h264dec \
-  ! queue max-size-time=1000000000 \
-  ! subtitleoverlay name=overlay \
-  ! videoconvert \
-  ! kmssink driver-name=vc4 plane-id=0 can-scale=true sync=true
+appsrc → queue2 → parsebin → queue → avdec_h264 → videoconvert → kmssink
 ```
 
-### Subtitle Input Branch
-
-```
-souphttpsrc location=<SUBTITLE_URL> \
-  ! subparse encoding=utf8 \
-  ! overlay.
-```
-
-### Audio Branch
-
-```
-demux. \
-  ! audio/mpeg \
-  ! avdec_aac \
-  ! audioconvert \
-  ! audioresample \
-  ! volume volume=0.75 \
-  ! alsasink device=hw:CARD=vc4hdmi sync=true
-```
-
-### Subtitle-Specific Elements
-
-| Element | Purpose | Key Properties |
-|---------|---------|----------------|
-| `subtitleoverlay` | Composites subtitles onto video frames | Accepts video on sink pad and subtitles on `text-sink` pad. Renders text using Pango/Cairo. |
-| `subparse` | Parses SRT/SubViewer/MicroDVD subtitle formats | `encoding=utf8` ensures correct text decoding |
-
-### Subtitle Format Support
-
-| Format | Extension | GStreamer Parser | Notes |
-|--------|-----------|------------------|-------|
-| SubRip | .srt | `subparse` | Most common; yt-dlp default output |
-| WebVTT | .vtt | `subparse` | Used by HLS streams |
-| SSA/ASS | .ssa, .ass | `assrender` (requires gst-plugins-bad) | Advanced styling support |
-| MicroDVD | .sub | `subparse` | Legacy format |
-
-For YouTube auto-captions (which come as JSON3 format), yt-dlp converts them to SRT before providing the subtitle URL.
-
-### Future: OSD-Plane Subtitles
-
-The current subtitleoverlay approach breaks zero-copy because it requires reading decoded video frames into CPU memory for text compositing. A future implementation will extract subtitle data from the GStreamer pipeline via a pad probe, pass the text to the `bogdan-display` OSD renderer, and composite it on DRM Plane 1. This preserves zero-copy for the video path (Plane 0) while rendering subtitles on a separate overlay plane (Plane 1) via the V3D GPU.
+This fallback is essential for testing without Pi hardware. Software decode uses `videoconvert` instead of `v4l2convert`, and `ximagesink` or `autovideosink` instead of `kmssink` on development machines.
 
 ---
 
-## Gapless Source Switching (ABR Quality Change)
+## Dynamic Video Chain Construction
 
-When the ABR controller decides to switch quality tiers, the pipeline must switch to a new source URL without a visible glitch. There are two approaches: pipeline teardown/rebuild (v1) and uridecodebin3 gapless switch (future).
+The video decode chain is NOT built at pipeline construction time. Instead, `parsebin`'s `pad-added` signal triggers dynamic chain creation based on the detected codec:
 
-### Approach 1: Pipeline Teardown and Rebuild (v1)
+1. parsebin discovers a video stream and creates a source pad
+2. The pad-added callback inspects the pad's caps (or template caps if negotiation isn't complete)
+3. Based on the media type:
+   - `video/x-h264` → creates: `queue → v4l2h264dec → v4l2convert → kmssink`
+   - `video/x-h265` (with `hevc` feature) → creates: `queue → v4l2slh265dec → v4l2convert → kmssink`
+   - Other → falls back to software decode: `queue → avdec_* → videoconvert → kmssink`
+4. Elements are added to the pipeline and linked dynamically
 
-1. Record current position: `position_secs = pipeline.query_position()`.
-2. Stop old pipeline: `pipeline.set_state(Null)`.
-3. Build new pipeline with new URL at new quality tier.
-4. Seek to recorded position: `pipeline.seek(position_secs)`.
-5. Set to Playing.
+This approach avoids caps mismatch errors that occurred when pre-built HEVC bins received H.264 data.
 
-**Drawback**: there is a brief black frame during the switch (~200–400ms for cached URLs, ~10s for URLs requiring yt-dlp re-resolution).
-
-### Approach 2: Gapless with uridecodebin3 (Future)
-
-```
-uridecodebin3 uri=<URL> name=src \
-  src. ! video/x-h264 ! v4l2h264dec ! queue ! kmssink driver-name=vc4 \
-  src. ! audio/mpeg ! avdec_aac ! audioconvert ! alsasink
-
-# On "about-to-finish" signal:
-src.emit("setup-source", new_uri)
-```
-
-`uridecodebin3` supports the `about-to-finish` signal which fires before the current source runs out of data, allowing a seamless switch to the next URL. This provides truly gapless transitions with no visible glitch. Requires HLS master playlist support in yt-dlp output.
+**Important:** When checking pad caps, `current_caps()` may return `None` for the first pad (before negotiation completes). The callback falls back to `query_caps(None)` (template caps) to determine the media type.
 
 ---
 
-## Audio/Video Synchronization
+## Audio Pipeline
 
-Synchronization is handled by GStreamer's clock system. Key settings:
-
-- `sync=true` on both `kmssink` and `alsasink` — ensures both sinks render at the correct clock time, maintaining lip sync.
-- GStreamer's default clock is the system monotonic clock (`CLOCK_MONOTONIC`).
-- The `queue2` `use-buffering=true` property causes the pipeline to pause when the buffer runs low and resume when it fills up, which naturally keeps A/V in sync.
-
-### Latency Tuning
-
-For low-latency live streams (e.g., Twitch), reduce buffering:
+The audio chain is pre-built at pipeline construction time (unlike video, which is dynamic):
 
 ```
-souphttpsrc latency=0 \
-  ! hlsdemux \
-  ! queue max-size-time=0 max-size-buffers=1 \
-  ! v4l2h264dec \
-  ! kmssink sync=true latency=0
+audio_queue(max 50 buffers, 2s) → avdec_aac → audioconvert → audioresample → volume → alsasink/pulsesink
 ```
 
-This reduces latency at the cost of increased buffering risk. Not recommended for on-demand content where latency is irrelevant.
+**AAC decoder selection:** `avdec_aac` (from gst-libav) is preferred. If unavailable, `fdkaacdec` is tried. If neither exists, the audio decoder is omitted and a fakesink is attached to the audio pad in the parsebin callback (video still works).
+
+**Audio/Video sync compensation:** The audio sink has `ts-offset=+100ms` (configurable) to delay audio rendering, compensating for V4L2 hardware decode latency (v4l2h264dec: 2-4 capture buffers at 25fps = 80-160ms, v4l2convert ISP: ~40ms). Without this, audio plays ahead of video (lip-sync desync).
+
+**Bluetooth audio:** When `audio_sink` is set to `pulsesink`, the `device` property sets the PulseAudio sink name. If empty, pulsesink auto-routes to the default sink (which can be a Bluetooth device if configured in PulseAudio).
+
+---
+
+## CDN Rate Limit Handling
+
+Many video CDNs (e.g. Voe) embed a speed-limit token as `&sp=NNN` in the URL, where NNN is the maximum download speed in kbps. When `sp=380`, throughput is capped at ~380 kbps.
+
+### Bypass Strategy (in `stream_source.rs`)
+
+1. **sp=99999**: Replace the speed limit with a very high value. The CDN may accept it, effectively removing the cap while keeping the required parameter present.
+2. **sp= stripped**: Remove the parameter entirely. Usually results in 403 from the CDN (the `sp=` value is part of the signed URL token), but tried as a last resort.
+3. **Original URL fallback**: If all bypass URLs return 403, fall back to the original rate-limited URL. The CDN generated this URL and should accept it for the correct exit IP.
+4. **Re-resolve on 403 from original URL**: If even the original URL returns 403, this indicates an IP block. The session layer re-resolves through a different Tor circuit.
+
+### Preflight Check
+
+Before starting playback, boGDan performs a CDN preflight check:
+
+- **Method**: GET with `Range: bytes=0-0` (NOT HEAD — many CDNs return 404 for HEAD on download URLs)
+- **Expected response**: 206 Partial Content (CDN supports Range) or 200 OK (CDN ignored Range)
+- **File size extraction**: From `Content-Range: bytes 0-0/<total>` (206) or `Content-Length` (200)
+- **Bitrate mismatch warning**: If CDN rate limit < estimated video bitrate, logs a warning that playback will stutter
 
 ---
 
@@ -241,22 +166,20 @@ This reduces latency at the cost of increased buffering risk. Not recommended fo
 
 ```bash
 # Show pipeline graph as image (requires graphviz)
-GST_DEBUG_DUMP_DOT_DIR=/tmp GST_DEBUG=GST_TRACER:7 bogdan
+GST_DEBUG_DUMP_DOT_DIR=/tmp GST_DEBUG=GST_TRACER:7 bogdan-server
 dot -Tpng /tmp/bogdan.*.dot > pipeline.png
 
 # Verbose element-level logging
-GST_DEBUG=2,souphttpsrc:5,hlsdemux:5,v4l2h264dec:5,kmssink:5 bogdan
+GST_DEBUG=2,appsrc:5,parsebin:5,v4l2h264dec:5,kmssink:5 bogdan-server
 
 # Check if V4L2 M2M elements are available
 gst-inspect-1.0 v4l2h264dec
 gst-inspect-1.0 kmssink
 
-# Test pipeline manually (H.264 progressive)
-gst-launch-1.0 souphttpsrc location=<URL> ! parsebin ! v4l2h264dec io-mode=dmabuf capture-io-mode=dmabuf ! kmssink driver-name=vc4
-
-# Test pipeline manually (HLS)
-gst-launch-1.0 souphttpsrc location=<M3U8_URL> ! hlsdemux ! queue2 use-buffering=true ! v4l2h264dec ! kmssink driver-name=vc4
+# Test pipeline manually (H.264 progressive via appsrc — not possible with gst-launch)
+# Use the boGDan HTTP API instead:
+curl -X POST http://pi:8585/api/cast -H 'Content-Type: application/json' -d '{"url":"https://example.com/video.mp4"}'
 
 # Monitor buffer fill percentage
-GST_DEBUG=queue2:5 bogdan 2>&1 | grep buffering
+GST_DEBUG=queue2:5 bogdan-server 2>&1 | grep buffering
 ```

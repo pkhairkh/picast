@@ -79,7 +79,7 @@ T<id> [∥] <title>
   Depends: none (uses GStreamer directly, not bogdan-display — kmssink handles DRM internally)
   Accept:
   - `PlaybackEngine::new(PipelineConfig)` initializes GStreamer and creates an idle engine
-  - `engine.play(url, socks_proxy)` constructs and starts the GStreamer pipeline: `souphttpsrc → queue2 → parsebin → v4l2h264dec → kmssink` with DMA-BUF io-mode
+  - `engine.play(url, source_url, socks_proxy, isolation_username, cookies)` constructs and starts the GStreamer pipeline: `appsrc → queue2 → parsebin → [dynamic: v4l2h264dec → v4l2convert → kmssink] + [avdec_aac → audioconvert → audioresample → volume → alsasink]` with DMA-BUF io-mode
   - `engine.pause()` transitions pipeline to Paused state
   - `engine.resume()` transitions back to Playing
   - `engine.stop()` sends EOS and destroys pipeline
@@ -93,13 +93,15 @@ T<id> [∥] <title>
   Implementation notes:
   - Add dependencies: `gstreamer`, `gstreamer-app`, `gstreamer-video`, `gstreamer-audio` (gstreamer-rs crates)
   - `gstreamer::init()` must be called exactly once — use `std::sync::Once`
-  - Pipeline string for H.264: `souphttpsrc location={url} proxy-id="" socks5-proxy-ip=127.0.0.1 socks5-proxy-port=9050 ! queue2 max-size-bytes=52428800 use-buffering=true ! parsebin ! v4l2h264dec capture-io-mode=dmabuf ! kmssink driver-name=vc4 plane-id=0 can-scale=true force-modesetting=true`
-  - Audio branch: `parsebin ! audioconvert ! volume name=pivol ! alsasink`
+  - Pipeline construction: programmatic (not gst-launch string). Uses `appsrc` + `StreamSource` for CDN URLs, with `parsebin` for auto-detection and dynamic video chain creation in pad-added callback
+  - CDN URLs: `StreamSource` (reqwest HTTP/2 + rustls TLS) → SOCKS Forwarder → Tor → CDN. Preflight check with GET+Range. sp= bypass strategy for CDN speed limits
+  - Loopback URLs: `souphttpsrc` directly (no Tor needed)
+  - Audio branch: `audio_queue → avdec_aac → audioconvert → audioresample → volume → alsasink`
   - Bus watch: `pipeline.bus().add_watch()` → map GStreamer messages to `PlaybackEvent` → send through mpsc channel
   - On `GST_MESSAGE_BUFFERING`: extract percent, emit `Buffering` event, pause/resume pipeline based on threshold
   - On `GST_MESSAGE_ERROR`: extract debug string, emit `Error` event, stop pipeline
   - Fallback: if `v4l2h264dec` fails to negotiate, rebuild pipeline with `avdec_h264` (software decode) and log warning
-  - Software decode pipeline: `souphttpsrc → queue2 → parsebin ! queue ! avdec_h264 ! videoconvert ! kmssink`
+  - Software decode pipeline: `appsrc → queue2 → parsebin → queue → avdec_h264 → videoconvert → kmssink`
 
 ---
 
@@ -257,7 +259,7 @@ T<id> [∥] <title>
   - boGDan stops gmediarender when its own HTTP API starts a session (and vice versa)
   Implementation notes:
   - gmediarender is a subprocess, not a Rust library. Spawn it with `tokio::process::Command`
-  - GSTREAMER_PIPELINE env: `souphttpsrc location=%s ! queue2 ! parsebin ! v4l2h264dec capture-io-mode=dmabuf ! kmssink driver-name=vc4`
+  - GSTREAMER_PIPELINE env: `appsrc name=src ! queue2 use-buffering=true ! parsebin ! v4l2h264dec capture-io-mode=dmabuf ! v4l2convert output-io-mode=dmabuf capture-io-mode=dmabuf ! kmssink driver-name=vc4`
   - Session sync: monitor gmediarender's state (D-Bus or GStreamer bus), sync with boGDan session manager
   - Race condition: if both DLNA and HTTP API try to cast simultaneously, first one wins
 

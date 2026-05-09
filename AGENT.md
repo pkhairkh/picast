@@ -75,10 +75,10 @@ session for the network. `bogdan-server` is the binary entry point.
 1. **H.264 primary, HEVC experimental** — The HEVC decoder outputs SAND format (NC12/NC30) which the HVS cannot display natively. The `v3d` crate implements a GPU compute shader for SAND→NV12 conversion (behind `hevc` feature flag). For v1, prefer H.264 via `bestvideo[vcodec^=avc1]` in yt-dlp.
 2. **No Cast V2** — Google enforces device authentication; unofficial receivers cannot appear in Chrome's native cast menu.
 3. **No DRM** — Widevine L3 on ARM is unreliable. DRM content is explicitly out of scope.
-4. **Tor bandwidth is 500Kbps–5Mbps** — Some CDNs also impose speed limits (`sp=380` → 380 kbps cap). Progressive download via appsrc pre-buffers data. Playback may stutter when CDN rate limit is below video bitrate.
+4. **Tor bandwidth is 500Kbps–5Mbps** — Some CDNs impose speed limits via `sp=380` URL parameter (380 kbps cap). Progressive download via `appsrc` + `StreamSource` (reqwest) pre-buffers data. CDN preflight check tries sp= bypass URLs before falling back to rate-limited URL. Playback may stutter when CDN rate limit is below video bitrate.
 5. **Zero-copy is sacred** — Never `.map()` a DMA-BUF into userspace. Pass file descriptors only. If you copy, you've failed.
 6. **DRM/KMS direct** — No X11, no Wayland, no compositor. The app is DRM master. Use `drmModeAtomicCommit()` for all plane updates.
-7. **Process isolation for yt-dlp** — yt-dlp runs as a subprocess (`tokio::process::Command`), never as an embedded Python library. Kill it with timeout if it hangs. However, custom resolvers (Voe, etc.) use reqwest via Tor directly — no yt-dlp subprocess for known domains.
+7. **Process isolation for yt-dlp** — yt-dlp runs as a subprocess (`tokio::process::Command`), never as an embedded Python library. Kill it with timeout if it hangs. However, custom resolvers (Voe, DoodStream, etc.) use reqwest via Tor directly — no yt-dlp subprocess for known domains. The `socks_forwarder` module creates a local SOCKS5→SOCKS5h forwarder to ensure the CDN sees the same Tor exit IP as the resolver.
 8. **No `unsafe` without justification** — Any `unsafe` block must have a `// SAFETY:` comment explaining why it is sound.
 9. **No `unwrap()` in production code** — Use `?`, `.ok_or(...)`, or explicit error handling. `unwrap()` is acceptable in `#[test]` only.
 
@@ -218,42 +218,71 @@ async fn resolve_with_ytdlp(url: &str, socks_proxy: &str) -> Result<String, Reso
 ### GStreamer Pipeline Construction
 
 ```rust
+// The pipeline uses appsrc + StreamSource for CDN URLs (progressive download),
+// not souphttpsrc. Video decode chain is built dynamically in parsebin's
+// pad-added callback based on detected codec.
+//
+// Pipeline topology (H.264):
+//   appsrc → queue2 → parsebin
+//     ├→ queue → v4l2h264dec(dmabuf) → v4l2convert(ISP) → kmssink
+//     └→ queue → avdec_aac → audioconvert → audioresample → volume → alsasink
+//
+// The appsrc element receives data from StreamSource's bounded channel.
+// StreamSource downloads via reqwest through a SOCKS forwarder (Tor).
+
 use gstreamer::prelude::*;
 
-fn build_h264_pipeline(uri: &str) -> Result<gstreamer::Pipeline, PlaybackError> {
+fn build_appsrc_pipeline() -> Result<gstreamer::Pipeline, PlaybackError> {
     gstreamer::init().map_err(|e| PlaybackError::Gstreamer(e.to_string()))?;
 
-    let pipeline = gstreamer::parse_launch(
-        &format!(
-            "uridecodebin uri={uri} name=src \
-             src. ! queue ! v4l2h264dec ! kmssink \
-             src. ! queue ! audioconvert ! alsasink"
-        )
-    ).map_err(|e| PlaybackError::PipelineCreation(e.to_string()))?;
+    let pipeline = gstreamer::Pipeline::new();
+    pipeline.set_property("async-handling", true);
 
-    Ok(pipeline.downcast::<gstreamer::Pipeline>().unwrap())
+    let appsrc = gstreamer::ElementFactory::make("appsrc")
+        .property_from_str("stream-type", "stream")
+        .property_from_str("format", "bytes")
+        .property("is-live", false)
+        .property("block", true)
+        .build()?;
+
+    let queue2 = gstreamer::ElementFactory::make("queue2")
+        .property("max-size-bytes", 400_000_000u32)
+        .property("use-buffering", true)
+        .property("high-percent", 95i32)
+        .build()?;
+
+    let parsebin = gstreamer::ElementFactory::make("parsebin").build()?;
+    let kmssink = gstreamer::ElementFactory::make("kmssink")
+        .property("driver-name", "vc4")
+        .property("can-scale", true)
+        .build()?;
+
+    pipeline.add_many([&appsrc, &queue2, &parsebin, &kmssink])?;
+    gstreamer::Element::link_many([&appsrc, &queue2, &parsebin])?;
+
+    // Video decode chain is created in parsebin's pad-added callback
+    // based on detected codec (H.264 → v4l2h264dec, HEVC → v4l2slh265dec)
+    Ok(pipeline)
 }
 ```
 
 ### DRM/KMS Atomic Modesetting
 
 ```rust
-// Always use atomic commits for tear-free display
-// Never map DMA-BUFs into userspace
-// Pass file descriptors between V4L2 decoder and DRM planes
-
-fn atomic_commit(
-    drm_fd: RawFd,
-    plane_id: u32,
-    crtc_id: u32,
-    fb_id: u32,
-    src_rect: (u32, u32, u32, u32),
-    dst_rect: (u32, u32, u32, u32),
-) -> Result<(), DisplayError> {
-    // Use drmModeAtomicCommit() via nix::sys::ioctl
-    // This is the ONLY acceptable way to update the display
-    todo!("Implement via drm-rs + nix ioctl bindings")
-}
+// kmssink handles DRM plane updates internally via GStreamer.
+// The DisplayManager (bogdan-display) only enumerates connectors
+// at startup and releases DRM master on shutdown.
+//
+// Key points:
+// - kmssink opens /dev/dri/card0 and becomes DRM master
+// - It imports DMA-BUF fds from v4l2h264dec directly into DRM planes
+// - async=false on kmssink avoids preroll deadlock with parsebin
+// - connector_id can be set explicitly for multi-output setups
+//
+// For the OSD plane (Plane 1), use drmModeAtomicCommit() directly:
+// - Allocate GBM buffer with RENDERING | SCANOUT flags
+// - Render text via V3D EGL
+// - Atomic commit Plane 1 FB update simultaneously with Plane 0
 ```
 
 ---

@@ -36,20 +36,26 @@ The boGDan data path is a fixed pipeline with no branches, no feedback loops, an
 Sender submits URL
        │
        ▼
-Content Resolver (yt-dlp via Tor SOCKS5h)
+Content Resolver (yt-dlp / custom resolvers via Tor SOCKS5h)
        │
-       ▼ resolved direct media URL
-GStreamer Pipeline
-   souphttpsrc ──▶ queue2 ──▶ h264parse ──▶ v4l2h264dec
-       │                                          │
-       │ Tor fetch                         NV12 DMA-BUF fd
-       │                                    (zero-copy)
-       │                                          │
-       │                                          ▼
-       │                                  kmssink (DRM Plane 0)
-       │                                          │
-       │                                          ▼
-       │                                  HVS → HDMI scanout
+       ▼ resolved direct CDN URL
+Progressive Download (StreamSource)
+   CDN → Tor → SOCKS Forwarder → reqwest → channel
+       │
+       ▼ downloaded chunks
+GStreamer Pipeline (dynamic codec detection)
+   appsrc ──▶ queue2 ──▶ parsebin ──┬▶ queue ──▶ v4l2h264dec(dmabuf)
+       │                             │              │
+       │                             │       NV12 DMA-BUF fd (zero-copy)
+       │                             │              │
+       │                             │              ▼
+       │                             │      v4l2convert(ISP) ──▶ kmssink (DRM Plane 0)
+       │                             │                                      │
+       │                             │                                      ▼
+       │                             │                              HVS → HDMI scanout
+       │                             │
+       │                             └▶ queue ──▶ avdec_aac ──▶ audioconvert
+       │                                              ──▶ audioresample ──▶ volume ──▶ alsasink
        │
        ▼
    OSD Pipeline (parallel)
@@ -59,9 +65,15 @@ GStreamer Pipeline
    HVS composites Plane 0 + Plane 1 → HDMI
 ```
 
-The sender (browser extension, UPnP controller, or HTTP client) submits a URL. The content resolver invokes yt-dlp through the Tor SOCKS proxy to extract a direct media URL and its format metadata. The resolved URL is passed to the GStreamer pipeline, which fetches the media through the same Tor proxy, parses the container, and feeds NALUs to the V4L2 H.264 hardware decoder. The decoder outputs decoded frames as NV12 DMA-BUF file descriptors — these are GPU-side memory buffers that the DRM/KMS subsystem can scan out directly. The `kmssink` element imports these DMA-BUF fds into DRM Plane 0, and the HVS reads from Plane 0 during each HDMI scanout cycle.
+The sender (browser extension, UPnP controller, or HTTP client) submits a URL. The content resolver classifies the URL and invokes either a custom resolver (for known domains like Voe, DoodStream) or yt-dlp (for general web pages) through the Tor SOCKS proxy to extract a direct CDN media URL and its format metadata.
 
-In parallel, the V3D GPU renders any on-screen display (subtitles, status indicators) into a separate GBM buffer on DRM Plane 1. The HVS performs hardware alpha-blending of Plane 0 (video) and Plane 1 (OSD) and outputs the composited result to HDMI. The CPU's role in this entire path is limited to feeding compressed NALUs to the decoder and handling GStreamer bus messages — it never copies, transforms, or touches decoded pixel data.
+The resolved CDN URL is then fetched through boGDan's **progressive download** architecture, not through GStreamer's `souphttpsrc`. A `reqwest` HTTP/2 client (using rustls TLS) fetches data from the CDN through a local SOCKS5 forwarder that tunnels through Tor with per-site circuit isolation. The SOCKS forwarder ensures the CDN sees the same Tor exit IP as the resolver, preventing IP-bound CDN token mismatches. Downloaded data flows through a bounded channel into a GStreamer `appsrc` element.
+
+Before starting the full download, boGDan performs a **CDN preflight check** using GET with `Range: bytes=0-0` (not HEAD — many CDNs return 404 for HEAD on download URLs). If the CDN URL contains a speed-limit parameter (`sp=380` = 380 kbps cap), bypass URLs are tried first (sp=99999, sp= stripped). If all bypasses fail with 403, the original rate-limited URL is used as fallback.
+
+The GStreamer pipeline uses `parsebin` for auto-detection of container and codec formats, then dynamically builds the video decode chain in a pad-added callback based on the detected codec: H.264 → `v4l2h264dec`, HEVC → `v4l2slh265dec`, other → software fallback. The `v4l2convert` element uses the bcm2835-ISP hardware for pixel format conversion (e.g., SAND128→NV12 for HEVC decode). The decoder outputs DMA-BUF file descriptors that `kmssink` imports directly into DRM Plane 0 for zero-copy HDMI scanout by the HVS.
+
+In parallel, the V3D GPU renders any on-screen display (subtitles, status indicators) into a separate GBM buffer on DRM Plane 1. The HVS performs hardware alpha-blending of Plane 0 (video) and Plane 1 (OSD) and outputs the composited result to HDMI. The CPU's role in this entire path is limited to feeding compressed data from the channel into `appsrc` and handling GStreamer bus messages — it never copies, transforms, or touches decoded pixel data.
 
 ### 2.3 System Boundary
 
@@ -197,7 +209,7 @@ Zero-copy is therefore not merely an optimization — it is the architectural en
 
 The boGDan video pipeline consists of four stages, connected by zero-copy buffer transfers. Each stage operates on DMA-BUF file descriptors — kernel-managed handles to physically contiguous (or IOMMU-mapped) memory that can be shared between hardware devices without copying through main memory.
 
-**Stage 1: Network Fetch.** The `souphttpsrc` GStreamer element fetches the media stream over HTTPS, routing through the Tor SOCKS5 proxy. This stage operates on compressed data (H.264 NALUs within a container) and writes into GStreamer's `queue2` buffer, which provides burst absorption for Tor's variable-bandwidth delivery. The queue2 element can buffer up to 50MB of compressed data, providing 30–60 seconds of playback buffer at typical 720p bitrates over Tor. This stage does involve CPU-side memory copies — compressed data is received from the network stack and written into GStreamer buffers — but the data is small (compressed H.264 at 2–4 Mbps) compared to decoded video (186 MB/s for 1080p60 NV12).
+**Stage 1: Progressive Download.** CDN URLs are fetched through boGDan's progressive download architecture, not through GStreamer's `souphttpsrc`. A `reqwest` HTTP/2 client (using rustls TLS, matching Chrome's fingerprint) fetches data from the CDN through a local SOCKS5 forwarder that tunnels through Tor with per-site circuit isolation. The SOCKS forwarder ensures the CDN sees the same Tor exit IP as the resolver. Downloaded data flows through a bounded channel (128 chunks × 256 KB = 32 MB buffer) into a GStreamer `appsrc` element. This stage operates on compressed data (H.264 NALUs within a container) and provides burst absorption for Tor's variable-bandwidth delivery. Before starting the full download, a CDN preflight check (GET with `Range: bytes=0-0`) verifies the URL is valid and measures the file size for bitrate estimation.
 
 **Stage 2: Hardware Decode.** The `v4l2h264dec` element feeds compressed NALUs to the BCM2711's H.264 hardware decoder via the V4L2 M2M OUTPUT queue. The decoder operates autonomously: it parses NALUs, manages reference frames, performs motion compensation and inverse transform, and writes decoded NV12 frames into CAPTURE queue buffers. When `io-mode=dmabuf` is set, the CAPTURE queue's buffers are DMA-BUF file descriptors. The decoder writes pixel data directly into these DMA-BUFs, which are allocated by the V4L2 framework from the CMA (Contiguous Memory Allocator) pool. The application never maps these buffers into its address space — it merely passes the DMA-BUF fds downstream.
 
@@ -209,42 +221,45 @@ The data flow can be summarized as: compressed bytes (network → GStreamer buff
 
 ### 4.2 GStreamer Pipeline Definition
 
-The complete GStreamer pipeline for H.264 playback with Tor routing is defined as follows:
+The complete GStreamer pipeline for H.264 playback with progressive download is defined as follows. Note that the pipeline is constructed programmatically (not via `gst-launch` string) because the video decode chain is built dynamically in `parsebin`'s `pad-added` callback:
 
-```bash
-gst-launch-1.0 \
-  souphttpsrc location="<resolved-url>" \
-    proxy-id="" \
-    socks5-proxy-ip=127.0.0.1 \
-    socks5-proxy-port=9050 \
-    socks5-proxy-username="bogdan-<site-hash>" \
-  ! queue2 max-size-bytes=52428800 \
-    use-buffering=true \
-    buffering-threshold-high=80 \
-    buffering-threshold-low=10 \
-  ! h264parse \
-    config-interval=-1 \
-  ! v4l2h264dec \
-    io-mode=dmabuf \
-    capture-io-mode=dmabuf \
-  ! kmssink \
-    driver-name=vc4 \
-    plane-id=0 \
-    can-scale=true \
-    force-modesetting=true
+```text
+appsrc stream-type=stream format=bytes block=true
+  ! queue2 max-size-bytes=400000000 use-buffering=true high-percent=95 low-percent=10
+  ! parsebin
+  ! -- video branch (dynamic, created in pad-added callback) --
+  ! queue max-size-buffers=200 max-size-time=5000000000
+  ! v4l2h264dec io-mode=dmabuf capture-io-mode=dmabuf
+  ! v4l2convert output-io-mode=dmabuf capture-io-mode=dmabuf
+  ! kmssink driver-name=vc4 can-scale=true force-modesetting=true async=false
+  ! -- audio branch (pre-built) --
+  ! queue max-size-buffers=50 max-size-time=2000000000
+  ! avdec_aac
+  ! audioconvert
+  ! audioresample
+  ! volume volume=0.75
+  ! alsasink ts-offset=100000000
 ```
 
 Element-by-element explanation:
 
-- **`souphttpsrc`**: HTTPS fetch via libsoup. Configured with `socks5-proxy-ip` and `socks5-proxy-port` to route through the local Tor SOCKS proxy at `127.0.0.1:9050`. The `socks5-proxy-username` field carries the stream isolation identifier (e.g., `bogdan-youtube-abc123`), which Tor's `IsolateSOCKSAuth` uses to assign this connection to a dedicated circuit. The `proxy-id=""` disables HTTP proxy (we use SOCKS5, not HTTP proxy).
+- **`appsrc`**: Pushes downloaded data into the GStreamer pipeline. `stream-type=stream` for sequential data, `format=bytes` for byte-level positioning, `block=true` for flow control (blocks push-buffer when downstream queue is full). Data comes from `StreamSource`'s bounded channel via a background tokio task.
 
-- **`queue2`**: Burst-absorption buffer with 50MB capacity (`max-size-bytes=52428800`). Tor's bandwidth is variable — a circuit might deliver 4 Mbps for several seconds and then stall for 500ms while a new relay is selected. The queue2 buffer absorbs these bursts, providing smooth decode input. `use-buffering=true` enables buffering messages on the GStreamer bus, which boGDan uses to display buffering state via the WebSocket channel. The high/low thresholds control when buffering starts and stops: below 10% full, the pipeline pauses; above 80% full, it resumes.
+- **`queue2`**: Burst-absorption buffer with 400 MB capacity (500 MB for rate-limited streams). `use-buffering=true` enables buffering messages on the GStreamer bus, which boGDan uses to display buffering state via the WebSocket channel. The high/low thresholds control when buffering starts and stops. Adaptive buffering: rate-limited streams use 99% high-percent / 5% low-percent to maximize play time before rebuffering.
 
-- **`h264parse`**: Parses the H.264 bitstream, extracting SPS/PPS NALUs and ensuring they are prepended to each keyframe (`config-interval=-1`). This is necessary because some streaming formats (notably raw H.264 over HTTP) may send SPS/PPS only once at the start, but the stateful V4L2 decoder requires them before every IDR frame to initialize correctly.
+- **`parsebin`**: Auto-detects the container format and codec, demuxes the stream, and emits dynamic pads for each stream (video, audio). Includes internal parsers (h264parse, h265parse, etc.). The video decode chain is built dynamically in the `pad-added` callback based on the detected codec — this avoids caps mismatch errors from pre-built decoder bins.
 
-- **`v4l2h264dec`**: The V4L2 H.264 hardware decoder. `io-mode=dmabuf` configures the OUTPUT queue (compressed input) to use DMA-BUF, and `capture-io-mode=dmabuf` configures the CAPTURE queue (decoded output) to export DMA-BUF file descriptors. This is the critical setting that enables zero-copy — without it, the decoder would allocate system memory buffers and require the application to copy data.
+- **`v4l2h264dec`**: The V4L2 H.264 hardware decoder. `io-mode=dmabuf` configures the OUTPUT queue (compressed input) to use DMA-BUF, and `capture-io-mode=dmabuf` configures the CAPTURE queue (decoded output) to export DMA-BUF file descriptors. This is the critical setting that enables zero-copy.
 
-- **`kmssink`**: Direct DRM/KMS output sink. `driver-name=vc4` selects the vc4 DRM driver. `plane-id=0` assigns the video to the first display plane. `can-scale=true` allows the HVS to scale the video to fit the display resolution (e.g., upscaling 720p to 1080p). `force-modesetting=true` ensures the CRTC is configured even if no prior mode has been set.
+- **`v4l2convert`**: Format conversion via bcm2835-ISP hardware. `output-io-mode=dmabuf` and `capture-io-mode=dmabuf` enable zero-copy ISP processing. For H.264 NV12 input, this acts as a passthrough. For HEVC SAND128 input, it converts to NV12 for kmssink compatibility. Also handles colorspace conversion when needed.
+
+- **`kmssink`**: Direct DRM/KMS output sink. `driver-name=vc4` selects the vc4 DRM driver. `can-scale=true` allows the HVS to scale the video to fit the display resolution. `force-modesetting=true` ensures the CRTC is configured. `async=false` prevents the preroll deadlock that occurs when kmssink waits for data before the video chain is linked (parsebin links dynamically).
+
+- **`avdec_aac`**: AAC audio decoder (libav). Falls back to `fdkaacdec` if unavailable. If neither exists, audio is disabled and a fakesink is attached instead.
+
+- **`volume`**: Software volume control, adjustable at runtime via the HTTP API and WebSocket.
+
+- **`alsasink`**: ALSA audio output. `ts-offset=+100ms` compensates for V4L2 hardware decode latency (80-160ms from v4l2h264dec + 40ms from v4l2convert ISP). Configurable device (`plughw:C,D` for ALSA, or `pulsesink` for Bluetooth audio).
 
 ### 4.3 OSD Overlay Pipeline
 
@@ -261,8 +276,10 @@ For subtitles specifically, GStreamer's `subtitleoverlay` element can render SRT
 As described in §3.1.2, the HEVC decoder's SAND column output format is incompatible with direct HVS scanout. The HEVC pipeline would require an additional conversion stage between decode and display:
 
 ```
-souphttpsrc → queue2 → h265parse → v4l2slh265dec → [SAND→NV12 conversion] → kmssink
+appsrc → queue2 → parsebin → [dynamic: queue → h265parse → v4l2slh265dec → v4l2convert(ISP: SAND→NV12)] → kmssink
 ```
+
+Note: `h265parse` is included within `parsebin` — it is not a separate element in the pipeline. The video decode chain (queue → v4l2slh265dec → v4l2convert → kmssink) is built dynamically in parsebin's `pad-added` callback when an HEVC video pad is detected. The `v4l2slh265dec` stateless decoder does NOT have `output-io-mode` or `capture-io-mode` properties — DMA-BUF I/O mode is auto-negotiated by the GStreamer V4L2 decoder base class.
 
 The conversion stage is the blocker. Three approaches have been evaluated:
 
@@ -566,7 +583,7 @@ The `IsolateSOCKSAuth` configuration in Tor ensures that connections with differ
 
 DNS leakage is a critical concern for any Tor-routed system. If DNS queries bypass Tor and are sent to the ISP's recursive resolver, the ISP can observe the domains the user is accessing, even though the actual media traffic is Tor-encrypted. boGDan implements defense-in-depth DNS leak prevention at three layers:
 
-**Layer 1: SOCKS5h protocol enforcement.** All connections to the Tor proxy use the `socks5h://` scheme (SOCKS5 with remote DNS resolution). The `h` suffix tells the SOCKS client library to send the hostname to the Tor proxy for resolution, rather than resolving it locally. The Tor proxy resolves the hostname through the Tor network (via the exit relay's DNS resolver), ensuring that DNS queries never reach the ISP's resolver. boGDan configures this in every component: GStreamer's `souphttpsrc` element (`socks5-proxy-ip` parameter), yt-dlp's `--proxy` flag, and any custom HTTP clients.
+**Layer 1: SOCKS5h protocol enforcement.** All connections to the Tor proxy use the `socks5h://` scheme (SOCKS5 with remote DNS resolution). The `h` suffix tells the SOCKS client library to send the hostname to the Tor proxy for resolution, rather than resolving it locally. The Tor proxy resolves the hostname through the Tor network (via the exit relay's DNS resolver), ensuring that DNS queries never reach the ISP's resolver. boGDan configures this in every component: `reqwest`'s proxy configuration (via the SOCKS forwarder), yt-dlp's `--proxy` flag, and any custom HTTP clients.
 
 **Layer 2: System resolver override.** boGDan sets `/etc/resolv.conf` to point to `127.0.0.1`, where a local `dnsmasq` instance listens. This dnsmasq is configured to **refuse all queries** — it does not forward any DNS requests upstream. This ensures that even if an application or library ignores the SOCKS5h configuration and attempts to resolve a hostname locally, the DNS query will fail immediately rather than leaking to the ISP's resolver. The failed resolution will cause the application to fall back to the SOCKS5h proxy (or fail with a clear error), rather than silently leaking.
 
@@ -625,7 +642,7 @@ The browser extension exposes the following configuration options, stored via th
 | `autoCast` | boolean | `false` | When true, the extension automatically casts detected media without requiring user interaction. Useful for "always-on" casting setups. |
 | `maxResolution` | enum | `720p` | Maximum resolution to request from boGDan. Options: `240p`, `360p`, `480p`, `720p`, `1080p`. The extension sends this as a hint in the `/api/cast` request's `format` field. |
 
-The `torMode` setting is particularly important. In `full` mode, the extension instructs boGDan to route both content resolution (yt-dlp) and media fetching (souphttpsrc) through Tor. In `resolution-only` mode, only yt-dlp uses Tor — the actual media stream is fetched directly from the CDN. This reduces latency and improves bandwidth (CDN connections are typically much faster than Tor), but at the cost of exposing the user's IP address to the media CDN. The `off` mode disables Tor entirely, making boGDan function as a conventional casting device.
+The `torMode` setting is particularly important. In `full` mode, the extension instructs boGDan to route both content resolution (yt-dlp/custom resolvers) and media fetching (StreamSource/reqwest) through Tor. In `resolution-only` mode, only the resolver uses Tor — the actual media stream is fetched directly from the CDN. This reduces latency and improves bandwidth (CDN connections are typically much faster than Tor), but at the cost of exposing the user's IP address to the media CDN. The `off` mode disables Tor entirely, making boGDan function as a conventional casting device.
 
 ---
 
@@ -697,7 +714,7 @@ boGDan uses a **buffer-level ABR** strategy instead. Rather than estimating band
 
 The re-resolution process is the main challenge. Unlike CDN-based adaptive streaming (where manifest files list all available bitrates and switching is instant), boGDan must invoke yt-dlp to get a different quality URL. This takes 5–30 seconds, during which the current stream continues playing. If the buffer is exhausted before re-resolution completes, playback stalls.
 
-To minimize disruption, boGDan uses GStreamer's `pad-probe` mechanism to perform a **gapless source switch**: when the new URL is ready, a second `souphttpsrc` element is instantiated and connected to the pipeline in parallel. Once the new source has buffered sufficiently, the old source's pad is blocked, and the new source's pad is linked. This provides a seamless transition without a visible gap in playback — the video may briefly drop in quality (or upsample from a lower resolution) during the transition, but it does not freeze or display a loading spinner.
+To minimize disruption, boGDan uses GStreamer's `pad-probe` mechanism to perform a **gapless source switch**: when the new URL is ready, a second `StreamSource` is started and its `appsrc` feeds data into the pipeline while the old source's pad is blocked. Once the new source has buffered sufficiently, the pipeline switches to the new data stream. This provides a seamless transition without a visible gap in playback — the video may briefly drop in quality (or upsample from a lower resolution) during the transition, but it does not freeze or display a loading spinner.
 
 ---
 
@@ -865,7 +882,7 @@ boGDan's resource consumption is carefully budgeted to ensure consistent perform
 | GPU (V3D) | — | <5% | OSD rendering only. Vast majority of V3D capacity is unused. |
 | Temperature | — | 45–55°C (passive) | Well below 80°C throttling threshold. No active cooling required. |
 
-The 3% CPU figure deserves elaboration. The V4L2 hardware decoder operates asynchronously — the application feeds NALUs into the OUTPUT queue and receives decoded frames from the CAPTURE queue via V4L2 poll events. The GStreamer pipeline thread spends most of its time waiting for these events, waking up only to move buffers between elements. The souphttpsrc element also operates asynchronously (via GLib main loop I/O callbacks), consuming minimal CPU for network I/O. The combined CPU usage of the entire pipeline is dominated by the h264parse element's bitstream parsing, which is lightweight for well-formed streams. The ~3% figure is measured on a single Cortex-A72 core at 1.5GHz; the other three cores are effectively idle during playback.
+The 3% CPU figure deserves elaboration. The V4L2 hardware decoder operates asynchronously — the application feeds NALUs into the OUTPUT queue and receives decoded frames from the CAPTURE queue via V4L2 poll events. The GStreamer pipeline thread spends most of its time waiting for these events, waking up only to move buffers between elements. The `appsrc` element receives data from the `StreamSource` channel and pushes it into the pipeline with minimal CPU overhead. The combined CPU usage of the entire pipeline is dominated by `parsebin`'s bitstream parsing and any software audio decoding, both of which are lightweight. The ~3% figure is measured on a single Cortex-A72 core at 1.5GHz; the other three cores are effectively idle during playback.
 
 ---
 

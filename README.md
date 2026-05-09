@@ -64,20 +64,28 @@ Sender Device                          Raspberry Pi 4
 │ Home Asst.   │                       │          │ via Tor SOCKS5h       │
 │ / curl       │                       │          ▼                       │
 └──────────────┘                       │  playback (progressive download) │
-                                       │   appsrc ← reqwest ← SOCKS fwd  │
-                                       │      ↓                          │
-                                       │   parsebin → v4l2h264dec        │
-                                       │      → v4l2convert → kmssink    │
-                                       │      → avdec_aac → alsasink     │
-                                       │          │                      │
-                                       │  display (DRM/KMS → HDMI)      │
+                                       │                                  │
+                                       │  CDN → Tor → SOCKS Fwd → reqwest│
+                                       │    → channel → appsrc → queue2   │
+                                       │         ↓                        │
+                                       │   parsebin (auto-detect codec)   │
+                                       │    ├→ queue → v4l2h264dec (HW)   │
+                                       │    │   → v4l2convert (ISP)       │
+                                       │    │   → kmssink (DRM Plane 0)   │
+                                       │    └→ queue → avdec_aac          │
+                                       │        → audioconvert → vol      │
+                                       │        → alsasink / pulsesink    │
+                                       │                                  │
+                                       │  display (DRM/KMS → HDMI)       │
                                        │  tor (C daemon, IsolateSOCKSAuth)│
                                        └──────────────────────────────────┘
 ```
 
-The data path uses **progressive download** rather than real-time streaming. A `reqwest` HTTP/2 client fetches data from the CDN through a local SOCKS5 forwarder (which tunnels through Tor), and feeds it into a GStreamer `appsrc` element. This allows pre-buffering, throughput measurement, and CDN preflight checks before starting playback.
+The data path uses **progressive download** rather than real-time streaming. A `reqwest` HTTP/2 client fetches data from the CDN through a local SOCKS5 forwarder (which tunnels through Tor with per-site circuit isolation), and feeds it into a GStreamer `appsrc` element. This allows pre-buffering, throughput measurement, and CDN preflight checks before starting playback. The SOCKS forwarder ensures that the CDN sees the same Tor exit IP as the resolver, preventing IP-bound CDN token mismatches.
 
-The GStreamer pipeline uses `parsebin` for auto-detection of container and codec formats, routing video through V4L2 hardware decode (H.264) or software fallback, and audio through software decode. The video decode output flows as DMA-BUF file descriptors directly to `kmssink` for DRM/KMS display — the CPU never touches decoded pixel data.
+Before starting the full download, boGDan performs a **CDN preflight check** using GET with `Range: bytes=0-0` (not HEAD — many CDNs return 404 for HEAD). If the CDN URL contains a speed-limit parameter (`sp=380` = 380 kbps cap), boGDan tries bypass URLs (sp=99999, sp= stripped). If all bypasses return 403, it falls back to the original rate-limited URL. Only if the original URL returns 403 does playback fail — this indicates an IP block requiring re-resolution through a different Tor circuit.
+
+The GStreamer pipeline uses `parsebin` for auto-detection of container and codec formats, then dynamically builds the video decode chain in a pad-added callback based on the detected codec (H.264 → v4l2h264dec, HEVC → v4l2slh265dec, software fallback → avdec_h264). The `v4l2convert` element uses the bcm2835-ISP hardware to convert between pixel formats (e.g., SAND128→NV12 for HEVC). Video decode output flows as DMA-BUF file descriptors directly to `kmssink` for DRM/KMS display — the CPU never touches decoded pixel data.
 
 ## Configuration
 
