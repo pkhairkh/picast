@@ -820,18 +820,6 @@ impl SessionManager {
             })
             .unwrap_or_default();
 
-        // Determine SOCKS routing based on whether the resolver used Tor.
-        // When used_tor = false, the CDN URL is bound to the local IP,
-        // so playback must also connect directly (no Tor SOCKS).
-        let (socks_addr, isolation_username) = if resolve_info.used_tor {
-            (tor_socks_addr, base_isolation)
-        } else {
-            tracing::info!(
-                "session: resolver did not use Tor — playback will connect directly to CDN (no SOCKS)"
-            );
-            (String::new(), String::new())
-        };
-
         let mut current_resolve = resolve_info;
         let max_retries = 2;
         let mut attempt = 0;
