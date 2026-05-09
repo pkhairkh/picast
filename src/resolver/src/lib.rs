@@ -340,56 +340,14 @@ impl Resolver {
                         }
                     );
 
-                    // ── Dual-path Voe resolution strategy ──────────────────
+                    // ── Tor-only Voe resolution ───────────────────────────
                     //
-                    // Voe's CDN backend (cloudwindow-route.com) blocks Tor
-                    // exit IPs with 403 Forbidden, even when the URL's &i=
-                    // IP-binding token matches the Tor exit IP. This makes
-                    // Tor-based resolution + playback fail for all Voe URLs.
-                    //
-                    // Solution: Try resolving WITHOUT Tor first (direct path).
-                    // If the Voe page is accessible from the Pi's IP (no geo-
-                    // blocking), the CDN URL will be bound to the Pi's IP,
-                    // and the CDN will accept the download from the same IP.
-                    //
-                    // If direct resolution fails (geo-blocking, DDoS-Guard
-                    // challenge that requires Tor, etc.), fall back to Tor.
-                    // In that case, used_tor = true and the session layer
-                    // will route playback through Tor as before.
+                    // All traffic must go through Tor for privacy. The CDN
+                    // URL's &i= parameter binds to the Tor exit IP, and
+                    // playback uses the same Tor circuit (SOCKS5 username
+                    // isolation) so the CDN sees the same IP for both
+                    // resolution and download.
 
-                    // Step 1: Try direct resolution (no Tor).
-                    match custom::resolve_voe(url, None).await {
-                        Ok(mut result) => {
-                            if !is_known_voe {
-                                tracing::info!(
-                                    url = url,
-                                    host = host,
-                                    "Voe resolver succeeded on unknown domain — this is likely a new Voe front-end"
-                                );
-                            }
-                            tracing::info!(
-                                url = url,
-                                "Voe: direct resolution succeeded (no Tor) — CDN URL bound to local IP, \
-                                 playback will use direct connection"
-                            );
-                            result.category = UrlCategory::WebPage;
-                            result.used_tor = false;
-                            {
-                                let cache = self.cache.lock().await;
-                                cache.insert(url, result.clone());
-                            }
-                            return Ok(result);
-                        },
-                        Err(direct_err) => {
-                            tracing::info!(
-                                url = url,
-                                error = %direct_err,
-                                "Voe: direct resolution failed — trying with Tor"
-                            );
-                        },
-                    }
-
-                    // Step 2: Direct resolution failed, try with Tor.
                     match custom::resolve_voe(url, socks5_proxy.as_deref()).await {
                         Ok(mut result) => {
                             if !is_known_voe {
@@ -419,9 +377,8 @@ impl Resolver {
                                 // last resort (the page structure may have changed).
                                 tracing::warn!(
                                     url = url,
-                                    direct_error = %direct_err,
-                                    tor_error = %voe_err,
-                                    "Voe custom resolver failed on known Voe domain (both direct and Tor) — falling back to yt-dlp"
+                                    error = %voe_err,
+                                    "Voe custom resolver failed on known Voe domain (Tor) — falling back to yt-dlp"
                                 );
                             } else {
                                 // Unknown domain, Voe resolver failed — this is
