@@ -38,6 +38,7 @@ use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::Arc;
 use std::time::Instant;
 use tokio::sync::mpsc;
+use url::Url;
 
 /// Browser-like User-Agent string. Must match the resolver's UA.
 const BROWSER_UA: &str = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36";
@@ -182,6 +183,7 @@ impl StreamSource {
                 .no_gzip()
                 .no_brotli()
                 .use_rustls_tls()
+                .cookie_store(true)
                 .build()
                 .map_err(|e| format!("stream source: failed to build reqwest client: {}", e))?;
             (None, client)
@@ -203,6 +205,7 @@ impl StreamSource {
                 .no_gzip()
                 .no_brotli()
                 .use_rustls_tls()
+                .cookie_store(true)
                 .build()
                 .map_err(|e| format!("stream source: failed to build reqwest client: {}", e))?;
             (Some(forwarder), client)
@@ -399,6 +402,19 @@ impl StreamSource {
 
         if !self.source_url.is_empty() {
             req = req.header("Referer", &self.source_url);
+            // Add Origin header — browsers send this for cross-origin video requests.
+            // Some CDNs (including Voe's orbitcache/cloudwindow-route CDN) may
+            // check for the Origin header to verify the request comes from a
+            // legitimate page. Without it, the CDN may return 403.
+            if let Ok(parsed) = url::Url::parse(&self.source_url) {
+                let origin = format!("{}://{}", parsed.scheme(), parsed.host_str().unwrap_or(""));
+                if parsed.port().is_some() {
+                    // Include port if present
+                    req = req.header("Origin", &self.source_url);
+                } else {
+                    req = req.header("Origin", &origin);
+                }
+            }
         }
 
         if !self.cookies.is_empty() {
@@ -425,6 +441,15 @@ impl StreamSource {
         );
 
         if status.as_u16() == 403 {
+            // Log the response body for 403 diagnosis — the CDN might include
+            // an error message or a redirect URL in the body.
+            let body = response.text().await.unwrap_or_default();
+            let body_snippet = if body.len() > 200 { &body[..200] } else { &body };
+            tracing::warn!(
+                body = %body_snippet,
+                content_length = ?headers.get("content-length").and_then(|v| v.to_str().ok()),
+                "stream source: CDN 403 Forbidden — response body may explain the rejection"
+            );
             return Err(
                 "CDN 403 Forbidden — re-resolve needed (exit IP may be blocked by CDN anti-bot)"
                     .into(),
@@ -434,6 +459,14 @@ impl StreamSource {
         // 206 Partial Content = CDN supports Range and URL is valid.
         // 200 OK = CDN doesn't support Range but URL is valid.
         if !status.is_success() && status.as_u16() != 206 {
+            // Log the response body for non-2xx diagnosis
+            let body = response.text().await.unwrap_or_default();
+            let body_snippet = if body.len() > 200 { &body[..200] } else { &body };
+            tracing::warn!(
+                status = %status,
+                body = %body_snippet,
+                "stream source: CDN returned non-2xx status — response body may explain the error"
+            );
             return Err(format!(
                 "CDN returned {} {} — cannot stream",
                 status.as_u16(),
@@ -520,6 +553,15 @@ impl StreamSource {
 
             if !source_url.is_empty() {
                 req = req.header("Referer", &source_url);
+                // Add Origin header — browsers send this for cross-origin video requests.
+                if let Ok(parsed) = url::Url::parse(&source_url) {
+                    let origin = format!("{}://{}", parsed.scheme(), parsed.host_str().unwrap_or(""));
+                    if parsed.port().is_some() {
+                        req = req.header("Origin", &source_url);
+                    } else {
+                        req = req.header("Origin", &origin);
+                    }
+                }
             }
 
             if let Some(range) = &range {

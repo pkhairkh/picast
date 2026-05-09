@@ -557,9 +557,24 @@ pub async fn resolve_voe(
     let thumbnail = extract_meta_content(&document, "og:image")
         .or_else(|| extract_meta_content(&document, "twitter:image"));
 
+    // Extract the file_code from the URL path for the /engine/update POST.
+    // The file_code is the last path segment (e.g., "8aqd75zlo0et" from
+    // "https://maryspecialwatch.com/8aqd75zlo0et").
+    let file_code = url::Url::parse(url)
+        .ok()
+        .and_then(|u| {
+            u.path_segments()
+                .and_then(|segments| segments.last().map(|s| s.to_string()))
+        })
+        .filter(|s| !s.is_empty());
+
     // Try Method 8: obfuscated JSON in <script type="application/json">
     if let Some(media_url) = try_method8(&page_html) {
         tracing::info!(url = %media_url, method = "method8", "Voe: resolved media URL");
+        // Send /engine/update POST to activate the CDN session.
+        // Without this POST, the CDN may reject the download URL (403/404)
+        // because the server hasn't registered the user's session.
+        voe_engine_update(&client, &final_url, file_code.as_deref(), &page_html).await;
         let mut result = build_result(&final_url, &media_url, &title, &thumbnail);
         result.cookies = all_cookies;
         return Ok(result);
@@ -568,6 +583,7 @@ pub async fn resolve_voe(
     // Try Method 7: MKGMa-encoded source
     if let Some(media_url) = try_method7(&page_html) {
         tracing::info!(url = %media_url, method = "method7", "Voe: resolved media URL");
+        voe_engine_update(&client, &final_url, file_code.as_deref(), &page_html).await;
         let mut result = build_result(&final_url, &media_url, &title, &thumbnail);
         result.cookies = all_cookies;
         return Ok(result);
@@ -576,6 +592,7 @@ pub async fn resolve_voe(
     // Try Method 6: a168c Base64-encoded source
     if let Some(media_url) = try_method6(&page_html) {
         tracing::info!(url = %media_url, method = "method6", "Voe: resolved media URL");
+        voe_engine_update(&client, &final_url, file_code.as_deref(), &page_html).await;
         let mut result = build_result(&final_url, &media_url, &title, &thumbnail);
         result.cookies = all_cookies;
         return Ok(result);
@@ -584,6 +601,7 @@ pub async fn resolve_voe(
     // Fallback: look for var source = '...' and direct URLs
     if let Some(media_url) = try_fallback_urls(&page_html) {
         tracing::info!(url = %media_url, method = "fallback", "Voe: resolved media URL");
+        voe_engine_update(&client, &final_url, file_code.as_deref(), &page_html).await;
         let mut result = build_result(&final_url, &media_url, &title, &thumbnail);
         result.cookies = all_cookies;
         return Ok(result);
@@ -817,37 +835,56 @@ fn deobfuscate_embedded_json(raw_json: &str) -> Option<String> {
     // source URL.
     if let Ok(parsed) = serde_json::from_str::<serde_json::Value>(&step6) {
         if let Some(obj) = parsed.as_object() {
-            // Extract the "request" token for CDN authorization.
-            // This must be appended as &rq= to the direct_access_url
-            // or any MP4 URL that doesn't already have it.
+            // Extract the "request" token for CDN session activation.
+            //
+            // CRITICAL: Do NOT append &rq= to MP4 download URLs!
+            //
+            // The &rq= parameter is HLS-only — it's included in the
+            // HLS source URL by the CDN server as part of the signed
+            // URL. The CDN's &t= (signed token) parameter is computed
+            // over the URL's query parameters. For MP4 download URLs
+            // (direct_access_url, mp4), the &t= token was computed
+            // WITHOUT &rq=. Appending &rq= changes the URL, which
+            // invalidates the &t= signature → CDN returns 403/404.
+            //
+            // The "request" token is still used for the /engine/update
+            // POST (session activation), but NOT appended to the URL.
             let request_token = obj
                 .get("request")
                 .and_then(|v| v.as_str())
                 .filter(|s| !s.is_empty())
                 .map(|s| s.to_owned());
 
+            // Also extract file_code for /engine/update POST.
+            let file_code = obj
+                .get("file_code")
+                .and_then(|v| v.as_str())
+                .filter(|s| !s.is_empty())
+                .map(|s| s.to_owned());
+
             if let Some(ref token) = request_token {
-                tracing::debug!(
+                tracing::info!(
                     rq_token = %token,
-                    "Voe method8: extracted 'request' token for CDN authorization"
+                    file_code = ?file_code,
+                    "Voe method8: extracted 'request' token and file_code for CDN session activation"
                 );
             }
 
             // Priority 1: "mp4" key — direct MP4 URL or multi-quality object
+            // Do NOT append &rq= — it breaks the CDN's &t= signature.
             if let Some(mp4_val) = obj.get("mp4") {
                 if let Some(url) = extract_media_from_json_value(mp4_val) {
-                    let url = append_rq_token(&url, request_token.as_deref());
-                    tracing::debug!(url = %url, "Voe method8: extracted MP4 URL from 'mp4' key");
+                    tracing::info!(url = %url, "Voe method8: extracted MP4 URL from 'mp4' key (no &rq= appended — breaks CDN signature)");
                     return Some(url);
                 }
             }
 
             // Priority 2: "direct_access_url" — skip if HLS
+            // Do NOT append &rq= — it breaks the CDN's &t= signature.
             if let Some(url) = obj.get("direct_access_url").and_then(|v| v.as_str()) {
                 if !url.is_empty() && !is_hls_url(url) {
-                    let url = append_rq_token(url, request_token.as_deref());
-                    tracing::debug!(url = %url, "Voe method8: extracted URL from 'direct_access_url'");
-                    return Some(url);
+                    tracing::info!(url = %url, "Voe method8: extracted URL from 'direct_access_url' (no &rq= appended — breaks CDN signature)");
+                    return Some(url.to_owned());
                 }
                 if is_hls_url(url) {
                     tracing::debug!(url = %url, "Voe method8: skipping HLS URL in 'direct_access_url'");
@@ -855,10 +892,11 @@ fn deobfuscate_embedded_json(raw_json: &str) -> Option<String> {
             }
 
             // Priority 3: "source" — skip if HLS
+            // Do NOT append &rq= — the source URL already has it if needed,
+            // and adding it would break non-HLS source URLs.
             if let Some(url) = obj.get("source").and_then(|v| v.as_str()) {
                 if !url.is_empty() && !is_hls_url(url) {
-                    let url = append_rq_token(url, request_token.as_deref());
-                    tracing::debug!(url = %url, "Voe method8: extracted URL from 'source'");
+                    tracing::info!(url = %url, "Voe method8: extracted URL from 'source' (using as-is)");
                     return Some(url.to_owned());
                 }
                 if is_hls_url(url) {
@@ -1303,6 +1341,118 @@ async fn fetch_page(
     })?;
 
     Ok((html, cookies))
+}
+
+/// Send a POST to `/engine/update` on the Voe domain to activate the CDN
+/// download session.
+///
+/// Voe's JavaScript makes this POST before the video player starts. The POST
+/// sends telemetry data (bot detection, fingerprint, GPU check results) that
+/// tells the Voe server "a real browser loaded this page." Without this POST,
+/// the CDN may reject the download URL with 403/404 — the server hasn't
+/// registered the user's session, so the CDN's signed URL is not yet
+/// "activated."
+///
+/// The POST data is encoded using Voe's custom obfuscation:
+/// JSON.stringify → Base64 encode → Reverse string → Shift charCode by +3
+///
+/// We send minimal but plausible telemetry data. The CDN likely just checks
+/// that a POST was made with the correct `file_code`, not the exact telemetry
+/// content.
+async fn voe_engine_update(
+    client: &reqwest::Client,
+    page_url: &str,
+    file_code: Option<&str>,
+    _page_html: &str,
+) {
+    // Construct the /engine/update URL from the page's domain.
+    let update_url = match url::Url::parse(page_url) {
+        Ok(parsed) => {
+            let base = format!("{}://{}", parsed.scheme(), parsed.host_str().unwrap_or("localhost"));
+            format!("{}/engine/update", base)
+        },
+        Err(_) => {
+            tracing::debug!("voe_engine_update: could not parse page URL, skipping");
+            return;
+        },
+    };
+
+    // Build the telemetry payload. The field names are obfuscated on Voe's
+    // side (a1b, c3d, e5f, g7h, i9j, k1l, m2n, o3p, etc.). We send the
+    // minimum required fields with plausible values:
+    //   - c3d: file_code (video ID)
+    //   - g7h: bot detection result (0 = not a bot)
+    //   - i9j: fingerprint result (empty/fake)
+    //   - k1l: GPU check result (fake GPU name)
+    let payload = serde_json::json!({
+        "c3d": file_code.unwrap_or(""),
+        "g7h": "0",
+        "i9j": "",
+        "k1l": "ANGLE (NVIDIA, NVIDIA GeForce GTX 1060 6GB Direct3D11 vs_5_0 ps_5_0, D3D11)",
+        "a1b": "",
+        "e5f": "",
+        "m2n": "",
+        "o3p": ""
+    });
+
+    // Encode the payload using Voe's custom obfuscation:
+    // 1. JSON.stringify
+    // 2. Base64 encode
+    // 3. Reverse string
+    // 4. Shift each character code by +3
+    let json_str = match serde_json::to_string(&payload) {
+        Ok(s) => s,
+        Err(e) => {
+            tracing::debug!(error = %e, "voe_engine_update: failed to serialize payload");
+            return;
+        },
+    };
+
+    let b64 = base64::engine::general_purpose::STANDARD.encode(&json_str);
+    let reversed: String = b64.chars().rev().collect();
+    let encoded: String = reversed.chars().map(|c| char::from_u32(c as u32 + 3).unwrap_or(c)).collect();
+
+    tracing::info!(
+        update_url = %update_url,
+        file_code = ?file_code,
+        "Voe: sending /engine/update POST to activate CDN session"
+    );
+
+    // Send the POST. We don't treat failure as fatal — the CDN URL might
+    // work without this POST (some Voe pages don't require it). But if it
+    // fails, we log a warning so we can diagnose.
+    let req = client
+        .post(&update_url)
+        .header("Content-Type", "application/x-www-form-urlencoded")
+        .header("Content-Cache", "no-cache")
+        .header("Accept", "*/*")
+        .header("Accept-Language", "en-US,en;q=0.9")
+        .header("Sec-Fetch-Dest", "empty")
+        .header("Sec-Fetch-Mode", "cors")
+        .header("Sec-Fetch-Site", "same-origin")
+        .header("Referer", page_url)
+        .body(format!("data={}", encoded));
+
+    match timeout(Duration::from_secs(CUSTOM_RESOLVER_TIMEOUT_SECS), req.send()).await {
+        Ok(Ok(response)) => {
+            let status = response.status();
+            tracing::info!(
+                status = %status,
+                "Voe: /engine/update POST completed — CDN session should be activated"
+            );
+        },
+        Ok(Err(e)) => {
+            tracing::warn!(
+                error = %e,
+                "Voe: /engine/update POST failed (network error) — CDN download may fail"
+            );
+        },
+        Err(_) => {
+            tracing::warn!(
+                "Voe: /engine/update POST timed out — CDN download may fail"
+            );
+        },
+    }
 }
 
 /// Follow JavaScript `window.location.href = '...'` redirects in the HTML.
