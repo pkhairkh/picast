@@ -547,15 +547,19 @@ pub async fn resolve_voe(
         (url.to_owned(), html_text)
     };
 
-    let document = Html::parse_document(&page_html);
-
-    // Extract metadata.
-    let title = extract_meta_content(&document, "og:title")
-        .or_else(|| extract_meta_content(&document, "twitter:title"))
-        .or_else(|| extract_document_title(&document));
-
-    let thumbnail = extract_meta_content(&document, "og:image")
-        .or_else(|| extract_meta_content(&document, "twitter:image"));
+    // Extract metadata from the parsed HTML document.
+    // NOTE: Html is NOT Send (contains Cell<usize> inside tendril), so we
+    // must drop it before any .await point. We scope it in a block and
+    // extract only the String values we need.
+    let (title, thumbnail) = {
+        let document = Html::parse_document(&page_html);
+        let title = extract_meta_content(&document, "og:title")
+            .or_else(|| extract_meta_content(&document, "twitter:title"))
+            .or_else(|| extract_document_title(&document));
+        let thumbnail = extract_meta_content(&document, "og:image")
+            .or_else(|| extract_meta_content(&document, "twitter:image"));
+        (title, thumbnail)
+    };
 
     // Extract the file_code from the URL path for the /engine/update POST.
     // The file_code is the last path segment (e.g., "8aqd75zlo0et" from
