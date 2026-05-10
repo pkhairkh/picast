@@ -551,9 +551,13 @@ async fn main() -> Result<()> {
                                 );
                                 let _ = position_session.stop().await;
                                 if let Some(ref url) = source_url {
-                                    // Brief pause to allow DRM/KMS resources to be
+                                    // Wait for DRM/KMS and ALSA resources to be
                                     // fully released before starting a new session.
-                                    tokio::time::sleep(std::time::Duration::from_millis(500)).await;
+                                    // BlueALSA needs 2-3 seconds to release the
+                                    // PCM device after the pipeline goes to Null —
+                                    // 500ms was insufficient and caused "Could not
+                                    // open audio device for playback" errors.
+                                    tokio::time::sleep(std::time::Duration::from_secs(3)).await;
                                     match position_session.load(url).await {
                                         Ok(_) => info!("auto re-cast succeeded — new CDN session active"),
                                         Err(e) => warn!(error = %e, "auto re-cast failed — user must manually re-cast"),
@@ -572,7 +576,7 @@ async fn main() -> Result<()> {
                                 );
                                 let _ = position_session.stop().await;
                                 if let Some(ref url) = source_url {
-                                    tokio::time::sleep(std::time::Duration::from_millis(500)).await;
+                                    tokio::time::sleep(std::time::Duration::from_secs(3)).await;
                                     match position_session.load(url).await {
                                         Ok(_) => info!("auto re-cast succeeded — new CDN session active"),
                                         Err(e) => warn!(error = %e, "auto re-cast failed — user must manually re-cast"),
