@@ -55,10 +55,10 @@
 
 use crate::stream_source::{ProgressState, StreamSource};
 use crate::{BufferHealth, DownloadProgress, PipelineConfig, PlaybackError};
-use gstreamer::prelude::*;
-use gstreamer::{Element, ElementFactory, Pipeline, State};
 #[cfg(feature = "hevc")]
 use bogdan_v3d::V3dComputeEngine;
+use gstreamer::prelude::*;
+use gstreamer::{Element, ElementFactory, Pipeline, State};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 
@@ -268,9 +268,10 @@ impl GstPipeline {
                     error = %e,
                     "stream source: preflight CDN check failed (including fallback) — re-resolve needed"
                 );
-                return Err(PlaybackError::PipelineCreation(
-                    format!("CDN preflight failed: {} — re-resolve needed", e),
-                ));
+                return Err(PlaybackError::PipelineCreation(format!(
+                    "CDN preflight failed: {} — re-resolve needed",
+                    e
+                )));
             }
 
             // Log CDN rate limit and check for bitrate mismatch.

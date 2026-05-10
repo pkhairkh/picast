@@ -23,6 +23,8 @@
 pub mod cache;
 pub mod classifier;
 pub mod custom;
+pub mod deobfuscation;
+pub mod provider;
 pub mod resolver_socks;
 pub mod ytdlp;
 
@@ -160,17 +162,27 @@ pub struct Resolver {
     tor: Arc<bogdan_tor::TorManager>,
     /// Cache of resolved URLs (in-memory or file-backed).
     cache: Arc<Mutex<ResolveCache>>,
+    /// Provider registry for config-driven custom resolvers.
+    providers: provider::ProviderRegistry,
 }
 
 impl Resolver {
     /// Create a new resolver with the given Tor manager (in-memory cache).
     pub fn new(tor: Arc<bogdan_tor::TorManager>) -> Self {
-        Self { tor, cache: Arc::new(Mutex::new(ResolveCache::new())) }
+        let providers = provider::ProviderRegistry::new();
+        Self { tor, cache: Arc::new(Mutex::new(ResolveCache::new())), providers }
+    }
+
+    /// Create a new resolver with a provider registry loaded from a directory.
+    pub fn with_providers(tor: Arc<bogdan_tor::TorManager>, providers_dir: &std::path::Path) -> Self {
+        let providers = provider::ProviderRegistry::load_from_dir_or_empty(providers_dir);
+        Self { tor, cache: Arc::new(Mutex::new(ResolveCache::new())), providers }
     }
 
     /// Create a new resolver with a custom cache TTL.
     pub fn with_cache_ttl(tor: Arc<bogdan_tor::TorManager>, ttl: std::time::Duration) -> Self {
-        Self { tor, cache: Arc::new(Mutex::new(ResolveCache::with_ttl(ttl))) }
+        let providers = provider::ProviderRegistry::new();
+        Self { tor, cache: Arc::new(Mutex::new(ResolveCache::with_ttl(ttl))), providers }
     }
 
     /// Create a new resolver with a persistent file-backed cache.
@@ -180,7 +192,8 @@ impl Resolver {
     /// every URL through Tor/yt-dlp on every boot, which would be
     /// slow and waste bandwidth.
     pub fn with_persistent_cache(tor: Arc<bogdan_tor::TorManager>, path: &std::path::Path) -> Self {
-        Self { tor, cache: Arc::new(Mutex::new(ResolveCache::with_path(path))) }
+        let providers = provider::ProviderRegistry::new();
+        Self { tor, cache: Arc::new(Mutex::new(ResolveCache::with_path(path))), providers }
     }
 
     /// Create a new resolver with a persistent file-backed cache and
@@ -190,7 +203,31 @@ impl Resolver {
         path: &std::path::Path,
         ttl: std::time::Duration,
     ) -> Self {
-        Self { tor, cache: Arc::new(Mutex::new(ResolveCache::with_path_and_ttl(Some(path), ttl))) }
+        let providers = provider::ProviderRegistry::new();
+        Self { tor, cache: Arc::new(Mutex::new(ResolveCache::with_path_and_ttl(Some(path), ttl))), providers }
+    }
+
+    /// Create a new resolver with a persistent cache, custom TTL, and
+    /// provider registry loaded from a directory.
+    ///
+    /// This is the recommended constructor for production use.
+    pub fn with_persistent_cache_and_providers(
+        tor: Arc<bogdan_tor::TorManager>,
+        path: &std::path::Path,
+        ttl: std::time::Duration,
+        providers_dir: &std::path::Path,
+    ) -> Self {
+        let providers = provider::ProviderRegistry::load_from_dir_or_empty(providers_dir);
+        Self {
+            tor,
+            cache: Arc::new(Mutex::new(ResolveCache::with_path_and_ttl(Some(path), ttl))),
+            providers,
+        }
+    }
+
+    /// Get a reference to the provider registry.
+    pub fn providers(&self) -> &provider::ProviderRegistry {
+        &self.providers
     }
 
     /// Resolve `url` into a [`ResolveResult`].
@@ -279,22 +316,14 @@ impl Resolver {
             UrlCategory::WebPage => {
                 // Resolution strategy for WebPage URLs:
                 //
-                // 1. Known DoodStream domains → DoodStream custom resolver (fast path)
-                // 2. ALL other WebPage URLs → Voe custom resolver first, then yt-dlp
+                // 1. Provider registry lookup — check if the domain matches
+                //    any loaded provider config (from providers.d/*.toml)
+                // 2. Known DoodStream domains → DoodStream custom resolver
+                // 3. ALL other WebPage URLs → Voe custom resolver first, then yt-dlp
                 //
-                // The Voe custom resolver is tried BEFORE yt-dlp for every unknown
-                // WebPage URL. This is critical because Voe rotates its front-end
-                // domains constantly (every few weeks), and maintaining a static
-                // domain list is a losing game. By always trying the Voe resolver
-                // first, we handle both known and unknown Voe domains without
-                // needing to update a list. The Voe resolver is safe to call on
-                // non-Voe pages — it simply fails to find its expected data
-                // patterns and returns an error, at which point we fall back
-                // to yt-dlp.
-                //
-                // The VOE_DOMAINS list still exists as a fast-path hint for
-                // logging clarity, but it is NO LONGER a gatekeeper — URLs not
-                // in the list still get the Voe resolver tried first.
+                // The provider registry is the primary routing mechanism.
+                // The hardcoded is_doodstream_domain()/is_voe_domain() checks
+                // serve as fallback when no provider configs are loaded.
                 if let Some(host) = parsed.host_str() {
                     let socks_addr = self.tor.socks_addr();
                     let isolation = bogdan_tor::TorManager::isolation_username(host);
@@ -304,12 +333,75 @@ impl Resolver {
                         None
                     };
 
+                    // ── Provider registry lookup ──────────────────────
+                    if let Some((provider_id, config)) = self.providers.find_provider_for_host(host) {
+                        tracing::info!(
+                            url = url,
+                            provider = %provider_id,
+                            name = %config.name,
+                            "matched provider from registry"
+                        );
+                        // Route to the appropriate custom resolver based on
+                        // provider ID. The actual resolution logic still
+                        // lives in custom.rs for now; the config provides
+                        // domain matching and metadata.
+                        match provider_id {
+                            "doodstream" => {
+                                let mut result =
+                                    custom::resolve_doodstream(url, socks5_proxy.as_deref()).await?;
+                                result.category = UrlCategory::WebPage;
+                                result.used_tor = socks5_proxy.is_some();
+                                {
+                                    let cache = self.cache.lock().await;
+                                    cache.insert(url, result.clone());
+                                }
+                                return Ok(result);
+                            },
+                            _ => {
+                                // Default: try Voe resolver for all other providers
+                                // (covers "voe" and any future Voe-like providers)
+                                let is_known_voe = custom::is_voe_domain(host);
+                                match custom::resolve_voe(url, socks5_proxy.as_deref()).await {
+                                    Ok(mut result) => {
+                                        if !is_known_voe {
+                                            tracing::info!(
+                                                url = url,
+                                                host = host,
+                                                provider = %provider_id,
+                                                "provider registry resolver succeeded on domain (via Tor)"
+                                            );
+                                        }
+                                        result.category = UrlCategory::WebPage;
+                                        result.used_tor = true;
+                                        {
+                                            let cache = self.cache.lock().await;
+                                            cache.insert(url, result.clone());
+                                        }
+                                        return Ok(result);
+                                    },
+                                    Err(provider_err) => {
+                                        tracing::debug!(
+                                            url = url,
+                                            provider = %provider_id,
+                                            error = %provider_err,
+                                            "provider registry resolver failed — falling back to yt-dlp"
+                                        );
+                                    },
+                                }
+                            },
+                        }
+                    }
+
+                    // ── Fallback: hardcoded domain checks ─────────────
+                    // These are used when no provider registry is loaded
+                    // (e.g., during tests or if providers.d/ is missing).
+                    //
                     // Check DoodStream first (distinct resolver, no overlap with Voe)
                     if custom::is_doodstream_domain(host) {
                         tracing::info!(
                             url = url,
                             resolver = "doodstream",
-                            "using DoodStream custom resolver (known domain)"
+                            "using DoodStream custom resolver (known domain, no provider config)"
                         );
                         let mut result =
                             custom::resolve_doodstream(url, socks5_proxy.as_deref()).await?;

@@ -1,0 +1,108 @@
+# boGDan Provider Configuration — DoodStream
+#
+# DoodStream (playmogo.com and alternate domains) embeds video behind
+# a Cloudflare Turnstile CAPTCHA. The resolver follows the /e/ embed
+# iframe, extracts the download token, and constructs the direct URL.
+
+name = "DoodStream"
+enabled = true
+
+# ── Domain Patterns ────────────────────────────────────────────────
+
+[[domain_patterns]]
+pattern = "playmogo.com"
+kind = "suffix"
+
+[[domain_patterns]]
+pattern = "doodstream.com"
+kind = "suffix"
+
+[[domain_patterns]]
+pattern = "dood.to"
+kind = "suffix"
+
+[[domain_patterns]]
+pattern = "dood.watch"
+kind = "suffix"
+
+[[domain_patterns]]
+pattern = "dood.la"
+kind = "suffix"
+
+[[domain_patterns]]
+pattern = "dood.ws"
+kind = "suffix"
+
+[[domain_patterns]]
+pattern = "doodstream.co"
+kind = "suffix"
+
+[[domain_patterns]]
+pattern = "dood.yt"
+kind = "suffix"
+
+[[domain_patterns]]
+pattern = "dood.re"
+kind = "suffix"
+
+[[domain_patterns]]
+pattern = "dood.pm"
+kind = "suffix"
+
+[[domain_patterns]]
+pattern = "dood.wf"
+kind = "suffix"
+
+[[domain_patterns]]
+pattern = "dood.cx"
+kind = "suffix"
+
+# ── Resolver Type ──────────────────────────────────────────────────
+
+resolver_type = "custom"
+
+# ── CDN Settings ───────────────────────────────────────────────────
+
+[cdn]
+speed_limit_param = "sp"
+requires_session_activation = false
+
+# ── Bait Sources ───────────────────────────────────────────────────
+
+bait_domains = [
+    "test-videos.co.uk",
+    "sample-videos.com",
+    "commondatastorage.googleapis.com",
+]
+
+bait_filenames = ["BigBuckBunny", "Big_Buck_Bunny_1080_10s_5MB", "bbb.mp4"]
+
+# ── Cookies & Headers ─────────────────────────────────────────────
+
+forward_cookies = true
+
+[request_headers]
+Accept = "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,*/*;q=0.8"
+Accept-Language = "en-US,en;q=0.5"
+Sec-Fetch-Dest = "document"
+Sec-Fetch-Mode = "navigate"
+Sec-Fetch-Site = "none"
+Upgrade-Insecure-Requests = "1"
+
+# ── Timeout ────────────────────────────────────────────────────────
+
+timeout_secs = 15
+
+# ── URL Transforms ─────────────────────────────────────────────────
+# DoodStream /d/<id> → /e/<id> embed URL
+
+[[url_transforms]]
+pattern = "^/d/([^/]+)$"
+replacement = "/e/$1"
+description = "Convert /d/ download URL to /e/ embed URL"
+
+# DoodStream does not use the standard deobfuscation pipeline.
+# Its resolution logic is handled by the custom DoodStream resolver
+# in custom.rs, which follows embed iframes and extracts download tokens.
+# The provider config is used primarily for domain matching and
+# request headers.

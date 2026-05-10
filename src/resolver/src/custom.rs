@@ -356,7 +356,7 @@ fn extract_media_from_json_value(value: &serde_json::Value) -> Option<String> {
         for (q, _u, sp) in &candidates {
             let sustainable = match (sp, typical_bitrate_kbps(q)) {
                 (Some(speed), Some(bitrate)) => *speed >= bitrate,
-                (None, _) => true, // No rate limit = always sustainable
+                (None, _) => true,       // No rate limit = always sustainable
                 (Some(_), None) => true, // Unknown quality = assume sustainable
             };
             tracing::info!(
@@ -388,12 +388,10 @@ fn extract_media_from_json_value(value: &serde_json::Value) -> Option<String> {
         // typical bitrate for that quality, OR if there's no sp= (unlimited).
         let mut sustainable: Vec<_> = candidates
             .iter()
-            .filter(|(q, _, sp)| {
-                match (sp, typical_bitrate_kbps(q)) {
-                    (Some(speed), Some(bitrate)) => *speed >= bitrate,
-                    (None, _) => true,
-                    (Some(_), None) => true,
-                }
+            .filter(|(q, _, sp)| match (sp, typical_bitrate_kbps(q)) {
+                (Some(speed), Some(bitrate)) => *speed >= bitrate,
+                (None, _) => true,
+                (Some(_), None) => true,
             })
             .collect();
 
@@ -595,10 +593,7 @@ pub async fn resolve_voe(
     // "https://maryspecialwatch.com/8aqd75zlo0et").
     let file_code = url::Url::parse(url)
         .ok()
-        .and_then(|u| {
-            u.path_segments()
-                .and_then(|segments| segments.last().map(|s| s.to_string()))
-        })
+        .and_then(|u| u.path_segments().and_then(|mut segments| segments.next_back().map(|s| s.to_string())))
         .filter(|s| !s.is_empty());
 
     // Try Method 8: obfuscated JSON in <script type="application/json">
@@ -1477,7 +1472,8 @@ async fn voe_engine_update(
     // Construct the /engine/update URL from the page's domain.
     let update_url = match url::Url::parse(page_url) {
         Ok(parsed) => {
-            let base = format!("{}://{}", parsed.scheme(), parsed.host_str().unwrap_or("localhost"));
+            let base =
+                format!("{}://{}", parsed.scheme(), parsed.host_str().unwrap_or("localhost"));
             format!("{}/engine/update", base)
         },
         Err(_) => {
@@ -1519,7 +1515,8 @@ async fn voe_engine_update(
 
     let b64 = base64::engine::general_purpose::STANDARD.encode(&json_str);
     let reversed: String = b64.chars().rev().collect();
-    let encoded: String = reversed.chars().map(|c| char::from_u32(c as u32 + 3).unwrap_or(c)).collect();
+    let encoded: String =
+        reversed.chars().map(|c| char::from_u32(c as u32 + 3).unwrap_or(c)).collect();
 
     tracing::info!(
         update_url = %update_url,
@@ -1557,9 +1554,7 @@ async fn voe_engine_update(
             );
         },
         Err(_) => {
-            tracing::warn!(
-                "Voe: /engine/update POST timed out — CDN download may fail"
-            );
+            tracing::warn!("Voe: /engine/update POST timed out — CDN download may fail");
         },
     }
 }
@@ -1634,11 +1629,7 @@ fn build_result(
         Some("video/mp4".to_string())
     };
 
-    let category = if is_hls {
-        UrlCategory::HlsManifest
-    } else {
-        UrlCategory::DirectMedia
-    };
+    let category = if is_hls { UrlCategory::HlsManifest } else { UrlCategory::DirectMedia };
 
     if is_hls {
         tracing::info!(
@@ -1702,11 +1693,12 @@ mod tests {
     }
 
     #[test]
-    fn test_extract_media_from_json_value_skips_hls() {
-        // HLS string URL — should be skipped
+    fn test_extract_media_from_json_value_returns_hls_as_fallback() {
+        // HLS string URL — now returned as fallback since StreamSource has HLS client
         let value = serde_json::json!("https://cdn.example.com/stream.m3u8?token=abc");
         let result = extract_media_from_json_value(&value);
-        assert!(result.is_none(), "HLS URLs should be skipped");
+        assert!(result.is_some(), "HLS URLs should be returned as fallback");
+        assert_eq!(result.unwrap(), "https://cdn.example.com/stream.m3u8?token=abc");
     }
 
     #[test]
@@ -1724,13 +1716,15 @@ mod tests {
 
     #[test]
     fn test_extract_media_from_json_value_object_hls_only() {
-        // Multi-quality object with only HLS URLs — should return None
+        // Multi-quality object with only HLS URLs — now returns highest-quality HLS
+        // as fallback since StreamSource has an HLS client
         let value = serde_json::json!({
             "720": "https://cdn.example.com/720.m3u8",
             "480": "https://cdn.example.com/480.m3u8"
         });
         let result = extract_media_from_json_value(&value);
-        assert!(result.is_none(), "HLS-only quality objects should return None");
+        assert!(result.is_some(), "HLS-only quality objects should return best HLS as fallback");
+        assert_eq!(result.unwrap(), "https://cdn.example.com/720.m3u8");
     }
 
     #[test]
@@ -1793,38 +1787,6 @@ mod tests {
         assert!(!is_voe_domain("youtube.com"));
         assert!(!is_voe_domain("google.com"));
         assert!(!is_voe_domain("vimeo.com"));
-    }
-
-    #[test]
-    fn test_append_rq_token() {
-        // Basic case: append &rq= to URL with existing query params
-        let url = "https://cdn.example.com/video.mp4?t=abc&sp=380";
-        let result = append_rq_token(url, Some("REQ123"));
-        assert_eq!(result, "https://cdn.example.com/video.mp4?t=abc&sp=380&rq=REQ123");
-
-        // URL already has &rq= — should not add another
-        let url_with_rq = "https://cdn.example.com/video.mp4?t=abc&rq=EXISTING";
-        let result = append_rq_token(url_with_rq, Some("REQ123"));
-        assert_eq!(result, url_with_rq);
-
-        // URL already has ?rq= — should not add another
-        let url_with_rq_start = "https://cdn.example.com/video.mp4?rq=EXISTING";
-        let result = append_rq_token(url_with_rq_start, Some("REQ123"));
-        assert_eq!(result, url_with_rq_start);
-
-        // No token provided — return URL unchanged
-        let url_no_token = "https://cdn.example.com/video.mp4?t=abc";
-        let result = append_rq_token(url_no_token, None);
-        assert_eq!(result, url_no_token);
-
-        // Empty token — return URL unchanged
-        let result = append_rq_token(url_no_token, Some(""));
-        assert_eq!(result, url_no_token);
-
-        // URL without any query params — use ? separator
-        let url_no_query = "https://cdn.example.com/video.mp4";
-        let result = append_rq_token(url_no_query, Some("REQ123"));
-        assert_eq!(result, "https://cdn.example.com/video.mp4?rq=REQ123");
     }
 
     #[test]

@@ -1,0 +1,240 @@
+# boGDan Provider Configuration — Voe
+#
+# Voe (voe.sx and rotating front-end domains) embeds obfuscated JSON
+# in <script type="application/json"> tags. The deobfuscation pipeline
+# applies a multi-step chain (ROT13 → strip markers → Base64 → char-shift
+# → reverse → Base64) to recover the direct media URL.
+#
+# Voe rotates front-end domains constantly (every few weeks). The domain
+# list below is intentionally minimal — the Voe heuristic in
+# custom::is_voe_domain() catches unknown .com domains with the right
+# vowel/letter patterns.
+
+name = "Voe"
+enabled = true
+
+# ── Domain Patterns ────────────────────────────────────────────────
+# Exact matches for canonical domains and unblock proxies.
+# The Voe heuristic (is_voe_domain) catches unknown rotating domains.
+
+[[domain_patterns]]
+pattern = "voe.sx"
+kind = "suffix"
+
+[[domain_patterns]]
+pattern = "voe-unblock.com"
+kind = "suffix"
+
+[[domain_patterns]]
+pattern = "voeunblock.com"
+kind = "suffix"
+
+[[domain_patterns]]
+pattern = "voeunbl0ck.com"
+kind = "suffix"
+
+[[domain_patterns]]
+pattern = "voe-unblk.com"
+kind = "suffix"
+
+[[domain_patterns]]
+pattern = "voeunblk.com"
+kind = "suffix"
+
+[[domain_patterns]]
+pattern = "voeunblock2.com"
+kind = "suffix"
+
+# ── Resolver Type ──────────────────────────────────────────────────
+
+resolver_type = "custom"
+
+# ── CDN Settings ───────────────────────────────────────────────────
+
+[cdn]
+speed_limit_param = "sp"
+requires_session_activation = true
+activation_path = "/engine/update"
+activation_obfuscation = "voe_engine_update"
+
+# ── Bait Sources ───────────────────────────────────────────────────
+
+bait_domains = [
+    "test-videos.co.uk",
+    "sample-videos.com",
+    "commondatastorage.googleapis.com",
+]
+
+bait_filenames = ["BigBuckBunny", "Big_Buck_Bunny_1080_10s_5MB", "bbb.mp4"]
+
+# ── Quality Preferences ───────────────────────────────────────────
+# 720p is optimal for Pi 4 V4L2 HW decode.
+# 1080p pushes the V4L2 decoder's limits.
+
+[[quality_preferences]]
+label = "720"
+rank = 0
+typical_bitrate_kbps = 3000
+
+[[quality_preferences]]
+label = "480"
+rank = 1
+typical_bitrate_kbps = 1500
+
+[[quality_preferences]]
+label = "360"
+rank = 2
+typical_bitrate_kbps = 800
+
+[[quality_preferences]]
+label = "240"
+rank = 3
+typical_bitrate_kbps = 400
+
+[[quality_preferences]]
+label = "1080"
+rank = 4
+typical_bitrate_kbps = 6000
+
+# ── Cookies & Headers ─────────────────────────────────────────────
+
+forward_cookies = true
+
+[request_headers]
+Accept = "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,*/*;q=0.8"
+Accept-Language = "en-US,en;q=0.5"
+Sec-Fetch-Dest = "document"
+Sec-Fetch-Mode = "navigate"
+Sec-Fetch-Site = "none"
+Upgrade-Insecure-Requests = "1"
+
+# ── Timeout ────────────────────────────────────────────────────────
+
+timeout_secs = 15
+
+# ── Deobfuscation Pipelines ───────────────────────────────────────
+# Voe uses three different encoding methods (6, 7, 8), tried in order.
+
+# Method 8: Obfuscated JSON in <script type="application/json">
+# Pipeline: ROT13 → strip markers → Base64 → char-shift(-3) → reverse → Base64
+[[deobfuscation_pipeline]]
+name = "method8"
+extraction = { method = "script_json_tag" }
+check_bait = true
+
+[[deobfuscation_pipeline.steps]]
+rot13 = true
+
+[[deobfuscation_pipeline.steps]]
+strip_markers = { patterns = ["@$", "^^", "~@", "%?", "*~", "!!", "#&"] }
+
+[[deobfuscation_pipeline.steps]]
+base64_decode = true
+
+[[deobfuscation_pipeline.steps]]
+char_shift = { amount = 3 }
+
+[[deobfuscation_pipeline.steps]]
+reverse = true
+
+[[deobfuscation_pipeline.steps]]
+base64_decode = true
+
+# URL extraction priority for method 8:
+# 1. direct_access_url + &rq= token (MP4 download with CDN auth)
+# 2. source (URL the browser uses, usually HLS)
+# 3. mp4 key (direct MP4 or multi-quality object + &rq=)
+# 4. hls key (explicit HLS fallback)
+
+[[deobfuscation_pipeline.url_extraction]]
+json_key = { key = "direct_access_url", priority = 1, append_rq_token = true, prefer_mp4 = true }
+
+[[deobfuscation_pipeline.url_extraction]]
+json_key = { key = "source", priority = 2, append_rq_token = false, prefer_mp4 = false }
+
+[[deobfuscation_pipeline.url_extraction]]
+json_key = { key = "mp4", priority = 3, append_rq_token = true, prefer_mp4 = true }
+
+[[deobfuscation_pipeline.url_extraction]]
+json_key = { key = "hls", priority = 4, append_rq_token = false, prefer_mp4 = false }
+
+# Post-resolve: append &rq= token and send CDN session activation POST
+[[post_resolve]]
+append_query_from_json = { json_key = "request", param_name = "rq" }
+
+[[post_resolve]]
+cdn_session_activation = true
+
+# Method 7: MKGMa-encoded source
+# Pipeline: ROT13 → strip underscores → Base64 → char-shift(-3) → reverse → Base64
+[[deobfuscation_pipeline]]
+name = "method7"
+extraction = { method = "js_variable", pattern = "MKGMa=\"(.*?)\"" }
+check_bait = true
+
+[[deobfuscation_pipeline.steps]]
+rot13 = true
+
+[[deobfuscation_pipeline.steps]]
+strip_underscores = true
+
+[[deobfuscation_pipeline.steps]]
+base64_decode = true
+
+[[deobfuscation_pipeline.steps]]
+char_shift = { amount = 3 }
+
+[[deobfuscation_pipeline.steps]]
+reverse = true
+
+[[deobfuscation_pipeline.steps]]
+base64_decode = true
+
+# URL extraction priority for method 7:
+# 1. source (works from Tor)
+# 2. mp4
+# 3. direct_access_url (may be blocked from Tor)
+# 4. hls (fallback)
+
+[[deobfuscation_pipeline.url_extraction]]
+json_key = { key = "source", priority = 1, append_rq_token = false, prefer_mp4 = false }
+
+[[deobfuscation_pipeline.url_extraction]]
+json_key = { key = "mp4", priority = 2, append_rq_token = true, prefer_mp4 = true }
+
+[[deobfuscation_pipeline.url_extraction]]
+json_key = { key = "direct_access_url", priority = 3, append_rq_token = true, prefer_mp4 = true }
+
+[[deobfuscation_pipeline.url_extraction]]
+json_key = { key = "hls", priority = 4, append_rq_token = false, prefer_mp4 = false }
+
+# Method 6: a168c Base64-encoded source
+# Pipeline: clean Base64 → decode → reverse
+[[deobfuscation_pipeline]]
+name = "method6"
+extraction = { method = "regex_match", pattern = "a168c\\s*=\\s*'([^']+)'" }
+check_bait = true
+
+[[deobfuscation_pipeline.steps]]
+clean_base64 = true
+
+[[deobfuscation_pipeline.steps]]
+base64_decode = true
+
+[[deobfuscation_pipeline.steps]]
+reverse = true
+
+# URL extraction priority for method 6:
+# Same as method 7
+
+[[deobfuscation_pipeline.url_extraction]]
+json_key = { key = "source", priority = 1, append_rq_token = false, prefer_mp4 = false }
+
+[[deobfuscation_pipeline.url_extraction]]
+json_key = { key = "mp4", priority = 2, append_rq_token = true, prefer_mp4 = true }
+
+[[deobfuscation_pipeline.url_extraction]]
+json_key = { key = "direct_access_url", priority = 3, append_rq_token = true, prefer_mp4 = true }
+
+[[deobfuscation_pipeline.url_extraction]]
+json_key = { key = "hls", priority = 4, append_rq_token = false, prefer_mp4 = false }

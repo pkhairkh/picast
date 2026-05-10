@@ -446,8 +446,10 @@ impl StreamSource {
         );
 
         // Step 4: Parse variant playlist to get segment URLs
-        let segment_urls = parse_variant_playlist(&variant_playlist, &variant_url)
-            .ok_or_else(|| "HLS: could not parse variant playlist — no segments found".to_string())?;
+        let segment_urls =
+            parse_variant_playlist(&variant_playlist, &variant_url).ok_or_else(|| {
+                "HLS: could not parse variant playlist — no segments found".to_string()
+            })?;
 
         tracing::info!(
             segment_count = segment_urls.len(),
@@ -530,9 +532,7 @@ impl StreamSource {
                 body = %body_snippet,
                 "stream source: HLS playlist 403 Forbidden"
             );
-            return Err(
-                "CDN 403 Forbidden on HLS playlist — re-resolve needed".into(),
-            );
+            return Err("CDN 403 Forbidden on HLS playlist — re-resolve needed".into());
         }
 
         if !status.is_success() {
@@ -543,10 +543,7 @@ impl StreamSource {
             ));
         }
 
-        response
-            .text()
-            .await
-            .map_err(|e| format!("HLS: failed to read playlist body: {}", e))
+        response.text().await.map_err(|e| format!("HLS: failed to read playlist body: {}", e))
     }
 
     /// Start downloading from the CDN. Data chunks are sent to the
@@ -603,7 +600,8 @@ impl StreamSource {
             if !source_url.is_empty() {
                 req = req.header("Referer", &source_url);
                 if let Ok(parsed) = url::Url::parse(&source_url) {
-                    let origin = format!("{}://{}", parsed.scheme(), parsed.host_str().unwrap_or(""));
+                    let origin =
+                        format!("{}://{}", parsed.scheme(), parsed.host_str().unwrap_or(""));
                     if parsed.port().is_some() {
                         req = req.header("Origin", &source_url);
                     } else {
@@ -770,10 +768,7 @@ impl StreamSource {
         // Store content type as MPEG-TS for HLS
         *progress.content_type.lock().unwrap() = Some("video/MP2T".to_string());
 
-        tracing::info!(
-            segments = total_segments,
-            "stream source: starting HLS segment download"
-        );
+        tracing::info!(segments = total_segments, "stream source: starting HLS segment download");
 
         tokio::spawn(async move {
             let mut offset: u64 = 0;
@@ -1172,7 +1167,10 @@ mod tests {
 
     #[test]
     fn test_extract_cdn_speed_param() {
-        assert_eq!(extract_cdn_speed_param("https://cdn.example.com/video.mp4?t=abc&sp=380&i=199.195"), Some(380));
+        assert_eq!(
+            extract_cdn_speed_param("https://cdn.example.com/video.mp4?t=abc&sp=380&i=199.195"),
+            Some(380)
+        );
         assert_eq!(extract_cdn_speed_param("https://cdn.example.com/video.mp4?sp=380"), Some(380));
         assert_eq!(extract_cdn_speed_param("https://cdn.example.com/video.mp4?t=abc"), None);
         assert_eq!(extract_cdn_speed_param("https://cdn.example.com/video.mp4?sp=abc"), None);
@@ -1180,7 +1178,12 @@ mod tests {
 
     #[test]
     fn test_parse_bandwidth_from_stream_inf() {
-        assert_eq!(parse_bandwidth_from_stream_inf("#EXT-X-STREAM-INF:BANDWIDTH=2800000,RESOLUTION=1280x720"), 2800000);
+        assert_eq!(
+            parse_bandwidth_from_stream_inf(
+                "#EXT-X-STREAM-INF:BANDWIDTH=2800000,RESOLUTION=1280x720"
+            ),
+            2800000
+        );
         assert_eq!(parse_bandwidth_from_stream_inf("#EXT-X-STREAM-INF:BANDWIDTH=800000"), 800000);
         assert_eq!(parse_bandwidth_from_stream_inf("#EXT-X-STREAM-INF:RESOLUTION=640x360"), 0);
     }
@@ -1221,10 +1224,13 @@ mod tests {
             #EXT-X-ENDLIST\n";
 
         let result = parse_variant_playlist(playlist, "https://cdn.example.com/playlist.m3u8");
-        assert_eq!(result, Some(vec![
-            "https://cdn.example.com/seg001.ts".to_string(),
-            "https://cdn.example.com/seg002.ts".to_string(),
-        ]));
+        assert_eq!(
+            result,
+            Some(vec![
+                "https://cdn.example.com/seg001.ts".to_string(),
+                "https://cdn.example.com/seg002.ts".to_string(),
+            ])
+        );
     }
 
     #[test]
@@ -1239,10 +1245,13 @@ mod tests {
             #EXT-X-ENDLIST\n";
 
         let result = parse_variant_playlist(playlist, "https://cdn.example.com/path/playlist.m3u8");
-        assert_eq!(result, Some(vec![
-            "https://cdn.example.com/path/seg001.ts".to_string(),
-            "https://cdn.example.com/path/seg002.ts".to_string(),
-        ]));
+        assert_eq!(
+            result,
+            Some(vec![
+                "https://cdn.example.com/path/seg001.ts".to_string(),
+                "https://cdn.example.com/path/seg002.ts".to_string(),
+            ])
+        );
     }
 
     #[test]

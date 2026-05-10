@@ -40,8 +40,8 @@
 //! error event before the socket is closed.
 
 use anyhow::{anyhow, Result};
-use futures_util::{SinkExt, StreamExt};
 use bogdan_session::{MediaSession, SessionEvent, SessionManager};
+use futures_util::{SinkExt, StreamExt};
 use serde::{Deserialize, Serialize};
 use std::sync::Arc;
 use std::time::Duration;
