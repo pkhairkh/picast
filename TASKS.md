@@ -574,11 +574,12 @@ architecture, V4L2 hardware decode, and DRM/KMS output.
 
 ---
 
-## Sprint 5 — Extension & Protocol Hardening
+## Sprint 5 — Extension & Protocol Hardening ✅
 
 **Duration:** 2 weeks (10 working days)
 **Goal:** Browser extension is production-ready. Protocol servers are hardened
 with proper error handling, rate limiting, and security measures.
+**Status:** **COMPLETE** — committed as `84f1ab2`, pushed to main.
 
 **Definition of Done (DoD):**
 - Browser extension passes Chrome Web Store review and Firefox Add-on review
