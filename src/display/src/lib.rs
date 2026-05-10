@@ -855,10 +855,22 @@ impl DisplayManager {
                     DisplayError::Modeset(format!("invalid CRTC id {}", crtc.crtc_id))
                 })?;
             let crtc_info = fd.get_crtc(crtc_handle).ok();
+            let saved_mode = crtc_info.as_ref().and_then(|i| i.mode());
+            // If get_crtc() didn't return a mode (e.g. fbcon never set
+            // one, or the CRTC is inactive), fall back to the connector's
+            // current mode. This ensures release() can restore a valid
+            // mode instead of logging "no saved mode — cannot restore CRTC".
+            let mode = saved_mode.unwrap_or_else(|| {
+                tracing::info!(
+                    crtc_id = crtc.crtc_id,
+                    "CRTC has no active mode from get_crtc() — using connector's current mode for restore"
+                );
+                selected_mode.clone()
+            });
             self.saved_crtc = Some(SavedCrtcState {
                 crtc_id: crtc.crtc_id,
                 fb_id: crtc_info.as_ref().and_then(|i| i.framebuffer().map(|fb| fb.into())),
-                mode: crtc_info.as_ref().and_then(|i| i.mode()),
+                mode: Some(mode),
                 x: 0,
                 y: 0,
                 connector_id: connector.connector_id,

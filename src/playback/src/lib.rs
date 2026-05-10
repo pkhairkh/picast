@@ -49,7 +49,9 @@ use pipeline::GstPipeline;
 use serde::{Deserialize, Serialize};
 #[cfg(not(feature = "hw"))]
 use std::sync::atomic::AtomicU64;
-use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
+#[cfg(not(feature = "hw"))]
+use std::sync::atomic::AtomicU32;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use thiserror::Error;
 #[cfg(feature = "hw")]
@@ -1440,8 +1442,14 @@ impl PlaybackEngine {
                             // we already know the download is dead — we're just
                             // waiting for the buffer to drain completely.
                             let download_errored = progress_state_bus.download_errored.load(Ordering::Relaxed);
+                            let cdn_forbidden_flag = progress_state_bus.cdn_forbidden.load(Ordering::Relaxed);
                             if download_errored {
-                                // CDN download is dead — use short stall timeout
+                                // CDN download is dead — use short stall timeout.
+                                // When cdn_forbidden is true, we KNOW the CDN
+                                // rejected us (403) and no reconnect will help.
+                                // Use an even shorter timeout (3s) to avoid
+                                // making the user stare at a frozen screen.
+                                let stall_timeout = if cdn_forbidden_flag { 3 } else { 10 };
                                 let stall_guard_opt = stall_start_bus.lock().unwrap();
                                 if stall_guard_opt.is_none() {
                                     drop(stall_guard_opt);
@@ -1449,8 +1457,11 @@ impl PlaybackEngine {
                                     *stall_guard = Some(std::time::Instant::now());
                                     tracing::warn!(
                                         percent = percent,
+                                        cdn_forbidden = cdn_forbidden_flag,
                                         "buffer below pause threshold AND CDN download errored — \
-                                         stall timer started (10s until error event)"
+                                         stall timer started ({}s until error event){}",
+                                        stall_timeout,
+                                        if cdn_forbidden_flag { " (CDN 403 — fast timeout)" } else { "" }
                                     );
                                 }
                             } else if percent == 0 {
@@ -1470,7 +1481,9 @@ impl PlaybackEngine {
                             {
                                 let stall_guard = stall_start_bus.lock().unwrap();
                                 if let Some(start) = *stall_guard {
-                                    let timeout = if download_errored { 10 } else { STALL_TIMEOUT_SECS };
+                                    let timeout = if download_errored {
+                                        if progress_state_bus.cdn_forbidden.load(Ordering::Relaxed) { 3 } else { 10 }
+                                    } else { STALL_TIMEOUT_SECS };
                                     if start.elapsed().as_secs() >= timeout {
                                         tracing::error!(
                                             elapsed_s = start.elapsed().as_secs(),

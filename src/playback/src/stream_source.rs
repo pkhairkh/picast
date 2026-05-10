@@ -624,19 +624,45 @@ impl StreamSource {
         progress.downloaded_bytes.store(0, Ordering::Relaxed);
         progress.throughput_kbps.store(0, Ordering::Relaxed);
         progress.download_errored.store(false, Ordering::Relaxed);
+        progress.cdn_forbidden.store(false, Ordering::Relaxed);
         *progress.start_time.lock().unwrap() = Some(Instant::now());
 
         tokio::spawn(async move {
             /// Maximum number of reconnection attempts when CDN connection
             /// drops mid-stream. Each attempt resumes from the last byte
             /// received using a Range header.
-            const MAX_CDN_RECONNECT_ATTEMPTS: u32 = 3;
-            /// Delay between reconnection attempts (seconds). Allows the
-            /// Tor circuit to stabilise and CDN rate-limit counters to reset.
-            const RECONNECT_DELAY_SECS: u64 = 2;
+            ///
+            /// CDN streams through Tor typically drop every 3–5 minutes
+            /// due to "error decoding response body". For a 481 MB file
+            /// at 380 kbps, the full download takes ~2.8 hours (~50+
+            /// drop/reconnect cycles). Setting this to 3 was far too
+            /// low — the download would die after ~15 minutes, long
+            /// before the file was complete. 30 attempts gives us ~2.5
+            /// hours of sustained downloading (30 × 5 min), which covers
+            /// most content. If all 30 fail, the download is marked as
+            /// errored and the session layer's stall detection triggers
+            /// an auto re-cast (fresh CDN URL).
+            const MAX_CDN_RECONNECT_ATTEMPTS: u32 = 30;
+            /// Minimum delay between reconnection attempts (seconds).
+            /// With exponential backoff, subsequent delays double up
+            /// to MAX_RECONNECT_DELAY_SECS.
+            const MIN_RECONNECT_DELAY_SECS: u64 = 2;
+            /// Maximum delay between reconnection attempts (seconds).
+            /// Caps the exponential backoff so we don't wait too long
+            /// between retries.
+            const MAX_RECONNECT_DELAY_SECS: u64 = 30;
+            /// Number of consecutive successful bytes received before
+            /// the reconnect delay is reset to the minimum. If we've
+            /// been downloading for 30 seconds without errors, the
+            /// connection is stable and we can reduce the backoff.
+            const BYTES_TO_RESET_BACKOFF: u64 = 5 * 1024 * 1024; // 5 MB
 
             let mut total_offset: u64 = 0;
             let mut attempt = 0;
+            /// Tracks the number of consecutive reconnect attempts for
+            /// exponential backoff calculation. Reset when we've received
+            /// enough data to consider the connection stable.
+            let mut consecutive_reconnects: u32 = 0;
 
             loop {
                 attempt += 1;
@@ -710,12 +736,15 @@ impl StreamSource {
                         );
                         // Connection-level error — try reconnect if we have bytes
                         if total_offset > 0 && attempt <= MAX_CDN_RECONNECT_ATTEMPTS {
+                            consecutive_reconnects += 1;
+                            let delay_secs = calculate_reconnect_delay(consecutive_reconnects, MIN_RECONNECT_DELAY_SECS, MAX_RECONNECT_DELAY_SECS);
                             tracing::info!(
                                 attempt = attempt,
-                                delay_secs = RECONNECT_DELAY_SECS,
-                                "stream source: waiting before reconnect attempt..."
+                                consecutive_reconnects = consecutive_reconnects,
+                                delay_secs = delay_secs,
+                                "stream source: waiting before reconnect attempt (exponential backoff)..."
                             );
-                            tokio::time::sleep(std::time::Duration::from_secs(RECONNECT_DELAY_SECS)).await;
+                            tokio::time::sleep(std::time::Duration::from_secs(delay_secs)).await;
                             continue;
                         }
                         break;
@@ -754,7 +783,7 @@ impl StreamSource {
                          can re-resolve the URL."
                     );
                     progress.cdn_forbidden.store(true, Ordering::Relaxed);
-                    break;
+                    break; // 403 is fatal — cannot resume, need fresh URL
                 }
 
                 // For 206 Partial Content (Range response), verify the range
@@ -809,6 +838,19 @@ impl StreamSource {
                             bytes_since_last_update += chunk_len;
                             progress.downloaded_bytes.store(total_offset, Ordering::Relaxed);
 
+                            // Reset backoff when we've received enough data
+                            // to consider the connection stable. This prevents
+                            // a single initial error from keeping the backoff
+                            // high for the entire download.
+                            if attempt_bytes >= BYTES_TO_RESET_BACKOFF && consecutive_reconnects > 0 {
+                                tracing::debug!(
+                                    attempt_bytes = attempt_bytes,
+                                    previous_consecutive_reconnects = consecutive_reconnects,
+                                    "stream source: connection stable — resetting reconnect backoff"
+                                );
+                                consecutive_reconnects = 0;
+                            }
+
                             if last_progress_update.elapsed() >= progress_update_interval {
                                 let elapsed = last_progress_update.elapsed().as_secs_f64();
                                 if elapsed > 0.0 {
@@ -854,14 +896,18 @@ impl StreamSource {
                 // If the stream errored and we have received some data,
                 // try to reconnect with a Range header to resume.
                 if stream_errored && total_offset > 0 && attempt <= MAX_CDN_RECONNECT_ATTEMPTS {
+                    consecutive_reconnects += 1;
+                    let delay_secs = calculate_reconnect_delay(consecutive_reconnects, MIN_RECONNECT_DELAY_SECS, MAX_RECONNECT_DELAY_SECS);
                     tracing::info!(
                         attempt = attempt,
                         max_attempts = MAX_CDN_RECONNECT_ATTEMPTS,
+                        consecutive_reconnects = consecutive_reconnects,
                         offset = total_offset,
                         attempt_bytes = attempt_bytes,
-                        "stream source: CDN stream error — attempting reconnect with Range header"
+                        delay_secs = delay_secs,
+                        "stream source: CDN stream error — attempting reconnect with Range header (exponential backoff)"
                     );
-                    tokio::time::sleep(std::time::Duration::from_secs(RECONNECT_DELAY_SECS)).await;
+                    tokio::time::sleep(std::time::Duration::from_secs(delay_secs)).await;
                     continue;
                 }
 
@@ -933,6 +979,7 @@ impl StreamSource {
         progress.downloaded_bytes.store(0, Ordering::Relaxed);
         progress.throughput_kbps.store(0, Ordering::Relaxed);
         progress.download_errored.store(false, Ordering::Relaxed);
+        progress.cdn_forbidden.store(false, Ordering::Relaxed);
         *progress.start_time.lock().unwrap() = Some(Instant::now());
 
         // Store content type as MPEG-TS for HLS
@@ -1198,6 +1245,33 @@ fn extract_cdn_speed_param(url: &str) -> Option<u64> {
         }
     }
     None
+}
+
+/// Calculate the reconnection delay using exponential backoff.
+///
+/// The delay doubles with each consecutive reconnect attempt, starting
+/// from `min_delay_secs` and capped at `max_delay_secs`:
+///
+/// ```text
+/// attempt 1: min_delay (2s)
+/// attempt 2: min_delay × 2 (4s)
+/// attempt 3: min_delay × 4 (8s)
+/// attempt 4: min_delay × 8 (16s)
+/// attempt 5+: max_delay (30s)
+/// ```
+///
+/// This prevents hammering the CDN/Tor after repeated failures while
+/// still allowing frequent retries when the connection is merely unstable
+/// (not completely dead).
+fn calculate_reconnect_delay(consecutive_reconnects: u32, min_delay_secs: u64, max_delay_secs: u64) -> u64 {
+    if consecutive_reconnects == 0 {
+        return min_delay_secs;
+    }
+    // 2^(consecutive_reconnects - 1) × min_delay, capped at max_delay
+    let shift = (consecutive_reconnects - 1) as u32;
+    let multiplier = 1u64.checked_shl(shift).unwrap_or(u64::MAX);
+    let delay = min_delay_secs.saturating_mul(multiplier);
+    delay.min(max_delay_secs)
 }
 
 // ── HLS Playlist Parsing ─────────────────────────────────────────────
@@ -1478,5 +1552,24 @@ mod tests {
         assert!(is_hls_url("https://cdn.example.com/stream.M3U8"));
         assert!(!is_hls_url("https://cdn.example.com/video.mp4"));
         assert!(!is_hls_url("https://cdn.example.com/video.mp4?token=abc"));
+    }
+
+    #[test]
+    fn test_calculate_reconnect_delay() {
+        // First reconnect: minimum delay
+        assert_eq!(calculate_reconnect_delay(1, 2, 30), 2);
+        // Second consecutive reconnect: 2 × 2 = 4
+        assert_eq!(calculate_reconnect_delay(2, 2, 30), 4);
+        // Third: 2 × 4 = 8
+        assert_eq!(calculate_reconnect_delay(3, 2, 30), 8);
+        // Fourth: 2 × 8 = 16
+        assert_eq!(calculate_reconnect_delay(4, 2, 30), 16);
+        // Fifth: 2 × 16 = 32, but capped at 30
+        assert_eq!(calculate_reconnect_delay(5, 2, 30), 30);
+        // All subsequent: still capped at 30
+        assert_eq!(calculate_reconnect_delay(10, 2, 30), 30);
+        assert_eq!(calculate_reconnect_delay(100, 2, 30), 30);
+        // Zero consecutive reconnects: minimum delay
+        assert_eq!(calculate_reconnect_delay(0, 2, 30), 2);
     }
 }
