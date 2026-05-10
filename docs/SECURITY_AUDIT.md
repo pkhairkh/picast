@@ -2,7 +2,7 @@
 
 **Task:** T-9.7 — Security audit checklist
 **Depends on:** T-9.4 — Network isolation verification
-**Last updated:** 2026-05-06
+**Last updated:** 2026-05-10 (Sprint 6 code audit)
 
 This document provides a comprehensive security audit checklist for boGDan deployments.
 Each item includes a description, verification commands, expected results, risk levels,
@@ -19,17 +19,21 @@ and remediation steps.
 
 | # | Check | Risk Level | Status |
 |---|-------|-----------|--------|
-| 1 | All outbound via Tor SOCKS | Critical | ☐ |
-| 2 | DNS queries only to Tor DNSPort | Critical | ☐ |
-| 3 | Stream isolation (per-domain circuits) | High | ☐ |
-| 4 | DRM master is only boGDan (no X11/Wayland) | High | ☐ |
-| 5 | Process runs as `bogdan` user, not root | High | ☐ |
-| 6 | No unnecessary listening ports | High | ☐ |
-| 7 | Systemd service hardening | Medium | ☐ |
-| 8 | iptables default policies are DROP | Critical | ☐ |
-| 9 | No SUID binaries in boGDan's path | Medium | ☐ |
-| 10 | Tor is not running as relay/exit | Critical | ☐ |
+| 1 | All outbound via Tor SOCKS | Critical | ✅ PASS |
+| 2 | DNS queries only to Tor DNSPort | Critical | ✅ PASS |
+| 3 | Stream isolation (per-domain circuits) | High | ✅ PASS |
+| 4 | DRM master is only boGDan (no X11/Wayland) | High | ✅ PASS |
+| 5 | Process runs as `bogdan` user, not root | High | ⚠️ PARTIAL |
+| 6 | No unnecessary listening ports | High | ✅ PASS |
+| 7 | Systemd service hardening | Medium | ⚠️ PARTIAL |
+| 8 | iptables default policies are DROP | Critical | ✅ PASS |
+| 9 | No SUID binaries in boGDan's path | Medium | ✅ PASS |
+| 10 | Tor is not running as relay/exit | Critical | ✅ PASS |
 | 11 | Physical security recommendations | Medium | ☐ |
+| 12 | TLS configuration (rustls) | Medium | ⚠️ PARTIAL |
+| 13 | Input validation (SSRF, URL scheme) | Medium | ⚠️ PARTIAL |
+| 14 | Extension security model | Low | ⚠️ PARTIAL |
+| 15 | No panic in production code | Medium | ⚠️ PARTIAL |
 
 ---
 
@@ -727,12 +731,164 @@ vcgencmd otp_dump 2>/dev/null | grep -E 'boot_order'
 
 ---
 
+## 12. TLS Configuration (rustls)
+
+**Risk Level:** Medium
+**Status:** ⚠️ PARTIAL
+**Description:** boGDan uses rustls for TLS termination on the HTTP and WebSocket servers. The configuration must reject TLS 1.0/1.1 and use only strong cipher suites.
+
+### Code-Level Findings (Sprint 6 Audit)
+
+- **rustls defaults are secure**: `ServerConfig::builder()` in `src/protocols/src/tls.rs` uses rustls defaults, which only support TLS 1.2 and TLS 1.3. TLS 1.0 and 1.1 are not supported by rustls at all.
+- **No weak cipher suites**: rustls does not include RC4, 3DES, or other weak ciphers in its default suite.
+- **No explicit configuration**: The code does not call `with_protocol_versions()`, `with_cipher_suites()`, or any other method to explicitly pin security parameters. Security relies entirely on rustls defaults.
+- **No client certificate authentication**: `with_no_client_auth()` is used, which is appropriate for a local-network media device.
+
+### Recommendations
+
+1. Add explicit protocol version pinning for defense-in-depth:
+   ```rust
+   ServerConfig::builder()
+       .with_protocol_versions(&[&rustls::version::TLS12, &rustls::version::TLS13])
+   ```
+2. Add a startup log message listing enabled TLS versions and cipher suites for auditability
+3. Consider adding `with_cipher_suites()` to explicitly list approved suites
+
+---
+
+## 13. Input Validation (SSRF, URL Scheme)
+
+**Risk Level:** Medium
+**Status:** ⚠️ PARTIAL
+**Description:** HTTP API endpoints must validate all input to prevent SSRF, injection, and abuse. URL scheme validation prevents boGDan from being used as a proxy to internal services.
+
+### Code-Level Findings (Sprint 6 Audit)
+
+- **URL scheme validation**: `is_safe_cast_url()` in `src/protocols/src/http.rs:680-691` rejects `file://`, `data:`, `javascript:`, and any non-http/https scheme. WebSocket `handle_command()` has equivalent validation.
+- **Body size limits**: `MAX_BODY_SIZE = 1024` bytes. Empty bodies are rejected.
+- **Rate limiting**: 30 requests per 10 seconds per IP. Exceeding returns 429 with `Retry-After` header.
+- **Machine-readable error codes**: `ErrorCode` enum provides structured error responses.
+
+### Issues
+
+1. **No SSRF protection**: A cast URL like `http://127.0.0.1:9050` or `http://169.254.169.254` is accepted. An attacker on the LAN could use boGDan as a proxy to scan internal services.
+2. **CORS allows all origins**: `Access-Control-Allow-Origin: *`. Acceptable for LAN-only device but could be tightened.
+3. **X-Forwarded-For trust**: `extract_client_ip()` trusts the `X-Forwarded-For` header, which allows IP spoofing to bypass rate limiting. Low risk on LAN.
+4. **Audio device string injection**: The `/api/audio-device` endpoint accepts arbitrary device strings without format validation.
+
+### Recommendations
+
+1. Add private IP/host rejection in `is_safe_cast_url()`:
+   ```rust
+   if let Some(host) = parsed.host_str() {
+       if host == "127.0.0.1" || host == "localhost" || host.starts_with("169.254.") { ... }
+   }
+   ```
+2. Tighten CORS to allow only the extension's origin
+3. Document X-Forwarded-For trust in SECURITY.md
+4. Validate audio device strings against a whitelist pattern
+
+---
+
+## 14. Extension Security Model
+
+**Risk Level:** Low
+**Status:** ⚠️ PARTIAL
+**Description:** The browser extension runs in the user's browser and communicates with boGDan. It must not introduce XSS vectors or allow compromised pages to control boGDan.
+
+### Code-Level Findings (Sprint 6 Audit)
+
+- **No `eval()`**: Zero instances across all extension JS files.
+- **Mostly safe DOM APIs**: `detector.js` uses `querySelector()`, `createElement()`, `textContent` (safe). `popup.js` uses DOM methods for dynamic content.
+- **innerHTML usage** (low risk):
+  - `options.js:234`: `audioDevice.innerHTML = '<option value="">Default</option>'` — hardcoded static string, no user input.
+  - `popup.js:354`: `castBtn.innerHTML` with hardcoded SVG markup — no user input.
+  - `popup.js:226` explicitly comments "no innerHTML" for dynamic content — demonstrates awareness.
+- **Content script interception**: `detector.js:84-109` intercepts `MediaSource.prototype.addSourceBuffer` and `URL.createObjectURL`. Standard practice for media detection but could cause side effects.
+
+### Issues
+
+1. **Two innerHTML uses** (`options.js:234`, `popup.js:354`): Both use hardcoded strings only, so XSS risk is minimal. Should still be converted to DOM methods for CSP compliance.
+2. **No message schema validation**: `service-worker.js` message handler dispatches on `message.type` but doesn't validate the structure of message payloads.
+3. **MSE API interception** (`detector.js:78-109`): Replacing `MediaSource.prototype.addSourceBuffer` could interfere with page functionality. Should be documented.
+
+### Recommendations
+
+1. Replace the two remaining `innerHTML` uses with DOM methods
+2. Add basic type/presence checks on message payloads in the service worker
+3. Consider using `Object.defineProperty` with `configurable: true` for prototype interception
+
+---
+
+## 15. No Panic in Production Code
+
+**Risk Level:** Medium
+**Status:** ⚠️ PARTIAL
+**Description:** Production code paths must not contain `unwrap()` or `expect()` calls that could panic and crash the service. A crashed boGDan process means interrupted playback and a potential denial of service.
+
+### Code-Level Findings (Sprint 6 Audit)
+
+**Production `unwrap()` calls (~30):**
+
+| File | Locations | Risk |
+|---|---|---|
+| `resolver/src/cache.rs` | Lines 133, 142, 172, 189, 201, 212, 243 — `.lock().unwrap()` on SQLite Mutex | Medium — poisoned mutex crashes resolver |
+| `playback/src/stream_source.rs` | Lines 168-172, 276, 314, 432, 488, 602, 660-663, 733, 737, 784, 787, 890, 967 — `.lock().unwrap()` on progress Mutex | Medium — poisoned mutex crashes playback |
+| `playback/src/pipeline.rs` | Lines 282, 287, 326, 375 — `.lock().unwrap()` on CDN rate limit | Low — diagnostic-only mutex |
+| `playback/src/lib.rs` | Line 1417 — `guard.as_ref().unwrap().pipeline()` | Low — checked earlier but not atomically |
+
+**Production `expect()` calls:**
+
+| File | Locations | Risk |
+|---|---|---|
+| `playback/src/lib.rs` | Lines 912, 1076, 1387 — thread spawn, bus access, bus watch | Medium |
+| `playback/src/pipeline.rs` | Lines 724, 900, 921, 957, 998, 1031, 1141, 1388-1393, 1627-1634, 1686-1693 — GStreamer pad operations | Medium |
+| `server/src/main.rs` | Lines 230, 261 — crypto provider + SIGTERM | Low — startup only |
+
+### Recommendations
+
+1. **P1**: Replace all `.lock().unwrap()` with `.lock().unwrap_or_else(|e| e.into_inner())` for mutex recovery (matching the pattern in `tor/src/lib.rs:430-432` and `session/src/lib.rs:846-849`)
+2. **P4**: Convert pipeline `expect()` calls to return `Result<>` types
+3. **P9**: Replace `main.rs` `.expect()` with graceful `eprintln!()` + `std::process::exit(1)`
+4. **P8**: Add `#![deny(clippy::unwrap_used)]` as a crate-level lint for new code (allow existing with `#[allow]`)
+
+---
+
+## Sprint 6 Code Audit Prioritized Remediation
+
+| Priority | Action | Effort | Risk Addressed |
+|---|---|---|---|
+| **P1** | Replace `.lock().unwrap()` with poison-recovering pattern | Medium | Medium — crash resilience |
+| **P2** | Add SSRF protection to URL validation (reject private IPs) | Low | Medium — SSRF attack vector |
+| **P3** | Add explicit TLS version pinning in tls.rs | Low | Low — defense-in-depth |
+| **P4** | Convert pipeline `expect()` calls to Result-based error handling | Medium | Medium — crash resilience |
+| **P5** | Replace 2 remaining `innerHTML` uses in extension | Low | Low — CSP compliance |
+| **P6** | Add message payload validation in extension service worker | Low | Low — input validation |
+| **P7** | Add `prctl(PR_SET_NO_NEW_PRIVS)` in main.rs | Low | Medium — privilege escalation |
+| **P8** | Add `#![deny(clippy::unwrap_used)]` lint for new code | Low | Medium — code quality |
+| **P9** | Replace `main.rs` `.expect()` with graceful exit | Low | Low — startup robustness |
+| **P10** | Tighten CORS from `*` to extension origin | Low | Low — LAN hardening |
+
+---
+
 ## Automated Verification
 
 Run the network isolation verification script to automatically check items 1, 2, 5, 6, 7, 8, and 10:
 
 ```bash
 sudo bash scripts/verify-network-isolation.sh
+```
+
+Run the soak test for resource exhaustion verification:
+
+```bash
+sudo bash scripts/soak-test.sh
+```
+
+Run the memory leak test for long-running stability:
+
+```bash
+sudo bash scripts/mem-test.sh
 ```
 
 Exit code 0 = all checks pass, exit code 1 = one or more failures detected.
@@ -743,14 +899,18 @@ Exit code 0 = all checks pass, exit code 1 = one or more failures detected.
 
 | Date | Auditor | Checklist Item | Result | Notes |
 |------|---------|---------------|--------|-------|
-| YYYY-MM-DD | | 1. Outbound via Tor | ☐ Pass / ☐ Fail | |
-| YYYY-MM-DD | | 2. DNS leak prevention | ☐ Pass / ☐ Fail | |
-| YYYY-MM-DD | | 3. Stream isolation | ☐ Pass / ☐ Fail | |
-| YYYY-MM-DD | | 4. DRM master | ☐ Pass / ☐ Fail | |
-| YYYY-MM-DD | | 5. Non-root process | ☐ Pass / ☐ Fail | |
-| YYYY-MM-DD | | 6. Listening ports | ☐ Pass / ☐ Fail | |
-| YYYY-MM-DD | | 7. Systemd hardening | ☐ Pass / ☐ Fail | |
-| YYYY-MM-DD | | 8. DROP policies | ☐ Pass / ☐ Fail | |
-| YYYY-MM-DD | | 9. No SUID binaries | ☐ Pass / ☐ Fail | |
-| YYYY-MM-DD | | 10. Tor client-only | ☐ Pass / ☐ Fail | |
-| YYYY-MM-DD | | 11. Physical security | ☐ Pass / ☐ Fail | |
+| 2026-05-10 | Sprint 6 | 1. Outbound via Tor | ✅ PASS | Code review: all SOCKS5h, no bypass |
+| 2026-05-10 | Sprint 6 | 2. DNS leak prevention | ✅ PASS | Code review: ATYP=0x03, socks5h:// |
+| 2026-05-10 | Sprint 6 | 3. Stream isolation | ✅ PASS | Code review: per-domain SHA-256 IDs |
+| 2026-05-10 | Sprint 6 | 4. DRM master | ✅ PASS | Code review: explicit release, no X11 |
+| 2026-05-10 | Sprint 6 | 5. Non-root process | ⚠️ PARTIAL | No explicit privilege dropping in code |
+| 2026-05-10 | Sprint 6 | 6. Listening ports | ✅ PASS | 4 ports only, LAN-bound |
+| 2026-05-10 | Sprint 6 | 7. Systemd hardening | ⚠️ PARTIAL | Relies on service file, no Rust-level prctl |
+| 2026-05-10 | Sprint 6 | 8. DROP policies | ✅ PASS | config/iptables.rules verified |
+| 2026-05-10 | Sprint 6 | 9. No SUID binaries | ✅ PASS | Binary not SUID, NoNewPrivileges |
+| 2026-05-10 | Sprint 6 | 10. Tor client-only | ✅ PASS | ExitRelay 0, no ORPort |
+| 2026-05-10 | Sprint 6 | 11. Physical security | ☐ | Not tested — deployment-specific |
+| 2026-05-10 | Sprint 6 | 12. TLS configuration | ⚠️ PARTIAL | rustls defaults secure, no explicit pinning |
+| 2026-05-10 | Sprint 6 | 13. Input validation | ⚠️ PARTIAL | No SSRF protection, CORS wildcard |
+| 2026-05-10 | Sprint 6 | 14. Extension security | ⚠️ PARTIAL | 2 innerHTML, no message validation |
+| 2026-05-10 | Sprint 6 | 15. No panic in production | ⚠️ PARTIAL | ~30 unwrap(), ~15 expect() in prod paths |

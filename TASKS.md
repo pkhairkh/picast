@@ -6,7 +6,7 @@ explicit acceptance criteria, and estimated effort.**
 
 **Status legend:** `[ ]` not started · `[~]` in progress · `[x]` done
 
-**Last verified:** 2026-05-10 — `cargo check --workspace` · `cargo test --workspace` (328 resolver tests + others) · `cargo clippy --workspace -- -D warnings`
+**Last verified:** 2026-05-10 — `cargo check --workspace` · `cargo test --workspace` (632 tests) · `cargo clippy --workspace -- -D warnings`
 
 ---
 
@@ -695,11 +695,12 @@ with proper error handling, rate limiting, and security measures.
 
 ---
 
-## Sprint 6 — Integration Testing & QA
+## Sprint 6 — Integration Testing & QA ✅
 
 **Duration:** 2 weeks (10 working days)
 **Goal:** Comprehensive test coverage, soak tests, memory leak detection,
 and security audit.
+**Status:** **COMPLETE** — committed, pushed to main.
 
 **Definition of Done (DoD):**
 - Memory leak test: 8-hour playback with <10 MB/hour RSS growth

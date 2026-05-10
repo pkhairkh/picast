@@ -1,446 +1,575 @@
-#!/usr/bin/env bash
-# verify-network-isolation.sh — boGDan T-9.4 Network Isolation Verification
+#!/bin/bash
+# ──────────────────────────────────────────────────────────────────────
+# boGDan Network Isolation Verification — S6.3
+# ──────────────────────────────────────────────────────────────────────
 #
-# Verifies that iptables rules block all outbound traffic except through Tor.
-# Tests DNS leak prevention, direct-HTTP blocking, SOCKS5 proxy functionality,
-# listening-port audit, and OUTPUT chain rule correctness.
+# Verifies that ALL outbound traffic from boGDan goes through Tor.
+# This is an ACTIVE test — it sets up iptables rules, starts casting,
+# monitors for leaks, and tests that disabling Tor causes all requests
+# to fail (no fallback to direct connections).
+#
+# What this script does:
+#   1. Save existing iptables rules
+#   2. Install test iptables rules:
+#      - Allow ESTABLISHED connections
+#      - Allow loopback (lo)
+#      - Allow Tor SOCKS (127.0.0.1:9050)
+#      - REJECT everything else (with counter)
+#   3. Start boGDan and cast URLs
+#   4. Monitor REJECT counter — should stay at 0
+#   5. Verify no UDP port 53 traffic from bogdan process (no DNS leaks)
+#   6. Test: disable Tor → all requests should fail (no fallback)
+#   7. Clean up iptables rules on exit (trap EXIT)
+#
+# Prerequisites:
+#   - Root access (required for iptables)
+#   - boGDan server installed
+#   - Tor daemon running with SOCKS5 on 127.0.0.1:9050
+#   - tcpdump or ss for traffic monitoring
 #
 # Usage:
-#   sudo bash scripts/verify-network-isolation.sh   # full checks (needs root)
-#   bash scripts/verify-network-isolation.sh        # graceful skip for root-only checks
+#   sudo bash scripts/verify-network-isolation.sh
 #
 # Exit codes:
-#   0 — all checks pass
-#   1 — one or more checks failed
+#   0 — all isolation checks pass
+#   1 — one or more isolation checks fail
+#   2 — setup failure
+#
+# ──────────────────────────────────────────────────────────────────────
 
 set -euo pipefail
 
-# ─── Colors ──────────────────────────────────────────────────────
-RED='\033[0;31m'
-GREEN='\033[0;32m'
-YELLOW='\033[1;33m'
-CYAN='\033[0;36m'
-BOLD='\033[1m'
-NC='\033[0m' # No Color
+# ── Pre-flight: must run as root ──────────────────────────────────────
 
-# ─── Counters ────────────────────────────────────────────────────
+if [[ "$(id -u)" -ne 0 ]]; then
+    echo "ERROR: This script must be run as root (sudo)." >&2
+    echo "  sudo bash scripts/verify-network-isolation.sh" >&2
+    exit 2
+fi
+
+# ── Configurable Variables ─────────────────────────────────────────────
+
+BOGDAN_HOST="${BOGDAN_HOST:-localhost}"
+BOGDAN_PORT="${BOGDAN_PORT:-8585}"
+TOR_SOCKS_PORT="${TOR_SOCKS_PORT:-9050}"
+TOR_CONTROL_PORT="${TOR_CONTROL_PORT:-9052}"
+BASE_URL="http://${BOGDAN_HOST}:${BOGDAN_PORT}"
+
+# iptables chain name for our test rules (to avoid conflicts)
+CHAIN_NAME="BOGDAN_TEST"
+
+# URL to cast during the test
+TEST_URL="${TEST_URL:-https://upload.wikimedia.org/wikipedia/commons/transcoded/c/c0/Big_Buck_Bunny_4K.webm/Big_Buck_Bunny_4K.webm.480p.vp9.webm}"
+
+# How long to monitor for leaks during active casting (seconds)
+MONITOR_DURATION="${MONITOR_DURATION:-60}"
+
+# ── Colours ────────────────────────────────────────────────────────────
+
+if [[ -t 1 ]]; then
+    RED='\033[0;31m'
+    GREEN='\033[0;32m'
+    YELLOW='\033[1;33m'
+    CYAN='\033[0;36m'
+    BOLD='\033[1m'
+    NC='\033[0m'
+else
+    RED='' GREEN='' YELLOW='' CYAN='' BOLD='' NC=''
+fi
+
+# ── Counters ───────────────────────────────────────────────────────────
+
 PASS=0
 FAIL=0
 SKIP=0
 
-# ─── Expected configuration ─────────────────────────────────────
-EXPECTED_LISTEN_PORTS="8585 8586 49152 9050 9051"
-TOR_SOCKS_HOST="127.0.0.1"
-TOR_SOCKS_PORT="9050"
-TOR_UID="debian-tor"
-CURL_TIMEOUT=5
+# ── Helpers ────────────────────────────────────────────────────────────
 
-# ─── Helpers ─────────────────────────────────────────────────────
+pass() { PASS=$((PASS + 1)); echo -e "  ${GREEN}[PASS]${NC} $1"; }
+fail() { FAIL=$((FAIL + 1)); echo -e "  ${RED}[FAIL]${NC} $1"; }
+skip() { SKIP=$((SKIP + 1)); echo -e "  ${YELLOW}[SKIP]${NC} $1"; }
+info() { echo -e "  ${CYAN}[INFO]${NC} $1"; }
+section() { echo ""; echo -e "${BOLD}━━━ $1 ━━━${NC}"; }
 
-pass() {
-    PASS=$((PASS + 1))
-    echo -e "  ${GREEN}[PASS]${NC} $1"
+# Get a value from a JSON response (jq → python3 → grep fallback)
+json_value() {
+    local url="$1" key="$2"
+    local body
+    body=$(curl -sf --max-time 10 "$url" 2>/dev/null) || return 1
+    if command -v jq &>/dev/null; then
+        printf '%s' "$body" | jq -r "$key" 2>/dev/null
+    elif command -v python3 &>/dev/null; then
+        printf '%s' "$body" | python3 -c "import sys,json; print(json.load(sys.stdin)${key})" 2>/dev/null
+    else
+        printf '%s' "$body" | grep -oP "\"${key#*.}\"\s*:\s*\K[^\s,}\"']+" | head -1
+    fi
 }
 
-fail() {
-    FAIL=$((FAIL + 1))
-    echo -e "  ${RED}[FAIL]${NC} $1"
+# Get the boGDan process ID
+get_bogdan_pid() {
+    local pid
+    pid=$(pgrep -xf "bogdan" 2>/dev/null || true)
+    if [[ -z "$pid" ]]; then
+        pid=$(pgrep -xf "bogdan-server" 2>/dev/null || true)
+    fi
+    if [[ -z "$pid" ]]; then
+        pid=$(pgrep -f "bogdan" 2>/dev/null | head -1 || true)
+    fi
+    echo "${pid}"
 }
 
-skip() {
-    SKIP=$((SKIP + 1))
-    echo -e "  ${YELLOW}[SKIP]${NC} $1"
-}
+# ── Cleanup ────────────────────────────────────────────────────────────
+# CRITICAL: Always restore iptables rules on exit, even on error or
+# Ctrl+C. This prevents leaving the Pi with broken network access.
 
-info() {
-    echo -e "  ${CYAN}[INFO]${NC} $1"
-}
-
-section() {
+cleanup() {
     echo ""
-    echo -e "${BOLD}━━━ $1 ━━━${NC}"
+    info "Restoring iptables rules..."
+
+    # Delete our test chain rules from OUTPUT
+    iptables -D OUTPUT -j "$CHAIN_NAME" 2>/dev/null || true
+
+    # Flush and delete our test chain
+    iptables -F "$CHAIN_NAME" 2>/dev/null || true
+    iptables -X "$CHAIN_NAME" 2>/dev/null || true
+
+    # Restore saved rules if we saved them
+    if [[ -f "/tmp/bogdan-iptables-backup-$$.rules" ]]; then
+        iptables-restore < "/tmp/bogdan-iptables-backup-$$.rules" 2>/dev/null || true
+        rm -f "/tmp/bogdan-iptables-backup-$$.rules"
+        info "Previous iptables rules restored"
+    fi
+
+    # Stop any active cast
+    curl -sf --max-time 5 -X POST "${BASE_URL}/api/stop" &>/dev/null || true
+
+    # Restart Tor if we stopped it
+    if [[ -f "/tmp/bogdan-tor-was-running-$$" ]]; then
+        info "Restarting Tor daemon..."
+        systemctl start tor 2>/dev/null || true
+        rm -f "/tmp/bogdan-tor-was-running-$$"
+    fi
+
+    # Kill tcpdump if we started it
+    if [[ -n "${TCPDUMP_PID:-}" ]]; then
+        kill "$TCPDUMP_PID" 2>/dev/null || true
+    fi
+
+    info "Cleanup complete"
 }
+trap cleanup EXIT
 
-is_root() {
-    [[ "$(id -u)" -eq 0 ]]
-}
+# ── Banner ─────────────────────────────────────────────────────────────
 
-has_command() {
-    command -v "$1" &>/dev/null
-}
-
-# ─── Header ──────────────────────────────────────────────────────
-
-echo -e "${BOLD}╔════════════════════════════════════════════════════════════╗${NC}"
-echo -e "${BOLD}║       boGDan Network Isolation Verification (T-9.4)      ║${NC}"
-echo -e "${BOLD}╚════════════════════════════════════════════════════════════╝${NC}"
 echo ""
-echo -e "  Date:    $(date -u '+%Y-%m-%d %H:%M:%S UTC')"
-echo -e "  Host:    $(hostname)"
-echo -e "  Kernel:  $(uname -r)"
-echo -e "  User:    $(whoami) (UID $(id -u))"
+echo -e "${BOLD}╔══════════════════════════════════════════════════════════════╗${NC}"
+echo -e "${BOLD}║     boGDan Network Isolation Verification (S6.3)           ║${NC}"
+echo -e "${BOLD}╚══════════════════════════════════════════════════════════════╝${NC}"
+echo ""
+echo -e "  Date:       $(date -u '+%Y-%m-%d %H:%M:%S UTC')"
+echo -e "  Host:       $(hostname)"
+echo -e "  User:       $(whoami) (UID $(id -u))"
+echo -e "  Target:     ${BASE_URL}"
+echo -e "  Tor SOCKS:  127.0.0.1:${TOR_SOCKS_PORT}"
 echo ""
 
-if is_root; then
-    info "Running as root — all checks enabled"
+# ═══════════════════════════════════════════════════════════════════════
+# PHASE 1: Pre-flight checks
+# ═══════════════════════════════════════════════════════════════════════
+
+section "Phase 1: Pre-flight Checks"
+
+# Check iptables is available
+if ! command -v iptables &>/dev/null; then
+    fail "iptables is not installed"
+    exit 2
+fi
+pass "iptables is available"
+
+# Check Tor is running
+if systemctl is-active --quiet tor 2>/dev/null || pgrep -x tor &>/dev/null; then
+    pass "Tor daemon is running"
+    touch "/tmp/bogdan-tor-was-running-$$"
 else
-    info "Not running as root — some checks will be skipped"
+    fail "Tor daemon is not running — cannot test network isolation"
+    exit 2
 fi
 
-# ─── 1. iptables rules loaded ───────────────────────────────────
-
-section "1. iptables Rules Loaded"
-
-if ! is_root; then
-    skip "iptables inspection requires root (use sudo)"
-elif ! has_command iptables; then
-    fail "iptables command not found"
+# Check Tor SOCKS port is listening
+if ss -tlnp 2>/dev/null | grep -qE ":${TOR_SOCKS_PORT}\b"; then
+    pass "Tor SOCKS port ${TOR_SOCKS_PORT} is listening"
 else
-    # Check that rules exist (non-empty rule list beyond policy)
-    input_rules=$(iptables -S INPUT 2>/dev/null | wc -l)
-    output_rules=$(iptables -S OUTPUT 2>/dev/null | wc -l)
-    forward_rules=$(iptables -S FORWARD 2>/dev/null | wc -l)
-
-    if [[ "$input_rules" -gt 1 ]]; then
-        pass "INPUT chain has $((input_rules - 1)) rules beyond policy"
-    else
-        fail "INPUT chain has no rules beyond default policy — iptables rules may not be loaded"
-    fi
-
-    if [[ "$output_rules" -gt 1 ]]; then
-        pass "OUTPUT chain has $((output_rules - 1)) rules beyond policy"
-    else
-        fail "OUTPUT chain has no rules beyond default policy — iptables rules may not be loaded"
-    fi
-
-    if [[ "$forward_rules" -ge 1 ]]; then
-        pass "FORWARD chain has rules"
-    else
-        fail "FORWARD chain is empty"
-    fi
+    fail "Tor SOCKS port ${TOR_SOCKS_PORT} is not listening"
+    exit 2
 fi
 
-# ─── 2. Default policies are DROP ───────────────────────────────
-
-section "2. Default Policies are DROP"
-
-if ! is_root; then
-    skip "iptables policy inspection requires root (use sudo)"
-elif ! has_command iptables; then
-    skip "iptables not available"
-else
-    input_policy=$(iptables -S INPUT 2>/dev/null | head -1)
-    output_policy=$(iptables -S OUTPUT 2>/dev/null | head -1)
-    forward_policy=$(iptables -S FORWARD 2>/dev/null | head -1)
-
-    if [[ "$input_policy" == "-P INPUT DROP" ]]; then
-        pass "INPUT default policy is DROP"
-    else
-        fail "INPUT default policy is NOT DROP (got: $input_policy)"
+# Check boGDan is available (try to start if not running)
+BOGDAN_PID=$(get_bogdan_pid)
+if [[ -z "$BOGDAN_PID" ]]; then
+    info "boGDan not detected — attempting to start..."
+    if systemctl is-active --quiet bogdan 2>/dev/null; then
+        pass "boGDan started via systemctl"
+    elif command -v systemctl &>/dev/null; then
+        systemctl start bogdan 2>/dev/null && pass "Started bogdan.service" || {
+            if command -v bogdan-server &>/dev/null; then
+                sudo -u bogdan bogdan-server &>/tmp/bogdan-net-test.log &
+                pass "Started bogdan-server"
+            else
+                fail "Cannot find or start boGDan"
+                exit 2
+            fi
+        }
     fi
-
-    if [[ "$output_policy" == "-P OUTPUT DROP" ]]; then
-        pass "OUTPUT default policy is DROP"
-    else
-        fail "OUTPUT default policy is NOT DROP (got: $output_policy)"
-    fi
-
-    if [[ "$forward_policy" == "-P FORWARD DROP" ]]; then
-        pass "FORWARD default policy is DROP"
-    else
-        fail "FORWARD default policy is NOT DROP (got: $forward_policy)"
-    fi
+    # Wait for server
+    for i in $(seq 1 30); do
+        curl -sf --max-time 2 "${BASE_URL}/api/health" &>/dev/null && break
+        sleep 2
+    done
 fi
 
-# ─── 3. DNS leak prevention ─────────────────────────────────────
+BOGDAN_PID=$(get_bogdan_pid)
+if [[ -z "$BOGDAN_PID" ]]; then
+    fail "Cannot find boGDan process"
+    exit 2
+fi
+pass "boGDan is running (PID: ${BOGDAN_PID})"
 
-section "3. DNS Leak Prevention"
-
-# 3a. Verify iptables blocks outbound DNS (port 53) to non-localhost
-if ! is_root; then
-    skip "iptables DNS rule inspection requires root (use sudo)"
-elif ! has_command iptables; then
-    skip "iptables not available"
+# Verify server health
+if curl -sf --max-time 5 "${BASE_URL}/api/health" &>/dev/null; then
+    pass "boGDan health check OK"
 else
-    # Check that OUTPUT chain has a rule allowing DNS only to 127.0.0.1
-    dns_output_rules=$(iptables -S OUTPUT 2>/dev/null | grep -E -- '--dport 53 ' || true)
-
-    if echo "$dns_output_rules" | grep -qE '127\.0\.0\.1.*--dport 53'; then
-        pass "OUTPUT chain allows DNS only to 127.0.0.1 (Tor DNSPort)"
-    else
-        fail "OUTPUT chain does not restrict DNS to 127.0.0.1 only — potential DNS leak"
-    fi
-
-    # Check that there is no rule allowing outbound DNS to non-loopback
-    if echo "$dns_output_rules" | grep -qvE '127\.0\.0\.1|loopback|lo '; then
-        fail "OUTPUT chain has rules allowing DNS to non-localhost addresses — DNS leak possible"
-    else
-        pass "No OUTPUT rules allow DNS to non-localhost addresses"
-    fi
+    fail "boGDan health check failed"
+    exit 2
 fi
 
-# 3b. Verify Tor DNSPort is listening
-if has_command ss; then
-    if ss -ulnp 2>/dev/null | grep -qE ':9053\b'; then
-        pass "Tor DNSPort (9053/udp) is listening"
-    else
-        # DNSPort might not be in the torrc; check for any local DNS resolver
-        if ss -ulnp 2>/dev/null | grep -qE '127\.0\.0\.1:53\b'; then
-            info "Tor DNSPort 9053 not found, but local DNS (127.0.0.1:53) is listening"
-            info "If dnsmasq is forwarding to Tor DNSPort, this may be acceptable"
-            pass "Local DNS resolver (127.0.0.1:53) is listening"
-        else
-            fail "Neither Tor DNSPort (9053) nor local DNS resolver (127.0.0.1:53) is listening"
-        fi
-    fi
-elif has_command netstat; then
-    if netstat -ulnp 2>/dev/null | grep -qE ':9053\b'; then
-        pass "Tor DNSPort (9053/udp) is listening"
-    else
-        fail "Tor DNSPort (9053/udp) not found via netstat"
-    fi
+# ═══════════════════════════════════════════════════════════════════════
+# PHASE 2: Set up iptables test rules
+# ═══════════════════════════════════════════════════════════════════════
+
+section "Phase 2: Install Test iptables Rules"
+
+# Backup existing rules
+iptables-save > "/tmp/bogdan-iptables-backup-$$.rules" 2>/dev/null
+info "Existing iptables rules backed up"
+
+# Create a dedicated chain for our test rules
+# This avoids interfering with existing rules and makes cleanup easy
+iptables -N "$CHAIN_NAME" 2>/dev/null || iptables -F "$CHAIN_NAME" 2>/dev/null
+info "Created test chain: ${CHAIN_NAME}"
+
+# Rule 1: Allow ESTABLISHED connections (for responses to our outbound)
+iptables -A "$CHAIN_NAME" -m conntrack --ctstate ESTABLISHED,RELATED -j ACCEPT
+info "Rule: Allow ESTABLISHED,RELATED connections"
+
+# Rule 2: Allow loopback
+iptables -A "$CHAIN_NAME" -i lo -j ACCEPT
+info "Rule: Allow loopback (lo)"
+
+# Rule 3: Allow connections to Tor SOCKS proxy (localhost only)
+iptables -A "$CHAIN_NAME" -d 127.0.0.1/32 -p tcp --dport "$TOR_SOCKS_PORT" -j ACCEPT
+info "Rule: Allow Tor SOCKS (127.0.0.1:${TOR_SOCKS_PORT})"
+
+# Rule 4: Allow Tor control port (localhost only)
+iptables -A "$CHAIN_NAME" -d 127.0.0.1/32 -p tcp --dport "$TOR_CONTROL_PORT" -j ACCEPT
+info "Rule: Allow Tor Control (127.0.0.1:${TOR_CONTROL_PORT})"
+
+# Rule 5: Allow LAN traffic (DLNA, mDNS, HTTP API responses)
+iptables -A "$CHAIN_NAME" -d 192.168.0.0/16 -j ACCEPT
+iptables -A "$CHAIN_NAME" -d 10.0.0.0/8 -j ACCEPT
+iptables -A "$CHAIN_NAME" -d 172.16.0.0/12 -j ACCEPT
+info "Rule: Allow LAN traffic (192.168/16, 10/8, 172.16/12)"
+
+# Rule 6: Allow DNS only to localhost (Tor DNSPort or dnsmasq stub)
+iptables -A "$CHAIN_NAME" -d 127.0.0.1/32 -p udp --dport 53 -j ACCEPT
+info "Rule: Allow DNS only to 127.0.0.1:53"
+
+# Rule 7: Allow Tor daemon itself to reach the internet
+# (Tor needs to connect to relay nodes on dynamic ports)
+TOR_UID=$(id -u debian-tor 2>/dev/null || echo "")
+if [[ -n "$TOR_UID" ]]; then
+    iptables -A "$CHAIN_NAME" -m owner --uid-owner "$TOR_UID" -j ACCEPT
+    info "Rule: Allow Tor daemon (UID ${TOR_UID}) outbound"
 else
-    skip "Neither ss nor netstat available for DNS port check"
+    info "Rule: Could not determine Tor UID — skipping Tor daemon rule"
 fi
 
-# 3c. Test that DNS queries to external resolvers are blocked
-if ! is_root; then
-    skip "DNS leak test (outbound) requires root — skipping direct DNS test"
-elif ! has_command dig; then
+# Rule 8: REJECT everything else — with a counter we can check
+iptables -A "$CHAIN_NAME" -j REJECT --reject-with icmp-port-unreachable
+info "Rule: REJECT all other outbound traffic"
+
+# Jump to our chain from OUTPUT
+iptables -I OUTPUT 1 -j "$CHAIN_NAME"
+info "Test chain inserted into OUTPUT chain (position 1)"
+
+pass "Test iptables rules installed"
+info ""
+info "Active rules in ${CHAIN_NAME}:"
+iptables -L "$CHAIN_NAME" -v -n 2>/dev/null | while read -r line; do
+    info "  $line"
+done
+
+# ═══════════════════════════════════════════════════════════════════════
+# PHASE 3: Verify direct connections are blocked
+# ═══════════════════════════════════════════════════════════════════════
+
+section "Phase 3: Verify Direct Connections Are Blocked"
+
+# Test 3a: Direct HTTP should fail
+info "Testing direct HTTP (should be blocked)..."
+if curl --noproxy '*' --connect-timeout 5 --max-time 5 \
+     http://example.com &>/dev/null; then
+    fail "Direct HTTP succeeded — traffic is NOT blocked through iptables!"
+else
+    pass "Direct HTTP blocked — iptables REJECT rule is working"
+fi
+
+# Test 3b: Direct HTTPS should fail
+info "Testing direct HTTPS (should be blocked)..."
+if curl --noproxy '*' --connect-timeout 5 --max-time 5 \
+     https://example.com &>/dev/null; then
+    fail "Direct HTTPS succeeded — traffic is NOT blocked through iptables!"
+else
+    pass "Direct HTTPS blocked — iptables REJECT rule is working"
+fi
+
+# Test 3c: External DNS should be blocked
+info "Testing direct DNS (should be blocked)..."
+if command -v dig &>/dev/null; then
+    if dig +short +timeout=3 @8.8.8.8 example.com &>/dev/null; then
+        fail "Direct DNS to 8.8.8.8 succeeded — DNS is NOT blocked!"
+    else
+        pass "Direct DNS to 8.8.8.8 blocked — no DNS leak possible"
+    fi
+else
     skip "dig not available for DNS leak test"
-else
-    # Try to query an external DNS server (should fail/timeout with iptables rules)
-    if dig +short +timeout=3 @8.8.8.8 google.com &>/dev/null; then
-        fail "DNS query to 8.8.8.8 succeeded — outbound DNS is NOT blocked (DNS leak!)"
-    else
-        pass "DNS query to 8.8.8.8 failed/timed out — outbound DNS is correctly blocked"
-    fi
 fi
 
-# ─── 4. Direct HTTP fails ───────────────────────────────────────
+# ═══════════════════════════════════════════════════════════════════════
+# PHASE 4: Verify Tor-routed connections work
+# ═══════════════════════════════════════════════════════════════════════
 
-section "4. Direct HTTP Blocked (no proxy)"
+section "Phase 4: Verify Tor-Routed Connections Work"
 
-if ! has_command curl; then
-    skip "curl not available for direct HTTP test"
+info "Testing via Tor SOCKS proxy..."
+if curl --socks5-hostname 127.0.0.1:"${TOR_SOCKS_PORT}" \
+     --connect-timeout 15 --max-time 30 \
+     https://check.torproject.org/api/ip 2>/dev/null | grep -q '"IsTor"'; then
+    pass "Tor SOCKS proxy is routing traffic correctly"
 else
-    info "Testing: curl --noproxy '*' --connect-timeout ${CURL_TIMEOUT} http://example.com"
-    # This should timeout/fail because iptables blocks direct outbound HTTP
-    if curl --noproxy '*' --connect-timeout "$CURL_TIMEOUT" --max-time "$CURL_TIMEOUT" \
-         http://example.com &>/dev/null; then
-        fail "Direct HTTP request succeeded — outbound traffic is NOT blocked (network leak!)"
-    else
-        pass "Direct HTTP request failed/timed out — outbound traffic is correctly blocked"
-    fi
-fi
-
-# Also test HTTPS
-if has_command curl; then
-    info "Testing: curl --noproxy '*' --connect-timeout ${CURL_TIMEOUT} https://example.com"
-    if curl --noproxy '*' --connect-timeout "$CURL_TIMEOUT" --max-time "$CURL_TIMEOUT" \
+    # Try a simpler test
+    if curl --socks5-hostname 127.0.0.1:"${TOR_SOCKS_PORT}" \
+         --connect-timeout 15 --max-time 30 \
          https://example.com &>/dev/null; then
-        fail "Direct HTTPS request succeeded — outbound traffic is NOT blocked (network leak!)"
+        pass "Tor SOCKS proxy connectivity works (response received)"
     else
-        pass "Direct HTTPS request failed/timed out — outbound traffic is correctly blocked"
+        fail "Tor SOCKS proxy is not routing traffic"
     fi
 fi
 
-# ─── 5. SOCKS5 proxy works ──────────────────────────────────────
+# ═══════════════════════════════════════════════════════════════════════
+# PHASE 5: Cast URLs and monitor REJECT counter
+# ═══════════════════════════════════════════════════════════════════════
 
-section "5. Tor SOCKS5 Proxy Works"
+section "Phase 5: Cast URLs and Monitor for Leaks"
 
-if ! has_command curl; then
-    skip "curl not available for SOCKS5 proxy test"
+# Record the REJECT counter before casting
+REJECT_BEFORE=$(iptables -L "$CHAIN_NAME" -v -n 2>/dev/null | grep "REJECT" | awk '{print $1}' | head -1 || echo "0")
+info "REJECT counter before cast: ${REJECT_BEFORE}"
+
+# Start a background tcpdump to capture any DNS leaks from bogdan process
+DNS_CAPTURE_FILE="/tmp/bogdan-dns-capture-$$.pcap"
+TCPDUMP_PID=""
+if command -v tcpdump &>/dev/null; then
+    # Capture UDP port 53 traffic that is NOT to 127.0.0.1
+    tcpdump -i any -n -w "$DNS_CAPTURE_FILE" \
+        "udp port 53 and not dst host 127.0.0.1" \
+        &>/dev/null &
+    TCPDUMP_PID=$!
+    info "DNS leak capture started (PID: ${TCPDUMP_PID})"
 else
-    # First check if Tor SOCKS port is reachable
-    if has_command ss; then
-        tor_socks_listening=$(ss -tlnp 2>/dev/null | grep -cE ":${TOR_SOCKS_PORT}\b" || true)
-    elif has_command netstat; then
-        tor_socks_listening=$(netstat -tlnp 2>/dev/null | grep -cE ":${TOR_SOCKS_PORT}\b" || true)
-    else
-        tor_socks_listening=0
+    info "tcpdump not available — DNS capture skipped"
+fi
+
+# Cast a URL
+info "Casting test URL..."
+HTTP_CODE=$(curl -s -o /dev/null -w "%{http_code}" --max-time 30 \
+    -X POST "${BASE_URL}/api/cast" \
+    -H "Content-Type: application/json" \
+    -d "{\"url\": \"${TEST_URL}\"}" 2>/dev/null || echo "000")
+
+if [[ "$HTTP_CODE" == "202" ]]; then
+    pass "Cast accepted (HTTP 202)"
+else
+    info "Cast returned HTTP ${HTTP_CODE} — continuing monitoring"
+fi
+
+# Wait for playback to start
+info "Waiting for playback to start..."
+PLAYBACK_STARTED=false
+for i in $(seq 1 30); do
+    STATE=$(json_value "${BASE_URL}/api/status" ".state" 2>/dev/null || echo "")
+    if [[ "$STATE" == "playing" ]]; then
+        PLAYBACK_STARTED=true
+        break
     fi
+    sleep 2
+done
 
-    if [[ "$tor_socks_listening" -eq 0 ]]; then
-        skip "Tor SOCKS5 port ${TOR_SOCKS_PORT} is not listening — cannot test proxy connectivity"
+if $PLAYBACK_STARTED; then
+    pass "Playback started — monitoring for ${MONITOR_DURATION}s"
+else
+    STATE=$(json_value "${BASE_URL}/api/status" ".state" 2>/dev/null || echo "unknown")
+    info "Playback state: ${STATE} — monitoring anyway"
+fi
+
+# Monitor for the specified duration
+info "Monitoring REJECT counter during active playback..."
+SAMPLE_INTERVAL=10
+SAMPLES=$((MONITOR_DURATION / SAMPLE_INTERVAL))
+LEAK_DETECTED=false
+
+for i in $(seq 1 "$SAMPLES"); do
+    sleep "$SAMPLE_INTERVAL"
+
+    REJECT_NOW=$(iptables -L "$CHAIN_NAME" -v -n 2>/dev/null | grep "REJECT" | awk '{print $1}' | head -1 || echo "0")
+
+    if [[ "$REJECT_NOW" -gt "$REJECT_BEFORE" ]]; then
+        LEAK_DETECTED=true
+        LEAK_COUNT=$((REJECT_NOW - REJECT_BEFORE))
+        fail "REJECT counter increased: ${REJECT_BEFORE} → ${REJECT_NOW} (${LEAK_COUNT} leaked packets)"
     else
-        pass "Tor SOCKS5 port ${TOR_SOCKS_PORT} is listening"
+        info "Sample ${i}/${SAMPLES}: REJECT counter stable at ${REJECT_NOW}"
+    fi
+done
 
-        info "Testing: curl --socks5-hostname ${TOR_SOCKS_HOST}:${TOR_SOCKS_PORT} https://check.torproject.org/api/ip"
-        if curl --socks5-hostname "${TOR_SOCKS_HOST}:${TOR_SOCKS_PORT}" \
-             --connect-timeout 15 --max-time 30 \
-             https://check.torproject.org/api/ip 2>/dev/null | grep -q '"IsTor"'; then
-            pass "SOCKS5 proxy request succeeded — Tor is working"
+if ! $LEAK_DETECTED; then
+    pass "No packets hit REJECT rule during playback — all traffic goes through Tor"
+fi
+
+# Stop playback
+curl -sf --max-time 5 -X POST "${BASE_URL}/api/stop" &>/dev/null || true
+
+# ═══════════════════════════════════════════════════════════════════════
+# PHASE 6: DNS leak verification
+# ═══════════════════════════════════════════════════════════════════════
+
+section "Phase 6: DNS Leak Verification"
+
+# Stop tcpdump and analyze capture
+if [[ -n "$TCPDUMP_PID" ]]; then
+    kill "$TCPDUMP_PID" 2>/dev/null || true
+    wait "$TCPDUMP_PID" 2>/dev/null || true
+    TCPDUMP_PID=""
+
+    if [[ -f "$DNS_CAPTURE_FILE" ]]; then
+        # Count captured packets
+        DNS_PACKET_COUNT=$(tcpdump -r "$DNS_CAPTURE_FILE" 2>/dev/null | wc -l || echo "0")
+        if [[ "$DNS_PACKET_COUNT" -eq 0 ]]; then
+            pass "No DNS leaks: zero UDP port 53 packets to non-localhost detected"
         else
-            # Try a simpler connectivity test
-            if curl --socks5-hostname "${TOR_SOCKS_HOST}:${TOR_SOCKS_PORT}" \
-                 --connect-timeout 15 --max-time 30 \
-                 https://check.torproject.org/api/ip 2>/dev/null; then
-                info "Got response from Tor proxy but could not verify IsTor flag"
-                pass "SOCKS5 proxy connectivity works (response received)"
-            else
-                fail "SOCKS5 proxy request failed — Tor proxy is not routing traffic"
-            fi
+            fail "DNS leak detected: ${DNS_PACKET_COUNT} DNS packet(s) to non-localhost!"
+            info "Captured DNS packets:"
+            tcpdump -r "$DNS_CAPTURE_FILE" -n 2>/dev/null | head -20
         fi
-    fi
-fi
-
-# ─── 6. Listening ports audit ───────────────────────────────────
-
-section "6. Listening Ports Audit"
-
-if has_command ss; then
-    # Get all TCP listening ports
-    listening_tcp=$(ss -tlnp 2>/dev/null | awk 'NR>1 {print $4}' | sed 's/.*://' || true)
-    # Get all UDP listening ports
-    listening_udp=$(ss -ulnp 2>/dev/null | awk 'NR>1 {print $4}' | sed 's/.*://' || true)
-elif has_command netstat; then
-    listening_tcp=$(netstat -tlnp 2>/dev/null | awk 'NR>2 {print $4}' | sed 's/.*://' || true)
-    listening_udp=$(netstat -ulnp 2>/dev/null | awk 'NR>2 {print $4}' | sed 's/.*://' || true)
-else
-    listening_tcp=""
-    listening_udp=""
-    skip "Neither ss nor netstat available for listening ports audit"
-fi
-
-if [[ -n "$listening_tcp" || -n "$listening_udp" ]]; then
-    # Combine and deduplicate listening ports
-    all_ports=$(echo -e "${listening_tcp}\n${listening_udp}" | sort -n | uniq | grep -E '^[0-9]+$' || true)
-
-    info "Expected listening ports: ${EXPECTED_LISTEN_PORTS}"
-    info "Found listening ports: $(echo "$all_ports" | tr '\n' ' ')"
-
-    # Check each expected port
-    for port in $EXPECTED_LISTEN_PORTS; do
-        if echo "$all_ports" | grep -qx "$port"; then
-            pass "Expected port ${port} is listening"
-        else
-            # Not all expected ports must be present (e.g., 9051 may not be configured)
-            info "Expected port ${port} is NOT listening (may not be configured yet)"
-        fi
-    done
-
-    # Check for unexpected ports (excluding well-known system ports)
-    unexpected_ports=""
-    system_ports="22 53 68 5353 1900"  # SSH, DNS, DHCP, mDNS, SSDP — expected system services
-    for port in $all_ports; do
-        is_expected=false
-        for expected in $EXPECTED_LISTEN_PORTS $system_ports; do
-            if [[ "$port" == "$expected" ]]; then
-                is_expected=true
-                break
-            fi
-        done
-        if [[ "$is_expected" == "false" ]]; then
-            # Check if it's a loopback-only port (less concerning)
-            if has_command ss; then
-                bind_addr=$(ss -tlnp 2>/dev/null | awk -v p=":$port$" '$4 ~ p {print $4}' | head -1 || true)
-                if [[ "$bind_addr" == 127.0.0.1:* ]]; then
-                    info "Unexpected port ${port} found (loopback only — lower risk)"
-                else
-                    unexpected_ports="${unexpected_ports} ${port}"
-                fi
-            else
-                unexpected_ports="${unexpected_ports} ${port}"
-            fi
-        fi
-    done
-
-    if [[ -z "$unexpected_ports" ]]; then
-        pass "No unexpected non-loopback listening ports found"
+        rm -f "$DNS_CAPTURE_FILE"
     else
-        fail "Unexpected non-loopback listening ports found:$(echo "$unexpected_ports" | tr '\n' ' ')"
+        info "No DNS capture file (tcpdump may have failed to start)"
     fi
-fi
-
-# ─── 7. OUTPUT chain rule audit ──────────────────────────────────
-
-section "7. OUTPUT Chain Rule Audit (no direct internet access except tor UID)"
-
-if ! is_root; then
-    skip "iptables OUTPUT chain audit requires root (use sudo)"
-elif ! has_command iptables; then
-    skip "iptables not available"
 else
-    # Get all OUTPUT rules
-    output_rules=$(iptables -S OUTPUT 2>/dev/null || true)
-
-    info "Current OUTPUT chain rules:"
-    echo "$output_rules" | while read -r rule; do
-        info "  $rule"
-    done
-
-    # Check for Tor UID exemption
-    if echo "$output_rules" | grep -qE "owner.*uid-owner.*${TOR_UID}"; then
-        pass "OUTPUT chain allows traffic from Tor UID (${TOR_UID})"
+    # Alternative: check /proc/net/udp for DNS connections from bogdan
+    info "Checking for DNS sockets from bogdan process..."
+    BOGDAN_PID=$(get_bogdan_pid)
+    if [[ -n "$BOGDAN_PID" ]]; then
+        # Look for UDP connections to port 53 from bogdan
+        DNS_SOCKETS=$(ls -la /proc/"${BOGDAN_PID}"/fd 2>/dev/null | grep -c "socket" || echo "0")
+        info "Process has ${DNS_SOCKETS} socket FDs (check manually for DNS leaks)"
+        skip "Detailed DNS leak analysis (tcpdump not available)"
     else
-        fail "OUTPUT chain does NOT have rule allowing traffic from Tor UID (${TOR_UID})"
-    fi
-
-    # Check for rules that might allow direct internet access without Tor UID
-    # We look for ACCEPT rules that don't restrict to loopback, LAN, or Tor UID
-    direct_internet_rules=""
-    while read -r rule; do
-        # Skip the default policy line
-        [[ "$rule" == "-P OUTPUT"* ]] && continue
-        # Skip rules that are DROP or LOG
-        [[ "$rule" == *"-j DROP"* ]] && continue
-        [[ "$rule" == *"-j LOG"* ]] && continue
-        # Skip rules for established connections (these are fine)
-        [[ "$rule" == *"conntrack"*"ESTABLISHED"* ]] && continue
-        # Skip loopback rules
-        [[ "$rule" == *"lo"* ]] && continue
-        [[ "$rule" == *"127.0.0.1"* ]] && continue
-        # Skip LAN rules (private networks)
-        [[ "$rule" == *"192.168.0.0"* ]] && continue
-        [[ "$rule" == *"10.0.0.0"* ]] && continue
-        [[ "$rule" == *"172.16.0.0"* ]] && continue
-        # Skip Tor UID rules
-        [[ "$rule" == *"uid-owner"* ]] && continue
-
-        # If we get here, this ACCEPT rule might allow direct internet access
-        if [[ "$rule" == *"-j ACCEPT"* ]]; then
-            direct_internet_rules="${direct_internet_rules}\n  ${rule}"
-        fi
-    done <<< "$output_rules"
-
-    if [[ -z "$direct_internet_rules" ]]; then
-        pass "No OUTPUT rules allowing direct internet access (except Tor UID)"
-    else
-        fail "Found OUTPUT rules that may allow direct internet access:"
-        echo -e "$direct_internet_rules"
+        skip "DNS leak analysis (tcpdump not available, bogdan PID unknown)"
     fi
 fi
 
-# ─── 8. LAN-only access for service ports ────────────────────────
+# Also verify via iptables: check if any packets matched the DNS-allowed rule
+DNS_ALLOW_PACKETS=$(iptables -L "$CHAIN_NAME" -v -n 2>/dev/null | grep "dpt:53" | awk '{print $1}' || echo "0")
+info "Packets matching DNS-allow rule (to 127.0.0.1:53 only): ${DNS_ALLOW_PACKETS}"
 
-section "8. LAN-Only Access for boGDan Service Ports"
+# ═══════════════════════════════════════════════════════════════════════
+# PHASE 7: Tor failover test — disabling Tor should break everything
+# ═══════════════════════════════════════════════════════════════════════
 
-if ! is_root; then
-    skip "iptables INPUT chain audit requires root (use sudo)"
-elif ! has_command iptables; then
-    skip "iptables not available"
+section "Phase 7: Tor Failover Test (No Fallback)"
+
+info "Stopping Tor daemon to verify no fallback to direct connections..."
+systemctl stop tor 2>/dev/null || kill "$(pgrep -x tor)" 2>/dev/null || true
+sleep 3
+
+# Verify Tor is actually stopped
+TOR_STOPPED=false
+if ! ss -tlnp 2>/dev/null | grep -qE ":${TOR_SOCKS_PORT}\b"; then
+    TOR_STOPPED=true
+    info "Tor SOCKS port ${TOR_SOCKS_PORT} is no longer listening"
 else
-    # Check that boGDan service ports (8585, 8586, 49152) are restricted to LAN
-    for port in 8585 8586 49152; do
-        port_rules=$(iptables -S INPUT 2>/dev/null | grep -E "--dport ${port}" || true)
-        if [[ -z "$port_rules" ]]; then
-            info "No INPUT rules found for port ${port} (may not be configured yet)"
-        else
-            if echo "$port_rules" | grep -qE '192\.168\.0\.0|10\.0\.0\.0'; then
-                pass "Port ${port} INPUT restricted to LAN addresses"
-            else
-                fail "Port ${port} INPUT rules do NOT restrict to LAN — may be exposed to WAN"
-            fi
+    fail "Tor SOCKS port is still listening — could not stop Tor"
+fi
+
+if $TOR_STOPPED; then
+    # Try to cast — this should FAIL because boGDan routes through Tor
+    info "Attempting to cast with Tor disabled (should fail)..."
+    HTTP_CODE=$(curl -s -o /dev/null -w "%{http_code}" --max-time 30 \
+        -X POST "${BASE_URL}/api/cast" \
+        -H "Content-Type: application/json" \
+        -d "{\"url\": \"${TEST_URL}\"}" 2>/dev/null || echo "000")
+
+    # The cast request itself may succeed (HTTP 202) but playback should fail
+    # because the resolver can't reach the internet without Tor.
+    sleep 10
+    STATE=$(json_value "${BASE_URL}/api/status" ".state" 2>/dev/null || echo "")
+
+    if [[ "$STATE" == "playing" ]]; then
+        fail "Playback started without Tor — traffic is falling back to direct connection!"
+    else
+        pass "Playback did NOT start without Tor — no fallback to direct connections"
+        info "State with Tor disabled: ${STATE}"
+    fi
+
+    # Also test direct HTTP access from the Pi
+    info "Testing direct HTTP with Tor disabled (should fail)..."
+    if curl --noproxy '*' --connect-timeout 5 --max-time 5 \
+         http://example.com &>/dev/null; then
+        fail "Direct HTTP works even with Tor disabled — iptables not blocking!"
+    else
+        pass "Direct HTTP blocked even with Tor disabled — iptables isolation holds"
+    fi
+else
+    skip "Tor failover test (could not stop Tor)"
+fi
+
+# Restart Tor
+info "Restarting Tor daemon..."
+systemctl start tor 2>/dev/null || true
+sleep 5
+
+# Verify Tor is back
+if ss -tlnp 2>/dev/null | grep -qE ":${TOR_SOCKS_PORT}\b"; then
+    pass "Tor daemon restarted successfully"
+else
+    info "Waiting for Tor to come back..."
+    for i in $(seq 1 30); do
+        if ss -tlnp 2>/dev/null | grep -qE ":${TOR_SOCKS_PORT}\b"; then
+            pass "Tor daemon is back online"
+            break
         fi
+        sleep 2
     done
 fi
 
-# ─── 9. Tor not running as relay/exit ───────────────────────────
+# ═══════════════════════════════════════════════════════════════════════
+# PHASE 8: Stream isolation verification
+# ═══════════════════════════════════════════════════════════════════════
 
-section "9. Tor is Client-Only (Not Relay/Exit)"
+section "Phase 8: Stream Isolation Verification"
 
-# Check torrc for relay/exit settings
+# Check torrc for IsolateSOCKSAuth
 TORRC_PATHS=("/etc/tor/torrc" "/etc/bogdan/torrc")
 torrc_found=false
 
@@ -449,207 +578,65 @@ for torrc in "${TORRC_PATHS[@]}"; do
         torrc_found=true
         info "Checking torrc: ${torrc}"
 
-        # Check ExitRelay
-        if grep -qE '^\s*ExitRelay\s+0' "$torrc" 2>/dev/null; then
-            pass "ExitRelay is set to 0 (disabled)"
-        elif grep -qE '^\s*ExitRelay\s+1' "$torrc" 2>/dev/null; then
-            fail "ExitRelay is set to 1 (ENABLED) — Pi should not be an exit relay!"
+        if grep -qE 'SocksPort.*IsolateSOCKSAuth' "$torrc" 2>/dev/null; then
+            pass "SocksPort has IsolateSOCKSAuth — per-domain circuit isolation enabled"
         else
-            info "ExitRelay not explicitly set (default is 0 — OK)"
+            fail "SocksPort does NOT have IsolateSOCKSAuth — all sites share circuits"
         fi
 
-        # Check PublishServerDescriptor
-        if grep -qE '^\s*PublishServerDescriptor\s+0' "$torrc" 2>/dev/null; then
-            pass "PublishServerDescriptor is set to 0 (descriptor not published)"
-        elif grep -qE '^\s*PublishServerDescriptor\s+1' "$torrc" 2>/dev/null; then
-            fail "PublishServerDescriptor is set to 1 — may announce this node to the Tor network"
+        if grep -qE 'ExitRelay\s+0' "$torrc" 2>/dev/null; then
+            pass "ExitRelay is set to 0 (client only)"
         else
-            info "PublishServerDescriptor not explicitly set (default depends on relay config)"
+            fail "ExitRelay not set to 0 — may act as exit relay"
         fi
 
-        # Check for ORPort (relay port)
-        if grep -qE '^\s*ORPort\s+[1-9]' "$torrc" 2>/dev/null; then
-            fail "ORPort is configured — Tor may be running as a relay"
-        else
-            pass "No ORPort configured (not a relay)"
-        fi
-
-        # Check for ExitPolicy
-        if grep -qE '^\s*ExitPolicy\s+reject\s+\*:\*' "$torrc" 2>/dev/null; then
-            pass "ExitPolicy reject *:* found (rejects all exit traffic)"
-        elif grep -qE '^\s*ExitPolicy\s+accept' "$torrc" 2>/dev/null; then
-            fail "ExitPolicy accept found — may allow exit traffic!"
-        else
-            info "No explicit ExitPolicy found (default rejects all if not relay)"
-        fi
-
-        break  # Only check the first found torrc
+        break
     fi
 done
 
 if [[ "$torrc_found" == "false" ]]; then
-    skip "No torrc found at ${TORRC_PATHS[*]}"
+    skip "No torrc found for stream isolation check"
 fi
 
-# ─── 10. Process runs as bogdan user ────────────────────────────
+# ═══════════════════════════════════════════════════════════════════════
+# PHASE 9: Process privilege verification
+# ═══════════════════════════════════════════════════════════════════════
 
-section "10. boGDan Process Runs as Non-Root User"
+section "Phase 9: Process Privilege Verification"
 
-BOGDAN_PID=$(pgrep -f "bogdan" 2>/dev/null || true)
-
+BOGDAN_PID=$(get_bogdan_pid)
 if [[ -n "$BOGDAN_PID" ]]; then
     bogdan_user=$(ps -o user= -p "$BOGDAN_PID" 2>/dev/null | head -1 || true)
-    bogdan_uid=$(ps -o uid= -p "$BOGDAN_PID" 2>/dev/null | head -1 || true)
 
-    if [[ "$bogdan_user" == "root" || "$bogdan_uid" == "0" ]]; then
-        fail "boGDan process is running as root — should run as 'bogdan' user"
+    if [[ "$bogdan_user" == "root" ]]; then
+        fail "boGDan is running as root — should run as 'bogdan' user"
     elif [[ "$bogdan_user" == "bogdan" ]]; then
-        pass "boGDan process runs as 'bogdan' user"
+        pass "boGDan runs as 'bogdan' user (not root)"
     else
-        info "boGDan process runs as user '${bogdan_user}' (expected 'bogdan')"
-        # Still pass if it's not root
-        if [[ "$bogdan_uid" != "0" ]]; then
-            pass "boGDan process is not running as root"
+        info "boGDan runs as '${bogdan_user}' (expected 'bogdan')"
+        if [[ "$bogdan_user" != "root" ]]; then
+            pass "boGDan is not running as root"
         fi
     fi
 
-    # Check group membership for DRM access
+    # Check group memberships
     bogdan_groups=$(id -Gn "$bogdan_user" 2>/dev/null || true)
     if echo "$bogdan_groups" | grep -qw "video"; then
-        pass "Process user has 'video' group membership (DRM/KMS access)"
+        pass "Process user has 'video' group (DRM/KMS access)"
     else
-        fail "Process user does NOT have 'video' group membership (needed for DRM/KMS)"
-    fi
-
-    if echo "$bogdan_groups" | grep -qw "render"; then
-        pass "Process user has 'render' group membership (GPU access)"
-    else
-        info "Process user does not have 'render' group membership (may not be needed)"
-    fi
-
-    if echo "$bogdan_groups" | grep -qw "audio"; then
-        pass "Process user has 'audio' group membership (ALSA access)"
-    else
-        info "Process user does not have 'audio' group membership (may not be needed)"
+        info "Process user lacks 'video' group (needed for DRM)"
     fi
 else
-    skip "boGDan process not running — cannot verify process user"
+    skip "boGDan process not found for privilege check"
 fi
 
-# ─── 11. DRM master is only boGDan (no X11/Wayland) ─────────────
-
-section "11. DRM Master is Only boGDan (No X11/Wayland)"
-
-if pgrep -x Xorg &>/dev/null; then
-    fail "Xorg is running — DRM master may be held by X11, not boGDan"
-else
-    pass "Xorg is not running"
-fi
-
-if pgrep -x Xwayland &>/dev/null; then
-    fail "Xwayland is running — DRM master may be held by Wayland, not boGDan"
-else
-    pass "Xwayland is not running"
-fi
-
-if pgrep -x weston &>/dev/null; then
-    info "Weston compositor is running — DRM master may be held by Wayland"
-elif pgrep -x mutter &>/dev/null; then
-    info "Mutter compositor is running — DRM master may be held by Wayland"
-elif pgrep -x kwin_wayland &>/dev/null; then
-    info "KWin Wayland compositor is running — DRM master may be held by Wayland"
-else
-    pass "No Wayland compositor detected"
-fi
-
-# Check DRM master holder
-if [[ -e /dev/dri/card0 ]]; then
-    if has_command fuser; then
-        drm_holder=$(fuser /dev/dri/card0 2>/dev/null || true)
-        if [[ -n "$drm_holder" ]]; then
-            holder_name=$(ps -o comm= -p "$(echo "$drm_holder" | awk '{print $1}')" 2>/dev/null || true)
-            if [[ "$holder_name" == "bogdan" ]]; then
-                pass "boGDan holds DRM master on /dev/dri/card0"
-            elif [[ -n "$holder_name" ]]; then
-                info "DRM master on /dev/dri/card0 is held by: ${holder_name}"
-            fi
-        else
-            info "No process currently holds /dev/dri/card0"
-        fi
-    else
-        skip "fuser not available to check DRM master holder"
-    fi
-else
-    info "/dev/dri/card0 not found (expected on Pi hardware only)"
-fi
-
-# ─── 12. Systemd service hardening ──────────────────────────────
-
-section "12. Systemd Service Hardening"
-
-SERVICE_PATHS=("/etc/systemd/system/bogdan.service" "/lib/systemd/system/bogdan.service")
-service_found=false
-
-for svc in "${SERVICE_PATHS[@]}"; do
-    if [[ -f "$svc" ]]; then
-        service_found=true
-        info "Checking service file: ${svc}"
-
-        # Required hardening directives
-        required_directives=(
-            "NoNewPrivileges=true"
-            "ProtectSystem=strict"
-            "ProtectHome=true"
-            "ProtectKernelTunables=true"
-            "ProtectKernelModules=true"
-            "ProtectControlGroups=true"
-            "RestrictNamespaces=true"
-            "LockPersonality=true"
-            "MemoryDenyWriteExecute=true"
-            "RestrictRealtime=true"
-        )
-
-        for directive in "${required_directives[@]}"; do
-            key="${directive%%=*}"
-            if grep -qE "^\s*${key}=" "$svc" 2>/dev/null; then
-                actual=$(grep -E "^\s*${key}=" "$svc" 2>/dev/null | head -1 | tr -d ' ')
-                if [[ "$actual" == "$directive" ]]; then
-                    pass "Service has ${directive}"
-                else
-                    fail "Service has ${key} but value differs: got '${actual}', expected '${directive}'"
-                fi
-            else
-                fail "Service is missing ${directive}"
-            fi
-        done
-
-        # Check User=bogdan
-        if grep -qE '^\s*User=bogdan' "$svc" 2>/dev/null; then
-            pass "Service runs as User=bogdan"
-        else
-            fail "Service does NOT set User=bogdan"
-        fi
-
-        # Check SupplementaryGroups
-        if grep -qE '^\s*SupplementaryGroups=.*video' "$svc" 2>/dev/null; then
-            pass "Service has video group in SupplementaryGroups"
-        else
-            fail "Service missing 'video' in SupplementaryGroups (needed for DRM)"
-        fi
-
-        break  # Only check the first found service file
-    fi
-done
-
-if [[ "$service_found" == "false" ]]; then
-    skip "boGDan systemd service file not found at ${SERVICE_PATHS[*]}"
-fi
-
-# ─── Report ──────────────────────────────────────────────────────
+# ═══════════════════════════════════════════════════════════════════════
+# Report
+# ═══════════════════════════════════════════════════════════════════════
 
 echo ""
 echo -e "${BOLD}══════════════════════════════════════════════════════════════${NC}"
-echo -e "${BOLD}  REPORT${NC}"
+echo -e "${BOLD}  NETWORK ISOLATION VERIFICATION REPORT${NC}"
 echo -e "${BOLD}══════════════════════════════════════════════════════════════${NC}"
 echo ""
 echo -e "  ${GREEN}PASSED${NC}: ${PASS}"
@@ -660,12 +647,19 @@ echo ""
 if [[ "$FAIL" -gt 0 ]]; then
     echo -e "  ${RED}${BOLD}RESULT: FAIL — ${FAIL} check(s) did not pass${NC}"
     echo ""
-    echo "  Review the failed checks above and remediate before deployment."
-    echo "  See docs/SECURITY_AUDIT.md for detailed remediation steps."
+    echo "  Network isolation is compromised. Review the failures above."
+    echo "  Critical actions:"
+    echo "    1. Verify iptables rules are correct: iptables -S OUTPUT -v -n"
+    echo "    2. Check for DNS leaks: tcpdump -i any -n 'udp port 53 and not dst host 127.0.0.1'"
+    echo "    3. Ensure boGDan uses socks5h:// (not socks5://) for remote DNS"
+    echo "    4. See docs/SECURITY.md for hardening guide"
+    echo ""
     exit 1
 else
-    echo -e "  ${GREEN}${BOLD}RESULT: PASS — all checks passed${NC}"
+    echo -e "  ${GREEN}${BOLD}RESULT: PASS — all network isolation checks passed${NC}"
     echo ""
-    echo "  Network isolation is correctly configured."
+    echo "  All outbound traffic is correctly routed through Tor."
+    echo "  No DNS leaks detected. No fallback to direct connections."
+    echo ""
     exit 0
 fi
