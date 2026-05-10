@@ -45,6 +45,24 @@ use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::Arc;
 use std::time::Instant;
 use tokio::sync::mpsc;
+
+/// Configuration for StreamSource preflight behavior.
+///
+/// Controls how many times the preflight check retries on CDN 403
+/// before giving up and returning `PlaybackError::CdnForbidden`.
+#[derive(Debug, Clone)]
+pub struct StreamSourceConfig {
+    /// Maximum number of preflight retry attempts on CDN 403.
+    /// Each retry generates a new isolation username and re-resolves
+    /// the URL through the resolver. Default: 3.
+    pub preflight_retry_count: u32,
+}
+
+impl Default for StreamSourceConfig {
+    fn default() -> Self {
+        Self { preflight_retry_count: 3 }
+    }
+}
 /// Browser-like User-Agent string. Must match the resolver's UA.
 const BROWSER_UA: &str = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36";
 

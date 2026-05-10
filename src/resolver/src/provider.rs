@@ -44,27 +44,15 @@ pub enum ProviderConfigError {
 
     /// A regex pattern is invalid.
     #[error("provider config {path}: invalid regex in {context}: {pattern}")]
-    InvalidRegex {
-        path: String,
-        context: String,
-        pattern: String,
-    },
+    InvalidRegex { path: String, context: String, pattern: String },
 
     /// A deobfuscation step has invalid parameters.
     #[error("provider config {path}: invalid deobfuscation step '{step}': {reason}")]
-    InvalidStep {
-        path: String,
-        step: String,
-        reason: String,
-    },
+    InvalidStep { path: String, step: String, reason: String },
 
     /// Duplicate provider name found.
     #[error("duplicate provider name '{name}' in {path1} and {path2}")]
-    DuplicateName {
-        name: String,
-        path1: String,
-        path2: String,
-    },
+    DuplicateName { name: String, path1: String, path2: String },
 
     /// The deobfuscation pipeline is empty.
     #[error("provider config {path}: deobfuscation pipeline is empty")]
@@ -87,8 +75,6 @@ pub enum DomainMatchKind {
     Regex,
 }
 
-
-
 /// A single domain pattern for URL matching.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct DomainPattern {
@@ -107,8 +93,7 @@ impl DomainPattern {
         match self.kind {
             DomainMatchKind::Exact => host_lower == pattern_lower,
             DomainMatchKind::Suffix => {
-                host_lower == pattern_lower
-                    || host_lower.ends_with(&format!(".{}", pattern_lower))
+                host_lower == pattern_lower || host_lower.ends_with(&format!(".{}", pattern_lower))
             },
             DomainMatchKind::Regex => {
                 if let Ok(re) = Regex::new(&self.pattern) {
@@ -148,32 +133,24 @@ pub enum DeobfuscationStep {
 
     /// Strip marker patterns used as obfuscation separators.
     /// The `patterns` field lists the substrings to remove.
-    StripMarkers {
-        patterns: Vec<String>,
-    },
+    StripMarkers { patterns: Vec<String> },
 
     /// Standard Base64 decode with safe padding.
     Base64Decode,
 
     /// Shift character code-points by a fixed amount.
     /// `amount` is the positive shift value; the decode subtracts it.
-    CharShift {
-        amount: u32,
-    },
+    CharShift { amount: u32 },
 
     /// Reverse the string.
     Reverse,
 
     /// Parse the string as JSON and extract a value at the given key path.
     /// Key path supports dot notation (e.g., "data.url").
-    JsonParse {
-        key: String,
-    },
+    JsonParse { key: String },
 
     /// Extract a substring using a regex. Returns the first capture group.
-    RegexExtract {
-        pattern: String,
-    },
+    RegexExtract { pattern: String },
 
     /// Clean and pad a Base64 string (strip backslashes, add padding).
     CleanBase64,
@@ -205,10 +182,7 @@ pub enum UrlExtractionRule {
     },
 
     /// Extract a URL using a regex. Returns the first capture group.
-    RegexUrl {
-        pattern: String,
-        priority: u32,
-    },
+    RegexUrl { pattern: String, priority: u32 },
 }
 
 fn default_true() -> bool {
@@ -459,24 +433,20 @@ impl ProviderConfig {
     /// Load a provider config from a TOML file.
     pub fn load_from_file(path: &Path) -> Result<Self, ProviderConfigError> {
         let path_str = path.to_string_lossy().to_string();
-        let content = std::fs::read_to_string(path).map_err(|e| ProviderConfigError::Io {
-            path: path_str.clone(),
-            source: e,
-        })?;
-        let config: ProviderConfig =
-            toml::from_str(&content).map_err(|e| ProviderConfigError::TomlParse {
-                path: path_str,
-                source: e,
-            })?;
+        let content = std::fs::read_to_string(path)
+            .map_err(|e| ProviderConfigError::Io { path: path_str.clone(), source: e })?;
+        let config: ProviderConfig = toml::from_str(&content)
+            .map_err(|e| ProviderConfigError::TomlParse { path: path_str, source: e })?;
         Ok(config)
     }
 
     /// Parse a provider config from a TOML string.
-    pub fn from_toml_str(content: &str, path_for_errors: &str) -> Result<Self, ProviderConfigError> {
-        toml::from_str(content).map_err(|e| ProviderConfigError::TomlParse {
-            path: path_for_errors.into(),
-            source: e,
-        })
+    pub fn from_toml_str(
+        content: &str,
+        path_for_errors: &str,
+    ) -> Result<Self, ProviderConfigError> {
+        toml::from_str(content)
+            .map_err(|e| ProviderConfigError::TomlParse { path: path_for_errors.into(), source: e })
     }
 
     /// Validate the provider config, returning errors for any issues.
@@ -509,9 +479,7 @@ impl ProviderConfig {
         // Validate deobfuscation pipeline entries
         for (i, entry) in self.deobfuscation_pipeline.iter().enumerate() {
             if entry.steps.is_empty() {
-                return Err(ProviderConfigError::EmptyPipeline {
-                    path: path.into(),
-                });
+                return Err(ProviderConfigError::EmptyPipeline { path: path.into() });
             }
             // Validate regex patterns in steps
             for (j, step) in entry.steps.iter().enumerate() {
@@ -537,20 +505,18 @@ impl ProviderConfig {
                         pattern: pattern.clone(),
                     });
                 },
-                ContentExtraction::JsRedirectThen { inner } => {
-                    match inner.as_ref() {
-                        ContentExtraction::JsVariable { pattern }
-                        | ContentExtraction::RegexMatch { pattern }
-                            if Regex::new(pattern).is_err() =>
-                        {
-                            return Err(ProviderConfigError::InvalidRegex {
-                                path: path.into(),
-                                context: format!("pipeline[{}].extraction.redirect", i),
-                                pattern: pattern.clone(),
-                            });
-                        },
-                        _ => {},
-                    }
+                ContentExtraction::JsRedirectThen { inner } => match inner.as_ref() {
+                    ContentExtraction::JsVariable { pattern }
+                    | ContentExtraction::RegexMatch { pattern }
+                        if Regex::new(pattern).is_err() =>
+                    {
+                        return Err(ProviderConfigError::InvalidRegex {
+                            path: path.into(),
+                            context: format!("pipeline[{}].extraction.redirect", i),
+                            pattern: pattern.clone(),
+                        });
+                    },
+                    _ => {},
                 },
                 _ => {},
             }
@@ -614,24 +580,16 @@ impl ProviderRegistry {
         let mut registry = Self::new();
         let dir_str = dir.to_string_lossy().to_string();
 
-        let entries = std::fs::read_dir(dir).map_err(|e| ProviderConfigError::Io {
-            path: dir_str,
-            source: e,
-        })?;
+        let entries = std::fs::read_dir(dir)
+            .map_err(|e| ProviderConfigError::Io { path: dir_str, source: e })?;
 
         for entry in entries {
-            let entry = entry.map_err(|e| ProviderConfigError::Io {
-                path: "<read_dir>".into(),
-                source: e,
-            })?;
+            let entry = entry
+                .map_err(|e| ProviderConfigError::Io { path: "<read_dir>".into(), source: e })?;
             let path = entry.path();
 
             if path.extension().and_then(|e| e.to_str()) == Some("toml") {
-                let id = path
-                    .file_stem()
-                    .and_then(|s| s.to_str())
-                    .unwrap_or("unknown")
-                    .to_string();
+                let id = path.file_stem().and_then(|s| s.to_str()).unwrap_or("unknown").to_string();
 
                 let config = ProviderConfig::load_from_file(&path)?;
                 let path_str = path.to_string_lossy().to_string();
@@ -649,10 +607,8 @@ impl ProviderRegistry {
                 }
 
                 // Check for duplicate names
-                if let Some((_, _existing)) = registry
-                    .providers
-                    .iter()
-                    .find(|(_, c)| c.name == config.name)
+                if let Some((_, _existing)) =
+                    registry.providers.iter().find(|(_, c)| c.name == config.name)
                 {
                     // Duplicate names are OK if they come from the same ID
                     // (reload scenario). Different IDs with same name is an error.
@@ -665,7 +621,11 @@ impl ProviderRegistry {
                         return Err(ProviderConfigError::DuplicateName {
                             name: config.name.clone(),
                             path1: path_str,
-                            path2: format!("{}/{}.toml", dir.display(), existing_id.unwrap_or_default()),
+                            path2: format!(
+                                "{}/{}.toml",
+                                dir.display(),
+                                existing_id.unwrap_or_default()
+                            ),
                         });
                     }
                 }
@@ -740,10 +700,7 @@ impl ProviderRegistry {
 
     /// Get all domain patterns across all providers (for the classifier).
     pub fn all_domain_patterns(&self) -> Vec<&DomainPattern> {
-        self.providers
-            .iter()
-            .flat_map(|(_, c)| c.domain_patterns.iter())
-            .collect()
+        self.providers.iter().flat_map(|(_, c)| c.domain_patterns.iter()).collect()
     }
 }
 
@@ -755,10 +712,7 @@ mod tests {
 
     #[test]
     fn domain_pattern_exact_match() {
-        let dp = DomainPattern {
-            pattern: "voe.sx".into(),
-            kind: DomainMatchKind::Exact,
-        };
+        let dp = DomainPattern { pattern: "voe.sx".into(), kind: DomainMatchKind::Exact };
         assert!(dp.matches("voe.sx"));
         assert!(dp.matches("VOE.SX"));
         assert!(!dp.matches("sub.voe.sx"));
@@ -767,10 +721,7 @@ mod tests {
 
     #[test]
     fn domain_pattern_suffix_match() {
-        let dp = DomainPattern {
-            pattern: "voe.sx".into(),
-            kind: DomainMatchKind::Suffix,
-        };
+        let dp = DomainPattern { pattern: "voe.sx".into(), kind: DomainMatchKind::Suffix };
         assert!(dp.matches("voe.sx"));
         assert!(dp.matches("sub.voe.sx"));
         assert!(dp.matches("VOE.SX"));
@@ -779,10 +730,7 @@ mod tests {
 
     #[test]
     fn domain_pattern_regex_match() {
-        let dp = DomainPattern {
-            pattern: r"^voe\d*\.com$".into(),
-            kind: DomainMatchKind::Regex,
-        };
+        let dp = DomainPattern { pattern: r"^voe\d*\.com$".into(), kind: DomainMatchKind::Regex };
         assert!(dp.matches("voe.com"));
         assert!(dp.matches("voe123.com"));
         assert!(!dp.matches("voe.org"));
@@ -839,11 +787,8 @@ json_key = { key = "mp4", priority = 1, append_rq_token = false }
 
     #[test]
     fn provider_config_validate_missing_domains() {
-        let config = ProviderConfig {
-            name: "Test".into(),
-            domain_patterns: vec![],
-            ..Default::default()
-        };
+        let config =
+            ProviderConfig { name: "Test".into(), domain_patterns: vec![], ..Default::default() };
         let err = config.validate("test.toml");
         assert!(err.is_err());
         match err.unwrap_err() {

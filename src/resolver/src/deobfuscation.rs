@@ -199,9 +199,7 @@ impl DeobfuscationStep for CleanBase64Step {
             cleaned
         };
         // Validate it decodes
-        base64::engine::general_purpose::STANDARD
-            .decode(&padded)
-            .ok()?;
+        base64::engine::general_purpose::STANDARD.decode(&padded).ok()?;
         Some(padded)
     }
 
@@ -257,14 +255,14 @@ impl DeobfuscationPipeline {
                 Some(output) => {
                     tracing::trace!(step = step.name(), "deobfuscation step succeeded");
                     current = output;
-                }
+                },
                 None => {
                     tracing::debug!(
                         step = step.name(),
                         "deobfuscation step failed — pipeline aborted"
                     );
                     return None;
-                }
+                },
             }
         }
         Some(current)
@@ -300,9 +298,9 @@ pub fn build_pipeline(step_defs: &[StepDef]) -> DeobfuscationPipeline {
 pub fn build_step(def: &StepDef) -> Option<Box<dyn DeobfuscationStep>> {
     match def {
         StepDef::Rot13 => Some(Box::new(Rot13Step)),
-        StepDef::StripMarkers { patterns } => Some(Box::new(StripMarkersStep {
-            patterns: patterns.clone(),
-        })),
+        StepDef::StripMarkers { patterns } => {
+            Some(Box::new(StripMarkersStep { patterns: patterns.clone() }))
+        },
         StepDef::Base64Decode => Some(Box::new(Base64DecodeStep)),
         StepDef::CharShift { amount } => Some(Box::new(CharShiftStep { amount: *amount })),
         StepDef::Reverse => Some(Box::new(ReverseStep)),
@@ -310,7 +308,7 @@ pub fn build_step(def: &StepDef) -> Option<Box<dyn DeobfuscationStep>> {
         StepDef::RegexExtract { pattern } => {
             let re = Regex::new(pattern).ok()?;
             Some(Box::new(RegexExtractStep { pattern: re }))
-        }
+        },
         StepDef::CleanBase64 => Some(Box::new(CleanBase64Step)),
         StepDef::StripUnderscores => Some(Box::new(StripUnderscoresStep)),
     }
@@ -332,16 +330,13 @@ pub fn extract_content(html: &str, extraction: &ContentExtraction) -> Option<Str
                 }
             }
             None
-        }
+        },
         ContentExtraction::JsVariable { pattern } => {
             let re = Regex::new(pattern).ok()?;
             let cap = re.captures(html)?;
             cap.get(1).map(|m| m.as_str().to_owned())
-        }
-        ContentExtraction::CssSelector {
-            selector,
-            attribute,
-        } => {
+        },
+        ContentExtraction::CssSelector { selector, attribute } => {
             let document = Html::parse_document(html);
             let sel = Selector::parse(selector).ok()?;
             for element in document.select(&sel) {
@@ -360,18 +355,18 @@ pub fn extract_content(html: &str, extraction: &ContentExtraction) -> Option<Str
                 }
             }
             None
-        }
+        },
         ContentExtraction::RegexMatch { pattern } => {
             let re = Regex::new(pattern).ok()?;
             let cap = re.captures(html)?;
             cap.get(1).map(|m| m.as_str().to_owned())
-        }
+        },
         ContentExtraction::JsRedirectThen { inner } => {
             // JS redirect is handled at the resolver level, not here.
             // This extraction method is a marker for the resolver to
             // follow the redirect first, then apply the inner extraction.
             extract_content(html, inner)
-        }
+        },
     }
 }
 
@@ -399,11 +394,8 @@ pub fn extract_url_from_deobfuscated(
     let obj = parsed.as_object()?;
 
     // Extract common fields
-    let request_token = obj
-        .get("request")
-        .and_then(|v| v.as_str())
-        .filter(|s| !s.is_empty())
-        .map(|s| s.to_owned());
+    let request_token =
+        obj.get("request").and_then(|v| v.as_str()).filter(|s| !s.is_empty()).map(|s| s.to_owned());
 
     let file_code = obj
         .get("file_code")
@@ -420,12 +412,7 @@ pub fn extract_url_from_deobfuscated(
 
     for (_, rule) in &sorted_rules {
         match rule {
-            UrlExtractionRule::JsonKey {
-                key,
-                append_rq_token,
-                prefer_mp4,
-                ..
-            } => {
+            UrlExtractionRule::JsonKey { key, append_rq_token, prefer_mp4, .. } => {
                 if let Some(value) = obj.get(key) {
                     if let Some(url) = extract_url_from_json_value(
                         value,
@@ -442,14 +429,10 @@ pub fn extract_url_from_deobfuscated(
                         } else {
                             url
                         };
-                        return Some(ExtractedUrl {
-                            url,
-                            request_token,
-                            file_code,
-                        });
+                        return Some(ExtractedUrl { url, request_token, file_code });
                     }
                 }
-            }
+            },
             UrlExtractionRule::RegexUrl { pattern, .. } => {
                 let text = deobfuscated;
                 if let Ok(re) = Regex::new(pattern) {
@@ -457,16 +440,12 @@ pub fn extract_url_from_deobfuscated(
                         if let Some(m) = cap.get(1) {
                             let url = m.as_str().to_owned();
                             if !is_bait_source(&url, bait_domains, bait_filenames) {
-                                return Some(ExtractedUrl {
-                                    url,
-                                    request_token,
-                                    file_code,
-                                });
+                                return Some(ExtractedUrl { url, request_token, file_code });
                             }
                         }
                     }
                 }
-            }
+            },
         }
     }
 
@@ -587,10 +566,7 @@ fn append_rq(url: &str, token: &str) -> String {
 /// Check if a URL is a bait/test video source.
 fn is_bait_source(source: &str, bait_domains: &[String], bait_filenames: &[String]) -> bool {
     let lower = source.to_lowercase();
-    if bait_filenames
-        .iter()
-        .any(|fn_| lower.contains(&fn_.to_lowercase()))
-    {
+    if bait_filenames.iter().any(|fn_| lower.contains(&fn_.to_lowercase())) {
         return true;
     }
     if let Ok(parsed) = url::Url::parse(source) {
@@ -665,38 +641,26 @@ mod tests {
     fn json_parse_step() {
         let step = JsonParseStep { key: "url".into() };
         let input = r#"{"url": "https://cdn.example.com/video.mp4"}"#;
-        assert_eq!(
-            step.apply(input),
-            Some("https://cdn.example.com/video.mp4".into())
-        );
+        assert_eq!(step.apply(input), Some("https://cdn.example.com/video.mp4".into()));
     }
 
     #[test]
     fn json_parse_step_nested() {
-        let step = JsonParseStep {
-            key: "data.url".into(),
-        };
+        let step = JsonParseStep { key: "data.url".into() };
         let input = r#"{"data": {"url": "https://cdn.example.com/video.mp4"}}"#;
-        assert_eq!(
-            step.apply(input),
-            Some("https://cdn.example.com/video.mp4".into())
-        );
+        assert_eq!(step.apply(input), Some("https://cdn.example.com/video.mp4".into()));
     }
 
     #[test]
     fn json_parse_step_missing_key() {
-        let step = JsonParseStep {
-            key: "missing".into(),
-        };
+        let step = JsonParseStep { key: "missing".into() };
         let input = r#"{"url": "https://cdn.example.com/video.mp4"}"#;
         assert!(step.apply(input).is_none());
     }
 
     #[test]
     fn regex_extract_step() {
-        let step = RegexExtractStep {
-            pattern: Regex::new(r#"MKGMa="(.*?)""#).unwrap(),
-        };
+        let step = RegexExtractStep { pattern: Regex::new(r#"MKGMa="(.*?)""#).unwrap() };
         let input = r#"MKGMa="abc123""#;
         assert_eq!(step.apply(input), Some("abc123".into()));
     }
@@ -713,10 +677,7 @@ mod tests {
     fn strip_underscores_step() {
         let step = StripUnderscoresStep;
         assert_eq!(step.apply("a_b_c"), Some("abc".into()));
-        assert_eq!(
-            step.apply("no_underscores_here"),
-            Some("nounderscoreshere".into())
-        );
+        assert_eq!(step.apply("no_underscores_here"), Some("nounderscoreshere".into()));
     }
 
     #[test]
@@ -743,9 +704,7 @@ mod tests {
     fn build_pipeline_from_config() {
         let steps = vec![
             StepDef::Rot13,
-            StepDef::StripMarkers {
-                patterns: vec!["@$".into(), "^^".into()],
-            },
+            StepDef::StripMarkers { patterns: vec!["@$".into(), "^^".into()] },
             StepDef::Base64Decode,
             StepDef::CharShift { amount: 3 },
             StepDef::Reverse,
@@ -768,9 +727,7 @@ mod tests {
         let html = r#"<script>MKGMa="abc123"</script>"#;
         let result = extract_content(
             html,
-            &ContentExtraction::JsVariable {
-                pattern: r#"MKGMa="(.*?)""#.into(),
-            },
+            &ContentExtraction::JsVariable { pattern: r#"MKGMa="(.*?)""#.into() },
         );
         assert_eq!(result, Some("abc123".into()));
     }
@@ -780,9 +737,7 @@ mod tests {
         let html = r#"a168c = 'base64data'"#;
         let result = extract_content(
             html,
-            &ContentExtraction::RegexMatch {
-                pattern: r#"a168c\s*=\s*'([^']+)'"#.into(),
-            },
+            &ContentExtraction::RegexMatch { pattern: r#"a168c\s*=\s*'([^']+)'"#.into() },
         );
         assert_eq!(result, Some("base64data".into()));
     }
@@ -821,10 +776,7 @@ mod tests {
         let result = extract_url_from_deobfuscated(json, &rules, &[], &[]);
         assert!(result.is_some());
         let extracted = result.unwrap();
-        assert_eq!(
-            extracted.url,
-            "https://cdn.example.com/video.mp4?rq=TOKEN123"
-        );
+        assert_eq!(extracted.url, "https://cdn.example.com/video.mp4?rq=TOKEN123");
         assert_eq!(extracted.request_token, Some("TOKEN123".into()));
     }
 
@@ -850,10 +802,7 @@ mod tests {
             "https://cdn.example.com/video.mp4?t=abc&rq=TOKEN123"
         );
         assert_eq!(
-            append_rq(
-                "https://cdn.example.com/video.mp4?t=abc&rq=EXISTING",
-                "TOKEN123"
-            ),
+            append_rq("https://cdn.example.com/video.mp4?t=abc&rq=EXISTING", "TOKEN123"),
             "https://cdn.example.com/video.mp4?t=abc&rq=EXISTING"
         );
         assert_eq!(
@@ -864,5 +813,170 @@ mod tests {
             append_rq("https://cdn.example.com/video.mp4", ""),
             "https://cdn.example.com/video.mp4"
         );
+    }
+
+    // ═══════════════════════════════════════════════════════════════════
+    // Sprint 2 — S2.1: Deobfuscation Pipeline Edge-Case Unit Tests
+    // ═══════════════════════════════════════════════════════════════════
+
+    #[test]
+    fn pipeline_empty_input_returns_none() {
+        // Pipeline with Rot13 → Reverse on empty string returns Some(""),
+        // but a pipeline with Base64Decode on empty input should work.
+        let mut pipeline = DeobfuscationPipeline::new();
+        pipeline.add_step(Box::new(ReverseStep));
+        assert_eq!(pipeline.run(""), Some("".into()));
+    }
+
+    #[test]
+    fn pipeline_with_invalid_base64_mid_chain_returns_none() {
+        // If a step in the middle of the pipeline fails (Base64 decode
+        // on garbage input), the entire pipeline should return None.
+        let mut pipeline = DeobfuscationPipeline::new();
+        pipeline.add_step(Box::new(ReverseStep));
+        pipeline.add_step(Box::new(Base64DecodeStep));
+        pipeline.add_step(Box::new(ReverseStep));
+
+        // "not_base64!!!" reversed → "!!!46esab_ton" → base64 decode fails
+        assert!(pipeline.run("not_base64!!!").is_none());
+    }
+
+    #[test]
+    fn pipeline_full_method8_roundtrip() {
+        // Build the exact Method 8 pipeline from the Voe provider config
+        // and verify it decodes a known obfuscated blob.
+        let steps = vec![
+            StepDef::Rot13,
+            StepDef::StripMarkers {
+                patterns: vec![
+                    "@$".into(),
+                    "^^".into(),
+                    "~@".into(),
+                    "%?".into(),
+                    "*~".into(),
+                    "!!".into(),
+                    "#&".into(),
+                ],
+            },
+            StepDef::Base64Decode,
+            StepDef::CharShift { amount: 3 },
+            StepDef::Reverse,
+            StepDef::Base64Decode,
+        ];
+
+        let pipeline = build_pipeline(&steps);
+        assert_eq!(pipeline.len(), 6);
+
+        // Create test data: encode a known JSON through the reverse pipeline
+        let json = r#"{"mp4":"https://cdn.example.com/roundtrip.mp4"}"#;
+        let b64_1 = base64::engine::general_purpose::STANDARD.encode(json.as_bytes());
+        let reversed: String = b64_1.chars().rev().collect();
+        let shifted: String = reversed
+            .chars()
+            .map(|c| {
+                let code = c as u32;
+                char::from_u32(code + 3).unwrap_or(c)
+            })
+            .collect();
+        let b64_2 = base64::engine::general_purpose::STANDARD.encode(shifted.as_bytes());
+        let with_markers = format!("{}@${}", &b64_2[..b64_2.len() / 2], &b64_2[b64_2.len() / 2..]);
+        let rot13ed: String = with_markers
+            .chars()
+            .map(|ch| {
+                if ch.is_ascii_uppercase() {
+                    let o = ch as u32;
+                    char::from_u32(((o - 65 + 13) % 26) + 65).unwrap_or(ch)
+                } else if ch.is_ascii_lowercase() {
+                    let o = ch as u32;
+                    char::from_u32(((o - 97 + 13) % 26) + 97).unwrap_or(ch)
+                } else {
+                    ch
+                }
+            })
+            .collect();
+
+        let result = pipeline.run(&rot13ed);
+        assert!(result.is_some(), "Method 8 pipeline should decode the roundtrip blob");
+        let decoded = result.unwrap();
+        assert!(
+            decoded.contains("roundtrip.mp4"),
+            "Decoded should contain roundtrip.mp4, got: {}",
+            decoded
+        );
+    }
+
+    #[test]
+    fn char_shift_step_zero_amount() {
+        // Shift by 0 should be a no-op.
+        let step = CharShiftStep { amount: 0 };
+        assert_eq!(step.apply("hello"), Some("hello".into()));
+    }
+
+    #[test]
+    fn char_shift_step_large_amount() {
+        // Shift by 100 should push chars into high Unicode range.
+        let step = CharShiftStep { amount: 100 };
+        let result = step.apply("a").unwrap();
+        // 'a' = 97, 97 - 100 wraps: code < shift, so original char returned
+        assert_eq!(result, "a");
+    }
+
+    #[test]
+    fn strip_markers_step_no_markers_present() {
+        let step = StripMarkersStep { patterns: vec!["@$".into(), "^^".into()] };
+        assert_eq!(step.apply("hello world"), Some("hello world".into()));
+    }
+
+    #[test]
+    fn strip_markers_step_consecutive_markers() {
+        let step = StripMarkersStep { patterns: vec!["@$".into(), "^^".into()] };
+        assert_eq!(step.apply("a@$^^b"), Some("ab".into()));
+    }
+
+    #[test]
+    fn extract_content_script_json_tag_multiple_tags() {
+        // HTML with multiple script tags — should extract the first
+        // application/json one.
+        let html = r#"<html>
+            <script type="text/javascript">var x = 1;</script>
+            <script type="application/json">["first_blob"]</script>
+            <script type="application/json">["second_blob"]</script>
+        </html>"#;
+        let result = extract_content(html, &ContentExtraction::ScriptJsonTag);
+        assert!(result.is_some());
+        assert!(result.unwrap().contains("first_blob"));
+    }
+
+    #[test]
+    fn extract_url_from_deobfuscated_all_hls_returns_none_with_mp4_preference() {
+        // When all URLs are HLS and prefer_mp4 is true, should return None
+        // because we can't extract an MP4 URL from HLS-only data.
+        let json = r#"{"source": "https://cdn.example.com/stream.m3u8"}"#;
+        let rules = vec![UrlExtractionRule::JsonKey {
+            key: "mp4".into(),
+            priority: 1,
+            append_rq_token: false,
+            prefer_mp4: true,
+        }];
+        let result = extract_url_from_deobfuscated(json, &rules, &[], &[]);
+        // mp4 key doesn't exist → None
+        assert!(result.is_none());
+    }
+
+    #[test]
+    fn extract_url_from_deobfuscated_quality_object_with_mp4_preference() {
+        // "mp4" key points to a quality-level object with multiple URLs.
+        let json = r#"{"mp4": {"720": "https://cdn.example.com/720.mp4", "1080": "https://cdn.example.com/1080.mp4"}}"#;
+        let rules = vec![UrlExtractionRule::JsonKey {
+            key: "mp4".into(),
+            priority: 1,
+            append_rq_token: false,
+            prefer_mp4: true,
+        }];
+        let result = extract_url_from_deobfuscated(json, &rules, &[], &[]);
+        assert!(result.is_some());
+        // Should return one of the quality URLs
+        let url = &result.unwrap().url;
+        assert!(url.contains(".mp4"), "Should return an MP4 URL, got: {}", url);
     }
 }

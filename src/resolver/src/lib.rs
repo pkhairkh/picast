@@ -31,9 +31,9 @@ pub mod ytdlp;
 pub use classifier::UrlCategory;
 
 use async_trait::async_trait;
+use bogdan_session::interfaces::{ResolveInfo, ResolverTrait};
 use cache::ResolveCache;
 use classifier::classify_url;
-use bogdan_session::interfaces::{ResolveInfo, ResolverTrait};
 use serde::{Deserialize, Serialize};
 use std::sync::Arc;
 use thiserror::Error;
@@ -107,6 +107,14 @@ pub struct ResolveResult {
     /// were set during the page fetch to validate the media download.
     #[serde(default)]
     pub cookies: Vec<String>,
+    /// How this URL was resolved: "ytdlp", "custom", or "direct".
+    /// Used for cache tracking and diagnostics.
+    #[serde(default = "default_resolver_type")]
+    pub resolver_type: String,
+}
+
+fn default_resolver_type() -> String {
+    "ytdlp".into()
 }
 
 // ── MIME type helper ─────────────────────────────────────────────────
@@ -174,7 +182,10 @@ impl Resolver {
     }
 
     /// Create a new resolver with a provider registry loaded from a directory.
-    pub fn with_providers(tor: Arc<bogdan_tor::TorManager>, providers_dir: &std::path::Path) -> Self {
+    pub fn with_providers(
+        tor: Arc<bogdan_tor::TorManager>,
+        providers_dir: &std::path::Path,
+    ) -> Self {
         let providers = provider::ProviderRegistry::load_from_dir_or_empty(providers_dir);
         Self { tor, cache: Arc::new(Mutex::new(ResolveCache::new())), providers }
     }
@@ -204,7 +215,11 @@ impl Resolver {
         ttl: std::time::Duration,
     ) -> Self {
         let providers = provider::ProviderRegistry::new();
-        Self { tor, cache: Arc::new(Mutex::new(ResolveCache::with_path_and_ttl(Some(path), ttl))), providers }
+        Self {
+            tor,
+            cache: Arc::new(Mutex::new(ResolveCache::with_path_and_ttl(Some(path), ttl))),
+            providers,
+        }
     }
 
     /// Create a new resolver with a persistent cache, custom TTL, and
@@ -270,6 +285,7 @@ impl Resolver {
                 height: None,
                 subtitle_tracks: vec![],
                 cookies: vec![],
+                resolver_type: "direct".into(),
             },
             UrlCategory::HlsManifest => ResolveResult {
                 source_url: url.to_owned(),
@@ -288,6 +304,7 @@ impl Resolver {
                 height: None,
                 subtitle_tracks: vec![],
                 cookies: vec![],
+                resolver_type: "direct".into(),
             },
             UrlCategory::DashManifest => ResolveResult {
                 source_url: url.to_owned(),
@@ -306,6 +323,7 @@ impl Resolver {
                 height: None,
                 subtitle_tracks: vec![],
                 cookies: vec![],
+                resolver_type: "direct".into(),
             },
             UrlCategory::Onion => {
                 // Onion URLs are always resolved through Tor via yt-dlp.
@@ -334,7 +352,8 @@ impl Resolver {
                     };
 
                     // ── Provider registry lookup ──────────────────────
-                    if let Some((provider_id, config)) = self.providers.find_provider_for_host(host) {
+                    if let Some((provider_id, config)) = self.providers.find_provider_for_host(host)
+                    {
                         tracing::info!(
                             url = url,
                             provider = %provider_id,
@@ -348,7 +367,8 @@ impl Resolver {
                         match provider_id {
                             "doodstream" => {
                                 let mut result =
-                                    custom::resolve_doodstream(url, socks5_proxy.as_deref()).await?;
+                                    custom::resolve_doodstream(url, socks5_proxy.as_deref())
+                                        .await?;
                                 result.category = UrlCategory::WebPage;
                                 result.used_tor = socks5_proxy.is_some();
                                 {
@@ -545,6 +565,7 @@ impl Resolver {
             height: None,
             subtitle_tracks: vec![],
             cookies: vec![],
+            resolver_type: "direct".into(),
         };
 
         // Cache the result.
@@ -833,6 +854,7 @@ mod tests {
             height: None,
             subtitle_tracks: vec![],
             cookies: vec![],
+            resolver_type: "direct".into(),
         };
         let json = serde_json::to_string(&result).unwrap();
         let parsed: ResolveResult = serde_json::from_str(&json).unwrap();

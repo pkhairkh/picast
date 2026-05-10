@@ -6,7 +6,7 @@ explicit acceptance criteria, and estimated effort.**
 
 **Status legend:** `[ ]` not started · `[~]` in progress · `[x]` done
 
-**Last verified:** 2026-05-10 — `cargo check --workspace` · `cargo test --workspace` (344 tests) · `cargo clippy --workspace -- -D warnings` · `cargo fmt --check`
+**Last verified:** 2026-05-10 — `cargo check --workspace` · `cargo test --workspace` (328 resolver tests + others) · `cargo clippy --workspace -- -D warnings`
 
 ---
 
@@ -198,11 +198,12 @@ VOE/DoodStream-specific hardcoded logic from the resolver core.
 
 ---
 
-## Sprint 2 — Resolver Testing & CDN Resilience
+## Sprint 2 — Resolver Testing & CDN Resilience ✅
 
 **Duration:** 2 weeks (10 working days)
 **Goal:** Comprehensive testing for custom resolvers, CDN preflight/retry
 logic, and error handling hardening.
+**Status:** **COMPLETE** — committed, pushed to main.
 
 **Definition of Done (DoD):**
 - Every deobfuscation step has unit tests with known input/output pairs

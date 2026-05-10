@@ -141,6 +141,14 @@ pub enum PlaybackError {
         /// The actual Tor exit IP address.
         exit_ip: String,
     },
+
+    /// CDN 403 Forbidden after exhausting all preflight retries.
+    /// The CDN rejects the request despite multiple re-resolve attempts.
+    #[error("CDN 403 Forbidden — all {attempts} preflight retries failed")]
+    CdnForbidden {
+        /// Number of preflight retry attempts made.
+        attempts: u32,
+    },
 }
 
 // ── Pipeline Config ──────────────────────────────────────────────────

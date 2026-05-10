@@ -25,3 +25,4 @@ toml = "0.8"
 [dev-dependencies]
 tokio = { workspace = true, features = ["rt-multi-thread", "macros", "time", "process"] }
 serde_json = { workspace = true }
+mockito = "1"

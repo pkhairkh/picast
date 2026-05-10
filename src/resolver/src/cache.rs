@@ -88,7 +88,8 @@ impl ResolveCache {
                 width          INTEGER,
                 height         INTEGER,
                 subtitle_tracks TEXT,
-                resolved_at    INTEGER NOT NULL
+                resolved_at    INTEGER NOT NULL,
+                resolver_type  TEXT NOT NULL DEFAULT 'ytdlp'
             );",
         )
         .expect("failed to create cache table");
@@ -106,6 +107,18 @@ impl ResolveCache {
                 tracing::warn!(error = %msg, "cache migration: unexpected error adding audio_url column");
             }
             // "duplicate column" is expected when the column already exists — no action needed.
+        }
+
+        // Schema migration: add resolver_type column if it doesn't exist.
+        // Values: "ytdlp" (default), "custom", "direct".
+        if let Err(e) = conn.execute(
+            "ALTER TABLE resolved_urls ADD COLUMN resolver_type TEXT NOT NULL DEFAULT 'ytdlp'",
+            [],
+        ) {
+            let msg = e.to_string();
+            if !msg.contains("duplicate column") {
+                tracing::warn!(error = %msg, "cache migration: unexpected error adding resolver_type column");
+            }
         }
 
         Self { conn: Mutex::new(conn), ttl }
@@ -135,7 +148,7 @@ impl ResolveCache {
             .prepare(
                 "SELECT source_url, direct_url, audio_url, category, mime_type, content_length,
                     used_tor, title, duration, thumbnail, vcodec, acodec,
-                    width, height, subtitle_tracks
+                    width, height, subtitle_tracks, resolver_type
              FROM resolved_urls
              WHERE source_url = ?
                AND resolved_at > ?",
@@ -236,7 +249,7 @@ impl ResolveCache {
         let mut stmt = match conn.prepare(
             "SELECT source_url, direct_url, audio_url, category, mime_type, content_length,
                 used_tor, title, duration, thumbnail, vcodec, acodec,
-                width, height, subtitle_tracks
+                width, height, subtitle_tracks, resolver_type
              FROM resolved_urls
              WHERE source_url = ?
                AND resolved_at > ?",
@@ -280,8 +293,8 @@ impl ResolveCache {
             "INSERT OR REPLACE INTO resolved_urls
                 (source_url, direct_url, audio_url, category, mime_type, content_length,
                  used_tor, title, duration, thumbnail, vcodec, acodec,
-                 width, height, subtitle_tracks, resolved_at)
-             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                 width, height, subtitle_tracks, resolved_at, resolver_type)
+             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
             params![
                 result.source_url,
                 result.direct_url,
@@ -299,6 +312,7 @@ impl ResolveCache {
                 height,
                 subtitle_json,
                 now,
+                result.resolver_type,
             ],
         ) {
             tracing::warn!(error = %e, "failed to insert cache entry");
@@ -326,6 +340,9 @@ fn row_to_resolve_result(row: &rusqlite::Row<'_>) -> ResolveResult {
     let width: Option<u32> = row.get::<_, Option<i32>>(12).unwrap_or(None).map(|v| v as u32);
     let height: Option<u32> = row.get::<_, Option<i32>>(13).unwrap_or(None).map(|v| v as u32);
 
+    // resolver_type column — index 15. Falls back to "ytdlp" for old rows.
+    let resolver_type: String = row.get(15).unwrap_or_else(|_| "ytdlp".into());
+
     ResolveResult {
         source_url: row.get(0).unwrap_or_default(),
         direct_url: row.get(1).unwrap_or_default(),
@@ -343,6 +360,7 @@ fn row_to_resolve_result(row: &rusqlite::Row<'_>) -> ResolveResult {
         height,
         subtitle_tracks,
         cookies: vec![],
+        resolver_type,
     }
 }
 
@@ -375,6 +393,7 @@ mod tests {
             height: Some(1080),
             subtitle_tracks: vec!["en".into(), "es".into()],
             cookies: vec![],
+            resolver_type: "ytdlp".into(),
         }
     }
 
@@ -639,6 +658,7 @@ mod tests {
             height: None,
             subtitle_tracks: vec![],
             cookies: vec![],
+            resolver_type: "direct".into(),
         };
         cache.insert(url, result);
 
@@ -708,5 +728,152 @@ mod tests {
         }
 
         assert_eq!(cache.len(), 10);
+    }
+
+    // ═══════════════════════════════════════════════════════════════════
+    // Sprint 2 — S2.5: Cache resolver_type Integration Tests
+    // ═══════════════════════════════════════════════════════════════════
+
+    #[test]
+    fn cache_resolver_type_ytdlp_default() {
+        let cache = ResolveCache::new();
+        let url = "https://www.youtube.com/watch?v=abc";
+        let result = test_result(url);
+        // test_result() creates entries with resolver_type "ytdlp"
+        cache.insert(url, result);
+        let cached = cache.get(url).unwrap();
+        assert_eq!(cached.resolver_type, "ytdlp");
+    }
+
+    #[test]
+    fn cache_resolver_type_custom() {
+        let cache = ResolveCache::new();
+        let url = "https://voe.sx/abc123";
+        let mut result = test_result(url);
+        result.resolver_type = "custom".into();
+        cache.insert(url, result);
+        let cached = cache.get(url).unwrap();
+        assert_eq!(cached.resolver_type, "custom");
+    }
+
+    #[test]
+    fn cache_resolver_type_direct() {
+        let cache = ResolveCache::new();
+        let url = "https://cdn.example.com/video.mp4";
+        let mut result = test_result(url);
+        result.resolver_type = "direct".into();
+        cache.insert(url, result);
+        let cached = cache.get(url).unwrap();
+        assert_eq!(cached.resolver_type, "direct");
+    }
+
+    #[test]
+    fn cache_resolver_type_roundtrip_with_custom_cookies() {
+        // Verify that custom resolver results with cookies are stored
+        // and retrieved correctly from the cache, including resolver_type.
+        let cache = ResolveCache::new();
+        let url = "https://voe.sx/xyz789";
+        let mut result = test_result(url);
+        result.resolver_type = "custom".into();
+        result.cookies = vec!["session=abc123".into(), "token=xyz789".into()];
+        result.category = UrlCategory::WebPage;
+        result.used_tor = true;
+        cache.insert(url, result);
+
+        let cached = cache.get(url).unwrap();
+        assert_eq!(cached.resolver_type, "custom");
+        assert_eq!(cached.category, UrlCategory::WebPage);
+        assert!(cached.used_tor);
+        // Note: cookies are not stored in the SQLite cache (they're
+        // transient per-session), so we don't assert on them here.
+        // This is by design — CDN cookies expire quickly and should
+        // not be served from cache.
+    }
+
+    #[test]
+    fn cache_resolver_type_overwrite_changes_type() {
+        // If a URL is first resolved by yt-dlp (cached as "ytdlp") and
+        // then re-resolved by the custom resolver, the cache entry should
+        // be updated to "custom".
+        let cache = ResolveCache::new();
+        let url = "https://voe.sx/abc";
+
+        let mut result1 = test_result(url);
+        result1.resolver_type = "ytdlp".into();
+        result1.direct_url = "https://cdn.example.com/ytdlp-video.mp4".into();
+        cache.insert(url, result1);
+        assert_eq!(cache.get(url).unwrap().resolver_type, "ytdlp");
+
+        let mut result2 = test_result(url);
+        result2.resolver_type = "custom".into();
+        result2.direct_url = "https://cdn.example.com/custom-video.mp4".into();
+        cache.insert(url, result2);
+        let cached = cache.get(url).unwrap();
+        assert_eq!(cached.resolver_type, "custom");
+        assert_eq!(cached.direct_url, "https://cdn.example.com/custom-video.mp4");
+    }
+
+    #[test]
+    fn cache_multiple_resolver_types_coexist() {
+        // Multiple URLs with different resolver types should coexist in cache.
+        let cache = ResolveCache::new();
+
+        let mut ytdlp_result = test_result("https://youtube.com/watch?v=1");
+        ytdlp_result.resolver_type = "ytdlp".into();
+        cache.insert("https://youtube.com/watch?v=1", ytdlp_result);
+
+        let mut custom_result = test_result("https://voe.sx/abc");
+        custom_result.resolver_type = "custom".into();
+        cache.insert("https://voe.sx/abc", custom_result);
+
+        let mut direct_result = test_result("https://cdn.example.com/video.mp4");
+        direct_result.resolver_type = "direct".into();
+        cache.insert("https://cdn.example.com/video.mp4", direct_result);
+
+        assert_eq!(cache.len(), 3);
+        assert_eq!(cache.get("https://youtube.com/watch?v=1").unwrap().resolver_type, "ytdlp");
+        assert_eq!(cache.get("https://voe.sx/abc").unwrap().resolver_type, "custom");
+        assert_eq!(cache.get("https://cdn.example.com/video.mp4").unwrap().resolver_type, "direct");
+    }
+
+    #[test]
+    fn cache_get_or_insert_with_custom_resolver_type() {
+        let cache = ResolveCache::new();
+        let url = "https://voe.sx/new-video";
+
+        let result = cache.get_or_insert_with(url, || {
+            let mut r = test_result(url);
+            r.resolver_type = "custom".into();
+            r
+        });
+
+        assert!(result.is_some());
+        assert_eq!(result.unwrap().resolver_type, "custom");
+        // Second call should return cached value
+        let cached = cache.get(url).unwrap();
+        assert_eq!(cached.resolver_type, "custom");
+    }
+
+    #[test]
+    fn cache_delete_and_re_resolve_different_type() {
+        // Simulate CDN 403 re-resolution: delete cached entry, then
+        // re-insert with a different resolver_type.
+        let cache = ResolveCache::new();
+        let url = "https://voe.sx/abc";
+
+        let mut result1 = test_result(url);
+        result1.resolver_type = "ytdlp".into();
+        cache.insert(url, result1);
+        assert_eq!(cache.get(url).unwrap().resolver_type, "ytdlp");
+
+        // CDN 403 → delete cache entry
+        cache.delete(url);
+        assert!(cache.get(url).is_none());
+
+        // Re-resolve with custom resolver
+        let mut result2 = test_result(url);
+        result2.resolver_type = "custom".into();
+        cache.insert(url, result2);
+        assert_eq!(cache.get(url).unwrap().resolver_type, "custom");
     }
 }

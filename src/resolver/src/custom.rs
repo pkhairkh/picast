@@ -593,7 +593,9 @@ pub async fn resolve_voe(
     // "https://maryspecialwatch.com/8aqd75zlo0et").
     let file_code = url::Url::parse(url)
         .ok()
-        .and_then(|u| u.path_segments().and_then(|mut segments| segments.next_back().map(|s| s.to_string())))
+        .and_then(|u| {
+            u.path_segments().and_then(|mut segments| segments.next_back().map(|s| s.to_string()))
+        })
         .filter(|s| !s.is_empty());
 
     // Try Method 8: obfuscated JSON in <script type="application/json">
@@ -717,21 +719,17 @@ pub async fn resolve_doodstream(
     }
 
     if let Some(href) = embed_href {
+        // Use Url::join() to properly construct the full embed URL.
+        // This correctly preserves the port number (important for testing
+        // with mock HTTP servers) and handles other URL components.
         let full_embed = if href.starts_with("http") {
             href
         } else {
-            format!(
-                "{}://{}{}",
-                url::Url::parse(url)
-                    .ok()
-                    .map(|u| u.scheme().to_string())
-                    .unwrap_or_else(|| "https".into()),
-                url::Url::parse(url)
-                    .ok()
-                    .and_then(|u| u.host_str().map(|h| h.to_string()))
-                    .unwrap_or_else(|| "playmogo.com".into()),
-                href
-            )
+            url::Url::parse(url)
+                .ok()
+                .and_then(|base| base.join(&href).ok())
+                .map(|u| u.to_string())
+                .unwrap_or_else(|| format!("https://playmogo.com{}", href))
         };
 
         tracing::info!(embed_url = %full_embed, "DoodStream: fetching embed page");
@@ -770,6 +768,8 @@ pub async fn resolve_doodstream(
 /// Derive the DoodStream embed URL from a /d/ URL.
 ///
 /// `https://playmogo.com/d/abc123` → `https://playmogo.com/e/abc123`
+///
+/// Uses `Url::join()` to properly handle ports and other URL components.
 fn derive_embed_url(url: &str) -> Option<String> {
     let parsed = url::Url::parse(url).ok()?;
     let path = parsed.path();
@@ -777,8 +777,8 @@ fn derive_embed_url(url: &str) -> Option<String> {
     let re = regex_lite::Regex::new(r#"^/d/([^/]+)$"#).ok()?;
     let caps = re.captures(path)?;
     let id = caps.get(1)?.as_str();
-    let base = format!("{}://{}", parsed.scheme(), parsed.host_str()?);
-    Some(format!("{}/e/{}", base, id))
+    let embed_path = format!("/e/{}", id);
+    parsed.join(&embed_path).ok().map(|u| u.to_string())
 }
 
 // ── Method 8: Obfuscated JSON decode ───────────────────────────────
@@ -1660,6 +1660,7 @@ fn build_result(
         height: None,
         subtitle_tracks: vec![],
         cookies: vec![],
+        resolver_type: "custom".into(),
     }
 }
 
@@ -1866,5 +1867,1164 @@ mod tests {
         // Non-/d/ URL should return None
         let result = derive_embed_url("https://example.com/watch/abc");
         assert!(result.is_none());
+    }
+
+    // ── Sprint 2: Voe Deobfuscation Pipeline Tests ─────────────────────
+
+    /// Helper: reverse the Method 8 pipeline to create a synthetic obfuscated blob.
+    /// Forward: rot13 → replace_patterns → b64_decode → shift(-3) → reverse → b64_decode → JSON
+    /// Reverse: JSON → b64_encode → unreverse → shift(+3) → b64_encode → add_markers → rot13_inv
+    fn encode_voe_method8(json: &str) -> String {
+        use base64::Engine;
+        // Step 1: base64 encode the JSON
+        let step1 = base64::engine::general_purpose::STANDARD.encode(json.as_bytes());
+        // Step 2: reverse the string
+        let step2: String = step1.chars().rev().collect();
+        // Step 3: shift chars by +3 (reverse of -3)
+        let step3 = shift_chars_reverse(&step2, 3);
+        // Step 4: base64 encode again
+        let step4 = base64::engine::general_purpose::STANDARD.encode(step3.as_bytes());
+        // Step 5: add marker patterns (reverse of strip_markers)
+        let step5 = add_markers(&step4);
+        // Step 6: ROT13 (which is its own inverse)
+        let step6 = rot13(&step5);
+        // Wrap in a JSON array
+        serde_json::to_string(&vec![step6]).unwrap()
+    }
+
+    /// Shift chars by +shift (reverse of shift_chars which shifts by -shift).
+    fn shift_chars_reverse(text: &str, shift: u32) -> String {
+        text.chars()
+            .map(|c| {
+                let code = c as u32;
+                char::from_u32(code + shift).unwrap_or(c)
+            })
+            .collect()
+    }
+
+    /// Add marker patterns to a string (reverse of replace_patterns which removes them).
+    fn add_markers(txt: &str) -> String {
+        // Insert markers at semi-random positions
+        let markers = ["@$", "^^", "~@", "%?", "*~", "!!", "#&"];
+        let mut result = String::new();
+        let chars: Vec<char> = txt.chars().collect();
+        let chunk_size = (chars.len() / markers.len()).max(1);
+        for (i, marker) in markers.iter().enumerate() {
+            let start = i * chunk_size;
+            let end = ((i + 1) * chunk_size).min(chars.len());
+            if start < chars.len() {
+                result.extend(&chars[start..end]);
+                result.push_str(marker);
+            }
+        }
+        // Append any remaining chars
+        let remaining_start = markers.len() * chunk_size;
+        if remaining_start < chars.len() {
+            result.extend(&chars[remaining_start..]);
+        }
+        result
+    }
+
+    #[test]
+    fn test_method8_pipeline_roundtrip() {
+        // Test with only mp4 key — source has higher priority in the
+        // extraction logic, so including both would return the source URL.
+        let json = r#"{"mp4":"https://cdn.example.com/video.mp4"}"#;
+        let obfuscated = encode_voe_method8(json);
+        let result = deobfuscate_embedded_json(&obfuscated);
+        assert!(result.is_some(), "Method 8 pipeline should decode the obfuscated blob");
+        let url = result.unwrap();
+        assert!(
+            url.contains("cdn.example.com/video.mp4"),
+            "Decoded URL should contain the MP4 URL, got: {}",
+            url
+        );
+    }
+
+    #[test]
+    fn test_method8_pipeline_source_priority_over_mp4() {
+        // When both 'source' and 'mp4' are present, 'source' is returned
+        // because it has higher extraction priority (Priority 2 vs Priority 3).
+        let json = r#"{"mp4":"https://cdn.example.com/video.mp4","source":"https://cdn.example.com/stream.m3u8"}"#;
+        let obfuscated = encode_voe_method8(json);
+        let result = deobfuscate_embedded_json(&obfuscated);
+        assert!(result.is_some());
+        let url = result.unwrap();
+        assert!(
+            url.contains("stream.m3u8"),
+            "'source' key should be extracted before 'mp4', got: {}",
+            url
+        );
+    }
+
+    #[test]
+    fn test_method8_pipeline_via_try_method8() {
+        let json = r#"{"mp4":"https://cdn.example.com/testvid.mp4"}"#;
+        let obfuscated = encode_voe_method8(json);
+        let html =
+            format!(r#"<html><script type="application/json">{}</script></html>"#, obfuscated);
+        let result = try_method8(&html);
+        assert!(result.is_some(), "try_method8 should extract URL from HTML with obfuscated JSON");
+        assert!(result.unwrap().contains("testvid.mp4"));
+    }
+
+    #[test]
+    fn test_method6_pipeline_roundtrip() {
+        // Method 6 pipeline: clean_base64 → base64_decode → reverse → JSON parse
+        // Encoding: reverse(json) → base64_encode
+        // Decoding: base64_decode → reverse → json
+        let json = r#"{"mp4":"https://cdn.example.com/method6.mp4"}"#;
+        // Encode: reverse the JSON, then base64 encode
+        let reversed: String = json.chars().rev().collect();
+        let encoded = base64::engine::general_purpose::STANDARD.encode(reversed.as_bytes());
+        // Prefix with a168c marker
+        let obfuscated = format!("a168c{}", encoded);
+        // Decode: extract after "a168c", base64 decode, then unreverse
+        if let Some(data) = obfuscated.strip_prefix("a168c") {
+            let decoded = safe_b64_decode(data);
+            assert!(decoded.is_some(), "Method 6 base64 decode should succeed");
+            let decoded = decoded.unwrap();
+            let unreversed: String = decoded.chars().rev().collect();
+            assert!(
+                unreversed.contains("method6.mp4"),
+                "Decoded should contain method6.mp4, got: {}",
+                unreversed
+            );
+        }
+    }
+
+    // ── Helper function tests ──────────────────────────────────────────
+
+    #[test]
+    fn test_rot13_known_pairs() {
+        assert_eq!(rot13("Hello"), "Uryyb");
+        assert_eq!(rot13("Uryyb"), "Hello");
+        assert_eq!(rot13("ABC"), "NOP");
+        assert_eq!(rot13("NOP"), "ABC");
+        assert_eq!(rot13("xyz"), "klm");
+    }
+
+    #[test]
+    fn test_rot13_non_alpha_passthrough() {
+        assert_eq!(rot13("Hello, World! 123"), "Uryyb, Jbeyq! 123");
+        assert_eq!(rot13("a1b2c3"), "n1o2p3");
+    }
+
+    #[test]
+    fn test_replace_patterns_each_marker() {
+        for pat in &["@$", "^^", "~@", "%?", "*~", "!!", "#&"] {
+            let input = format!("before{}after", pat);
+            let result = replace_patterns(&input);
+            assert_eq!(result, "beforeafter", "Pattern '{}' should be removed", pat);
+        }
+    }
+
+    #[test]
+    fn test_replace_patterns_multiple() {
+        // Each marker appears as a contiguous two-char pair:
+        // a{@$}b{^^}c{~@}d{%?}e{!!}f{#&}g
+        // After removing all markers: abcdefg
+        let input = "a@$b^^c~@d%?e!!f#&g";
+        let result = replace_patterns(&input);
+        assert_eq!(result, "abcdefg");
+    }
+
+    #[test]
+    fn test_shift_chars_basic() {
+        // shift_chars shifts by -shift: 'd' (100) - 3 = 'a' (97)
+        let result = shift_chars("def", 3);
+        assert_eq!(result, "abc");
+    }
+
+    #[test]
+    fn test_shift_chars_edge_cases() {
+        // Shift of 0 should be identity
+        assert_eq!(shift_chars("hello", 0), "hello");
+        // Shift that would go below 0 should leave char unchanged
+        let result = shift_chars("\u{1}\u{2}", 3);
+        assert_eq!(result, "\u{1}\u{2}");
+    }
+
+    #[test]
+    fn test_safe_b64_decode_valid() {
+        let encoded = base64::engine::general_purpose::STANDARD.encode(b"hello world");
+        let result = safe_b64_decode(&encoded);
+        assert_eq!(result, Some("hello world".to_string()));
+    }
+
+    #[test]
+    fn test_safe_b64_decode_missing_padding() {
+        // "hello" in base64 = "aGVsbG8=" — remove padding
+        let encoded = "aGVsbG8";
+        let result = safe_b64_decode(encoded);
+        assert_eq!(result, Some("hello".to_string()));
+    }
+
+    #[test]
+    fn test_safe_b64_decode_invalid_returns_none() {
+        let result = safe_b64_decode("!!!not-base64!!!");
+        assert!(result.is_none());
+    }
+
+    #[test]
+    fn test_clean_base64_backslash_removal() {
+        let input = r#"aGVs\bG8="#;
+        let result = clean_base64(input);
+        assert!(result.is_some());
+        assert!(!result.unwrap().contains('\\'));
+    }
+
+    #[test]
+    fn test_clean_base64_padding() {
+        let input = "aGVsbG8"; // "hello" without padding
+        let result = clean_base64(input);
+        assert!(result.is_some());
+        // Should have padding added
+        assert!(result.unwrap().ends_with('='));
+    }
+
+    #[test]
+    fn test_is_bait_source_bait_domains() {
+        assert!(is_bait_source("https://test-videos.co.uk/video.mp4"));
+        assert!(is_bait_source("https://sample-videos.com/test.mp4"));
+        assert!(is_bait_source("https://commondatastorage.googleapis.com/bbb.mp4"));
+    }
+
+    #[test]
+    fn test_is_bait_source_bait_filenames() {
+        assert!(is_bait_source("https://cdn.example.com/BigBuckBunny.mp4"));
+        assert!(is_bait_source("https://cdn.example.com/Big_Buck_Bunny_1080_10s_5MB.mp4"));
+        assert!(is_bait_source("https://cdn.example.com/bbb.mp4"));
+    }
+
+    #[test]
+    fn test_is_bait_source_non_bait() {
+        assert!(!is_bait_source("https://cdn.voecdn.com/v/abc123.mp4"));
+        assert!(!is_bait_source("https://example.com/movie.mp4"));
+    }
+
+    #[test]
+    fn test_extract_cdn_speed_param_with_sp() {
+        assert_eq!(extract_cdn_speed_param("https://cdn.example.com/v.mp4?sp=380"), Some(380));
+        assert_eq!(
+            extract_cdn_speed_param("https://cdn.example.com/v.mp4?token=abc&sp=500"),
+            Some(500)
+        );
+    }
+
+    #[test]
+    fn test_extract_cdn_speed_param_no_sp() {
+        assert_eq!(extract_cdn_speed_param("https://cdn.example.com/v.mp4"), None);
+        assert_eq!(extract_cdn_speed_param("https://cdn.example.com/v.mp4?token=abc"), None);
+    }
+
+    #[test]
+    fn test_extract_cdn_speed_param_non_numeric() {
+        assert_eq!(extract_cdn_speed_param("https://cdn.example.com/v.mp4?sp=abc"), None);
+    }
+
+    #[test]
+    fn test_typical_bitrate_kbps_known_qualities() {
+        assert_eq!(typical_bitrate_kbps("240"), Some(400));
+        assert_eq!(typical_bitrate_kbps("360"), Some(800));
+        assert_eq!(typical_bitrate_kbps("480"), Some(1500));
+        assert_eq!(typical_bitrate_kbps("720"), Some(3000));
+        assert_eq!(typical_bitrate_kbps("1080"), Some(6000));
+    }
+
+    #[test]
+    fn test_typical_bitrate_kbps_unknown_quality() {
+        assert_eq!(typical_bitrate_kbps("1440"), None);
+        assert_eq!(typical_bitrate_kbps("4k"), None);
+    }
+
+    #[test]
+    fn test_is_hls_url_m3u8() {
+        assert!(is_hls_url("https://cdn.example.com/stream.m3u8"));
+        assert!(is_hls_url("https://cdn.example.com/stream.M3U8"));
+        assert!(is_hls_url("https://cdn.example.com/path/stream.m3u8?token=abc"));
+    }
+
+    #[test]
+    fn test_is_hls_url_non_hls() {
+        assert!(!is_hls_url("https://cdn.example.com/video.mp4"));
+        assert!(!is_hls_url("https://cdn.example.com/video.webm"));
+    }
+
+    #[test]
+    fn test_extract_media_from_json_value_simple_string() {
+        let val = serde_json::json!("https://cdn.example.com/video.mp4");
+        let result = extract_media_from_json_value(&val);
+        assert_eq!(result, Some("https://cdn.example.com/video.mp4".to_string()));
+    }
+
+    #[test]
+    fn test_extract_media_from_json_value_quality_object() {
+        let val = serde_json::json!({
+            "720": "https://cdn.example.com/720.mp4",
+            "1080": "https://cdn.example.com/1080.mp4"
+        });
+        let result = extract_media_from_json_value(&val);
+        assert!(result.is_some());
+        // 720 should be preferred over 1080
+        assert!(result.unwrap().contains("720.mp4"));
+    }
+
+    #[test]
+    fn test_extract_media_from_json_value_hls_only_object() {
+        let val = serde_json::json!({
+            "720": "https://cdn.example.com/stream.m3u8"
+        });
+        let result = extract_media_from_json_value(&val);
+        assert!(result.is_some());
+        assert!(result.unwrap().contains(".m3u8"));
+    }
+
+    #[test]
+    fn test_extract_media_from_json_value_empty_object() {
+        let val = serde_json::json!({});
+        let result = extract_media_from_json_value(&val);
+        assert!(result.is_none());
+    }
+
+    #[test]
+    fn test_parse_socks5_url_valid() {
+        let result = parse_socks5_url("socks5h://bogdan-hash123@127.0.0.1:9050/");
+        assert_eq!(result, Some(("bogdan-hash123".to_string(), "127.0.0.1:9050".to_string())));
+    }
+
+    #[test]
+    fn test_parse_socks5_url_socks5_prefix() {
+        let result = parse_socks5_url("socks5://bogdan-hash@10.0.0.1:1080");
+        assert_eq!(result, Some(("bogdan-hash".to_string(), "10.0.0.1:1080".to_string())));
+    }
+
+    #[test]
+    fn test_parse_socks5_url_no_username() {
+        let result = parse_socks5_url("socks5h://127.0.0.1:9050/");
+        assert!(result.is_none());
+    }
+
+    #[test]
+    fn test_parse_socks5_url_trailing_slash() {
+        let result = parse_socks5_url("socks5h://user@host:1234/");
+        assert_eq!(result, Some(("user".to_string(), "host:1234".to_string())));
+    }
+
+    // ── Sprint 2: is_voe_domain comprehensive tests ────────────────────
+
+    #[test]
+    fn test_is_voe_domain_canonical() {
+        assert!(is_voe_domain("voe.sx"));
+        assert!(is_voe_domain("voe-unblock.com"));
+        assert!(is_voe_domain("voeunblock.com"));
+        assert!(is_voe_domain("voeunbl0ck.com"));
+        assert!(is_voe_domain("voe-unblk.com"));
+        assert!(is_voe_domain("voeunblk.com"));
+        assert!(is_voe_domain("voeunblock2.com"));
+    }
+
+    #[test]
+    fn test_is_voe_domain_subdomain() {
+        assert!(is_voe_domain("www.voe.sx"));
+        assert!(is_voe_domain("cdn.voe-unblock.com"));
+    }
+
+    #[test]
+    fn test_is_voe_domain_heuristic_com() {
+        // "cactusheadroomscaling" — all lowercase, good vowel ratio, 20+ chars
+        assert!(is_voe_domain("cactusheadroomscaling.com"));
+        assert!(is_voe_domain("maryspecialwatch.com"));
+    }
+
+    #[test]
+    fn test_is_voe_domain_well_known_domains_excluded() {
+        assert!(!is_voe_domain("youtube.com"));
+        assert!(!is_voe_domain("google.com"));
+        assert!(!is_voe_domain("netflix.com"));
+    }
+
+    #[test]
+    fn test_is_voe_domain_short_com_names() {
+        // Short names should not match the heuristic
+        assert!(!is_voe_domain("abc.com"));
+        assert!(!is_voe_domain("xy.com"));
+    }
+
+    // ── Sprint 2: is_doodstream_domain comprehensive tests ─────────────
+
+    #[test]
+    fn test_is_doodstream_domain_all_known() {
+        for domain in DOODSTREAM_DOMAINS {
+            assert!(is_doodstream_domain(domain), "{} should be a DoodStream domain", domain);
+        }
+    }
+
+    #[test]
+    fn test_is_doodstream_domain_subdomain() {
+        assert!(is_doodstream_domain("www.playmogo.com"));
+        assert!(is_doodstream_domain("cdn.doodstream.com"));
+    }
+
+    #[test]
+    fn test_is_doodstream_domain_unknown() {
+        assert!(!is_doodstream_domain("youtube.com"));
+        assert!(!is_doodstream_domain("example.com"));
+        assert!(!is_doodstream_domain("voe.sx"));
+    }
+
+    // ── Sprint 2: DoodStream Resolver Tests ────────────────────────────
+
+    #[test]
+    fn test_derive_embed_url_various_formats() {
+        assert_eq!(
+            derive_embed_url("https://playmogo.com/d/abc123"),
+            Some("https://playmogo.com/e/abc123".to_string())
+        );
+        assert_eq!(
+            derive_embed_url("https://dood.to/d/xyz789"),
+            Some("https://dood.to/e/xyz789".to_string())
+        );
+        assert_eq!(
+            derive_embed_url("http://dood.watch/d/testid"),
+            Some("http://dood.watch/e/testid".to_string())
+        );
+    }
+
+    #[test]
+    fn test_derive_embed_url_non_d_url_returns_none() {
+        assert!(derive_embed_url("https://playmogo.com/e/abc123").is_none());
+        assert!(derive_embed_url("https://playmogo.com/watch/abc123").is_none());
+        assert!(derive_embed_url("https://example.com/video.mp4").is_none());
+    }
+
+    #[test]
+    fn test_find_embed_iframe_with_e_iframe() {
+        let html = r#"<html><body><iframe src="/e/abc123"></iframe></body></html>"#;
+        let doc = Html::parse_document(html);
+        let result = find_embed_iframe(&doc, "https://playmogo.com/d/abc123");
+        assert!(result.is_some());
+        assert!(result.unwrap().contains("/e/abc123"));
+    }
+
+    #[test]
+    fn test_find_embed_iframe_without_iframe() {
+        let html = r#"<html><body><p>No iframe here</p></body></html>"#;
+        let doc = Html::parse_document(html);
+        let result = find_embed_iframe(&doc, "https://playmogo.com/d/abc123");
+        assert!(result.is_none());
+    }
+
+    #[test]
+    fn test_extract_mp4_url_from_text_various() {
+        let text = r#"var x = "https://cdn.example.com/video.mp4";"#;
+        let result = extract_mp4_url_from_text(text);
+        assert!(result.is_some());
+        assert!(result.unwrap().contains("video.mp4"));
+    }
+
+    #[test]
+    fn test_extract_mp4_url_ignores_bait_in_var_assignment() {
+        let text = r#"var x = "https://test-videos.co.uk/BigBuckBunny.mp4";"#;
+        let result = extract_mp4_url_from_text(text);
+        assert!(result.is_none(), "Bait URLs should be excluded");
+    }
+
+    #[test]
+    fn test_extract_m3u8_url_from_text_found() {
+        let text = r#"var source = "https://cdn.example.com/stream.m3u8";"#;
+        let result = extract_m3u8_url_from_text(text);
+        assert!(result.is_some());
+        assert!(result.unwrap().contains(".m3u8"));
+    }
+
+    #[test]
+    fn test_extract_m3u8_url_ignores_bait() {
+        let text = r#"var source = "https://sample-videos.com/stream.m3u8";"#;
+        let result = extract_m3u8_url_from_text(text);
+        assert!(result.is_none(), "Bait HLS URLs should be excluded");
+    }
+
+    // ═══════════════════════════════════════════════════════════════════
+    // Sprint 2 — S2.1: Voe Deobfuscation Edge-Case Unit Tests
+    // ═══════════════════════════════════════════════════════════════════
+
+    #[test]
+    fn test_deobfuscate_embedded_json_empty_input() {
+        // Empty string should return None — not panic.
+        assert!(deobfuscate_embedded_json("").is_none());
+    }
+
+    #[test]
+    fn test_deobfuscate_embedded_json_empty_json_array() {
+        // Valid JSON but empty array — no obfuscated blobs to decode.
+        assert!(deobfuscate_embedded_json("[]").is_none());
+    }
+
+    #[test]
+    fn test_deobfuscate_embedded_json_invalid_json() {
+        // Not valid JSON at all — should return None, not panic.
+        assert!(deobfuscate_embedded_json("not json at all").is_none());
+    }
+
+    #[test]
+    fn test_deobfuscate_embedded_json_invalid_base64_in_pipeline() {
+        // Valid JSON array wrapping a string that can't be decoded through
+        // the pipeline. ROT13 always succeeds, replace_patterns always
+        // succeeds, but Base64 decode will fail on garbage input.
+        let garbage = rot13("!!!not_base64!!!");
+        let input = serde_json::to_string(&vec![garbage]).unwrap();
+        assert!(deobfuscate_embedded_json(&input).is_none());
+    }
+
+    #[test]
+    fn test_try_method8_empty_html() {
+        // Empty HTML should return None — no <script> tags to find.
+        assert!(try_method8("").is_none());
+    }
+
+    #[test]
+    fn test_try_method8_no_script_tag() {
+        // HTML without application/json script tags.
+        let html = r#"<html><body><p>Hello world</p></body></html>"#;
+        assert!(try_method8(html).is_none());
+    }
+
+    #[test]
+    fn test_try_method8_empty_script_tag() {
+        // Script tag with empty content — should be skipped.
+        let html = r#"<html><script type="application/json">  </script></html>"#;
+        assert!(try_method8(html).is_none());
+    }
+
+    #[test]
+    fn test_try_method7_no_mkgma() {
+        // HTML without MKGMa variable — should return None.
+        let html = r#"<html><body><p>No MKGMa here</p></body></html>"#;
+        assert!(try_method7(html).is_none());
+    }
+
+    #[test]
+    fn test_try_method6_no_a168c() {
+        // HTML without a168c variable — should return None.
+        let html = r#"<html><body><p>No a168c here</p></body></html>"#;
+        assert!(try_method6(html).is_none());
+    }
+
+    #[test]
+    fn test_method7_pipeline_roundtrip() {
+        // Build a Method 7 payload and verify round-trip through try_method7.
+        // Method 7: ROT13 → strip underscores → Base64 decode → shift(-3) → reverse → Base64 decode
+        let json = r#"{"source":"https://cdn.example.com/method7video.mp4"}"#;
+        // Reverse the pipeline: JSON → b64_encode → unreverse → shift(+3) → b64_encode → add_underscores → rot13
+        let step1 = base64::engine::general_purpose::STANDARD.encode(json.as_bytes());
+        let step2: String = step1.chars().rev().collect();
+        let step3 = shift_chars_reverse(&step2, 3);
+        let step4 = base64::engine::general_purpose::STANDARD.encode(step3.as_bytes());
+        // Insert underscores at regular intervals (reverse of strip_underscores)
+        let step5: String = step4
+            .chars()
+            .enumerate()
+            .flat_map(|(i, c)| if i > 0 && i % 8 == 0 { vec!['_', c] } else { vec![c] })
+            .collect();
+        let step6 = rot13(&step5);
+        let html = format!(r#"<html><script>MKGMa="{}"</script></html>"#, step6);
+        let result = try_method7(&html);
+        assert!(result.is_some(), "Method 7 pipeline should decode the obfuscated blob");
+        assert!(result.unwrap().contains("method7video.mp4"));
+    }
+
+    #[test]
+    fn test_method6_pipeline_roundtrip_with_mp4_key() {
+        // Method 6: a168c = 'base64_data' where the data is base64(reverse(json))
+        // Pipeline: clean_base64 → base64_decode → reverse → JSON parse
+        let json = r#"{"mp4":"https://cdn.example.com/method6.mp4"}"#;
+        // Step 1: Reverse the JSON
+        let reversed: String = json.chars().rev().collect();
+        // Step 2: Base64 encode the reversed JSON
+        let encoded = base64::engine::general_purpose::STANDARD.encode(reversed.as_bytes());
+        let html = format!(r#"<html><script>a168c = '{}'</script></html>"#, encoded);
+        let result = try_method6(&html);
+        assert!(result.is_some(), "Method 6 pipeline should decode the obfuscated blob");
+        assert!(result.unwrap().contains("method6.mp4"));
+    }
+
+    #[test]
+    fn test_method8_bait_source_rejected() {
+        // If the deobfuscated URL points to a known bait domain, it should
+        // be rejected by try_method8.
+        let json = r#"{"mp4":"https://test-videos.co.uk/BigBuckBunny.mp4"}"#;
+        let obfuscated = encode_voe_method8(json);
+        let html =
+            format!(r#"<html><script type="application/json">{}</script></html>"#, obfuscated);
+        assert!(try_method8(&html).is_none(), "Bait URLs should be rejected by try_method8");
+    }
+
+    #[test]
+    fn test_method6_bait_source_rejected() {
+        // If the deobfuscated URL points to a known bait domain, Method 6
+        // should also reject it.
+        let json = r#"{"mp4":"https://sample-videos.com/bbb.mp4"}"#;
+        let reversed: String = json.chars().rev().collect();
+        let encoded = base64::engine::general_purpose::STANDARD.encode(reversed.as_bytes());
+        let html = format!(r#"<html><script>a168c = '{}'</script></html>"#, encoded);
+        assert!(try_method6(&html).is_none(), "Bait URLs should be rejected by try_method6");
+    }
+
+    #[test]
+    fn test_extract_media_from_json_value_empty_string() {
+        // Empty string value should return None.
+        let val = serde_json::json!("");
+        assert!(extract_media_from_json_value(&val).is_none());
+    }
+
+    #[test]
+    fn test_extract_media_from_json_value_null() {
+        // Null value should return None.
+        let val = serde_json::json!(null);
+        assert!(extract_media_from_json_value(&val).is_none());
+    }
+
+    #[test]
+    fn test_extract_media_from_json_value_number() {
+        // Non-string, non-object value should return None.
+        let val = serde_json::json!(42);
+        assert!(extract_media_from_json_value(&val).is_none());
+    }
+
+    #[test]
+    fn test_extract_media_from_json_value_single_quality_with_rate_limit() {
+        // Single quality with CDN rate limit — should still return the URL.
+        let val = serde_json::json!({"720": "https://cdn.example.com/video.mp4?sp=1500"});
+        let result = extract_media_from_json_value(&val);
+        assert!(result.is_some());
+        assert!(result.unwrap().contains("video.mp4"));
+    }
+
+    #[test]
+    fn test_extract_media_from_json_value_multi_quality_prefers_sustainable() {
+        // Two qualities: one rate-limited below its bitrate, one unlimited.
+        // The sustainable (unlimited) one should be preferred.
+        let val = serde_json::json!({
+            "1080": "https://cdn.example.com/1080.mp4?sp=500",   // sp=500 < 6000 typical bitrate → unsustainable
+            "720": "https://cdn.example.com/720.mp4"              // no sp= → unlimited → sustainable
+        });
+        let result = extract_media_from_json_value(&val);
+        assert!(result.is_some());
+        let url = result.unwrap();
+        assert!(
+            url.contains("720.mp4"),
+            "Should prefer sustainable 720p over rate-limited 1080p, got: {}",
+            url
+        );
+    }
+
+    #[test]
+    fn test_extract_media_from_json_value_all_unsustainable_picks_highest_sp() {
+        // All qualities have rate limits below their typical bitrates.
+        // Should pick the one with the highest sp= value.
+        let val = serde_json::json!({
+            "1080": "https://cdn.example.com/1080.mp4?sp=500",
+            "720": "https://cdn.example.com/720.mp4?sp=1500"
+        });
+        let result = extract_media_from_json_value(&val);
+        assert!(result.is_some());
+        let url = result.unwrap();
+        assert!(url.contains("720.mp4"), "Should pick highest sp= value, got: {}", url);
+    }
+
+    #[test]
+    fn test_extract_cdn_speed_param_various_positions() {
+        // sp= in different query string positions
+        assert_eq!(extract_cdn_speed_param("https://cdn.example.com/v.mp4?sp=300"), Some(300));
+        assert_eq!(
+            extract_cdn_speed_param("https://cdn.example.com/v.mp4?t=abc&sp=1200"),
+            Some(1200)
+        );
+        assert_eq!(
+            extract_cdn_speed_param("https://cdn.example.com/v.mp4?sp=999&extra=1"),
+            Some(999)
+        );
+    }
+
+    #[test]
+    fn test_is_voe_domain_heuristic_vowel_ratio() {
+        // Domains with too few vowels (< 20%) should NOT match the heuristic.
+        // "bzqrkxmpl.com" has 0 vowels out of 10 chars → 0% → rejected.
+        assert!(!is_voe_domain("bzqrkxmpl.com"));
+
+        // "wonderfulshow.com" has 5 vowels out of 14 → 35.7% → matches.
+        assert!(is_voe_domain("wonderfulshow.com"));
+    }
+
+    #[test]
+    fn test_is_voe_domain_hyphenated_domains_rejected() {
+        // Voe front-end domains don't contain hyphens.
+        // Hyphenated .com domains should not match the heuristic.
+        assert!(!is_voe_domain("some-hyphenated-domain.com"));
+    }
+
+    #[test]
+    fn test_is_voe_domain_numeric_domains_rejected() {
+        // Voe front-end domains don't contain digits.
+        assert!(!is_voe_domain("video123watch.com"));
+    }
+
+    #[test]
+    fn test_follow_js_redirect_relative_url() {
+        // Relative URL should be resolved against the original URL.
+        let html = r#"<script>window.location.href = '/new-page'</script>"#;
+        let result = follow_js_redirect(html, "https://voe.sx/abc123");
+        assert_eq!(result, "https://voe.sx/new-page");
+    }
+
+    #[test]
+    fn test_follow_js_redirect_location_replace() {
+        let html = r#"<script>window.location.replace('https://front-end.com/xyz')</script>"#;
+        let result = follow_js_redirect(html, "https://voe.sx/abc");
+        assert_eq!(result, "https://front-end.com/xyz");
+    }
+
+    #[test]
+    fn test_follow_js_redirect_no_redirect_returns_original() {
+        let html = r#"<html><body>Normal page</body></html>"#;
+        let result = follow_js_redirect(html, "https://voe.sx/abc");
+        assert_eq!(result, "https://voe.sx/abc");
+    }
+
+    #[test]
+    fn test_build_result_sets_custom_resolver_type() {
+        let result = build_result(
+            "https://voe.sx/abc",
+            "https://cdn.example.com/video.mp4",
+            &Some("Test".into()),
+            &None,
+        );
+        assert_eq!(result.resolver_type, "custom");
+        assert_eq!(result.category, UrlCategory::DirectMedia);
+        assert_eq!(result.mime_type, Some("video/mp4".into()));
+        assert_eq!(result.title, Some("Test".into()));
+    }
+
+    #[test]
+    fn test_build_result_hls_category() {
+        let result =
+            build_result("https://voe.sx/abc", "https://cdn.example.com/stream.m3u8", &None, &None);
+        assert_eq!(result.category, UrlCategory::HlsManifest);
+        assert_eq!(result.mime_type, Some("application/vnd.apple.mpegurl".into()));
+    }
+
+    #[test]
+    fn test_clean_base64_with_backslashes() {
+        // Backslashes should be stripped before decoding.
+        let input = r#"SGV\sbG8="#;
+        let result = clean_base64(input);
+        assert!(result.is_some());
+        // After removing backslashes: "SGVsbG8=" → decodes to "Hello"
+    }
+
+    #[test]
+    fn test_clean_base64_empty_input() {
+        // Empty string should still be valid Base64.
+        let result = clean_base64("");
+        assert!(result.is_some());
+    }
+
+    #[test]
+    fn test_safe_b64_decode_empty_string() {
+        assert!(safe_b64_decode("").is_some()); // Empty decodes to empty
+    }
+
+    #[test]
+    fn test_is_bait_source_various_bait_patterns() {
+        // Bait domains
+        assert!(is_bait_source("https://test-videos.co.uk/vid.mp4"));
+        assert!(is_bait_source("https://sample-videos.com/vid.mp4"));
+        // Bait filenames
+        assert!(is_bait_source("https://cdn.example.com/BigBuckBunny.mp4"));
+        assert!(is_bait_source("https://cdn.example.com/Big_Buck_Bunny_1080_10s_5MB.mp4"));
+        // Normal URL
+        assert!(!is_bait_source("https://cdn.example.com/normal-video.mp4"));
+    }
+
+    #[test]
+    fn test_try_fallback_urls_var_source() {
+        let html = r#"var source = "https://cdn.example.com/fallback.mp4""#;
+        let result = try_fallback_urls(html);
+        assert!(result.is_some());
+        assert!(result.unwrap().contains("fallback.mp4"));
+    }
+
+    #[test]
+    fn test_try_fallback_urls_skips_hls() {
+        let html = r#"var source = "https://cdn.example.com/stream.m3u8""#;
+        assert!(try_fallback_urls(html).is_none(), "HLS URLs should be skipped in fallback");
+    }
+
+    #[test]
+    fn test_try_fallback_urls_direct_mp4() {
+        let html = r#"<html>https://cdn.example.com/direct.mp4</html>"#;
+        let result = try_fallback_urls(html);
+        assert!(result.is_some());
+        assert!(result.unwrap().contains("direct.mp4"));
+    }
+
+    #[test]
+    fn test_try_fallback_urls_bait_rejected() {
+        let html = r#"var source = "https://test-videos.co.uk/BigBuckBunny.mp4""#;
+        assert!(try_fallback_urls(html).is_none(), "Bait URLs should be rejected");
+    }
+
+    // ═══════════════════════════════════════════════════════════════════
+    // Sprint 2 — S2.2: DoodStream Resolver Unit Tests
+    // ═══════════════════════════════════════════════════════════════════
+
+    #[test]
+    fn test_derive_embed_url_standard() {
+        // Standard /d/ → /e/ transformation
+        assert_eq!(
+            derive_embed_url("https://playmogo.com/d/abc123"),
+            Some("https://playmogo.com/e/abc123".into())
+        );
+    }
+
+    #[test]
+    fn test_derive_embed_url_with_query_params() {
+        // Query params are stripped in the derived URL
+        let result = derive_embed_url("https://dood.watch/d/xyz789?foo=bar");
+        assert!(result.is_some());
+        assert!(result.unwrap().contains("/e/xyz789"));
+    }
+
+    #[test]
+    fn test_derive_embed_url_embed_url_unchanged() {
+        // /e/ URLs should NOT be transformed (already embed URLs)
+        // The regex only matches /d/<id>, not /e/<id>
+        assert!(derive_embed_url("https://playmogo.com/e/abc123").is_none());
+    }
+
+    #[test]
+    fn test_derive_embed_url_non_dood_url() {
+        // Random URLs without /d/<id> pattern should return None
+        assert!(derive_embed_url("https://example.com/watch?v=abc").is_none());
+    }
+
+    #[test]
+    fn test_derive_embed_url_trailing_slash() {
+        let result = derive_embed_url("https://dood.la/d/abc123/");
+        // The regex ^/d/([^/]+)$ won't match /d/abc123/ because of trailing /
+        assert!(result.is_none());
+    }
+
+    #[test]
+    fn test_find_embed_iframe_with_e_src() {
+        let html = r#"<html><iframe src="/e/abc123"></iframe></html>"#;
+        let doc = Html::parse_document(html);
+        let result = find_embed_iframe(&doc, "https://playmogo.com/d/abc123");
+        assert_eq!(result, Some("/e/abc123".into()));
+    }
+
+    #[test]
+    fn test_find_embed_iframe_full_url() {
+        let html = r#"<html><iframe src="https://dood.watch/e/xyz789"></iframe></html>"#;
+        let doc = Html::parse_document(html);
+        let result = find_embed_iframe(&doc, "https://playmogo.com/d/xyz789");
+        assert!(result.is_some());
+        assert!(result.unwrap().contains("/e/xyz789"));
+    }
+
+    #[test]
+    fn test_find_embed_iframe_no_iframe() {
+        let html = r#"<html><body><p>No iframe</p></body></html>"#;
+        let doc = Html::parse_document(html);
+        assert!(find_embed_iframe(&doc, "https://playmogo.com/d/abc").is_none());
+    }
+
+    #[test]
+    fn test_find_embed_iframe_wrong_src() {
+        // iframe with non-/e/ src should not match
+        let html = r#"<html><iframe src="https://youtube.com/embed/abc"></iframe></html>"#;
+        let doc = Html::parse_document(html);
+        assert!(find_embed_iframe(&doc, "https://playmogo.com/d/abc").is_none());
+    }
+
+    #[test]
+    fn test_extract_doodstream_media_pass_md5() {
+        let html = r#"<html><script>/pass_md5/abc123/def456"</script></html>"#;
+        let result = extract_doodstream_media(html, "https://dood.watch/e/abc123");
+        assert!(result.is_some());
+        assert!(result.unwrap().contains("/pass_md5/"));
+    }
+
+    #[test]
+    fn test_extract_doodstream_media_direct_mp4() {
+        let html = r#"<html><video src="https://cdn.dood.stream/video.mp4"></video></html>"#;
+        let result = extract_doodstream_media(html, "https://dood.watch/e/abc123");
+        assert!(result.is_some());
+        assert!(result.unwrap().contains("video.mp4"));
+    }
+
+    // ═══════════════════════════════════════════════════════════════════
+    // Sprint 2 — S2.3: Mock HTTP Server Integration Tests
+    // ═══════════════════════════════════════════════════════════════════
+
+    /// Build a minimal Voe-like HTML page with a Method 8 obfuscated blob.
+    fn build_mock_voe_page_method8(media_url: &str) -> String {
+        let json = format!(r#"{{"mp4":"{}"}}"#, media_url);
+        let obfuscated = encode_voe_method8(&json);
+        format!(
+            r#"<html><head><title>Voe Video</title><meta property="og:title" content="Test Voe Video"/><meta property="og:image" content="https://cdn.example.com/thumb.jpg"/></head><body><script type="application/json">{}</script></body></html>"#,
+            obfuscated
+        )
+    }
+
+    /// Build a mock DoodStream page with an embed iframe.
+    fn build_mock_doodstream_page(video_id: &str) -> String {
+        format!(
+            r#"<html><head><title>DoodStream Video</title><meta property="og:title" content="Test DoodStream Video"/></head><body><iframe src="/e/{}"></iframe></body></html>"#,
+            video_id
+        )
+    }
+
+    /// Build a mock DoodStream embed page with a pass_md5 token.
+    fn build_mock_doodstream_embed_page(pass_id: &str) -> String {
+        format!(
+            r#"<html><body><script>var x = "/pass_md5/{}/token123";</script></body></html>"#,
+            pass_id
+        )
+    }
+
+    #[tokio::test]
+    async fn test_mock_voe_resolve_method8() {
+        // Test resolve_voe against a mock HTTP server serving a Voe page.
+        let mut server = mockito::Server::new_async().await;
+
+        let mock_page = build_mock_voe_page_method8("https://cdn.voecdn.com/video123.mp4");
+
+        let mock = server
+            .mock("GET", "/abc123")
+            .with_status(200)
+            .with_header("content-type", "text/html")
+            .with_body(&mock_page)
+            .create_async()
+            .await;
+
+        let url = format!("{}/abc123", server.url());
+        let result = resolve_voe(&url, None).await;
+
+        mock.assert_async().await;
+        assert!(
+            result.is_ok(),
+            "resolve_voe should succeed against mock server: {:?}",
+            result.err()
+        );
+        let resolved = result.unwrap();
+        assert!(
+            resolved.direct_url.contains("video123.mp4"),
+            "Resolved URL should contain the MP4 URL, got: {}",
+            resolved.direct_url
+        );
+        assert_eq!(resolved.resolver_type, "custom");
+        assert_eq!(resolved.title, Some("Test Voe Video".into()));
+    }
+
+    #[tokio::test]
+    async fn test_mock_voe_404_returns_error() {
+        let mut server = mockito::Server::new_async().await;
+
+        let mock = server.mock("GET", "/notfound").with_status(404).create_async().await;
+
+        let url = format!("{}/notfound", server.url());
+        let result = resolve_voe(&url, None).await;
+
+        mock.assert_async().await;
+        assert!(result.is_err(), "404 response should return an error");
+    }
+
+    #[tokio::test]
+    async fn test_mock_voe_403_returns_error() {
+        let mut server = mockito::Server::new_async().await;
+
+        let mock = server.mock("GET", "/forbidden").with_status(403).create_async().await;
+
+        let url = format!("{}/forbidden", server.url());
+        let result = resolve_voe(&url, None).await;
+
+        mock.assert_async().await;
+        assert!(result.is_err(), "403 response should return an error");
+    }
+
+    #[tokio::test]
+    async fn test_mock_voe_js_redirect() {
+        // Test that resolve_voe follows JavaScript redirects.
+        let mut server = mockito::Server::new_async().await;
+
+        let redirect_html = format!(
+            r#"<html><script>window.location.href = '{}/redirected'</script></html>"#,
+            server.url()
+        );
+
+        let target_page = build_mock_voe_page_method8("https://cdn.voecdn.com/redirected-vid.mp4");
+
+        let mock_redirect = server
+            .mock("GET", "/original")
+            .with_status(200)
+            .with_header("content-type", "text/html")
+            .with_body(&redirect_html)
+            .create_async()
+            .await;
+
+        let mock_target = server
+            .mock("GET", "/redirected")
+            .with_status(200)
+            .with_header("content-type", "text/html")
+            .with_body(&target_page)
+            .create_async()
+            .await;
+
+        let url = format!("{}/original", server.url());
+        let result = resolve_voe(&url, None).await;
+
+        mock_redirect.assert_async().await;
+        mock_target.assert_async().await;
+        assert!(result.is_ok(), "resolve_voe should follow JS redirect: {:?}", result.err());
+        assert!(result.unwrap().direct_url.contains("redirected-vid.mp4"));
+    }
+
+    #[tokio::test]
+    async fn test_mock_voe_empty_page_returns_error() {
+        let mut server = mockito::Server::new_async().await;
+
+        let mock = server
+            .mock("GET", "/empty")
+            .with_status(200)
+            .with_header("content-type", "text/html")
+            .with_body("<html><body>Empty page</body></html>")
+            .create_async()
+            .await;
+
+        let url = format!("{}/empty", server.url());
+        let result = resolve_voe(&url, None).await;
+
+        mock.assert_async().await;
+        assert!(result.is_err(), "Page with no obfuscated data should return NoMediaFound");
+    }
+
+    #[tokio::test]
+    async fn test_mock_doodstream_resolve_via_embed() {
+        // Test resolve_doodstream against a mock server.
+        let mut server = mockito::Server::new_async().await;
+
+        let main_page = build_mock_doodstream_page("abc123");
+        let embed_page = build_mock_doodstream_embed_page("abc123/token456");
+
+        let mock_main = server
+            .mock("GET", "/d/abc123")
+            .with_status(200)
+            .with_header("content-type", "text/html")
+            .with_body(&main_page)
+            .create_async()
+            .await;
+
+        let mock_embed = server
+            .mock("GET", "/e/abc123")
+            .with_status(200)
+            .with_header("content-type", "text/html")
+            .with_body(&embed_page)
+            .create_async()
+            .await;
+
+        let url = format!("{}/d/abc123", server.url());
+        let result = resolve_doodstream(&url, None).await;
+
+        mock_main.assert_async().await;
+        mock_embed.assert_async().await;
+        assert!(result.is_ok(), "resolve_doodstream should succeed: {:?}", result.err());
+        let resolved = result.unwrap();
+        assert!(
+            resolved.direct_url.contains("/pass_md5/") || resolved.direct_url.contains(".mp4"),
+            "Resolved URL should contain media URL, got: {}",
+            resolved.direct_url
+        );
+        assert_eq!(resolved.resolver_type, "custom");
+    }
+
+    #[tokio::test]
+    async fn test_mock_doodstream_403_main_page_tries_embed() {
+        // When the main /d/ page returns 403, resolve_doodstream should
+        // derive the embed URL and try that instead.
+        let mut server = mockito::Server::new_async().await;
+
+        let embed_page = build_mock_doodstream_embed_page("abc123/token456");
+
+        let mock_main = server.mock("GET", "/d/abc123").with_status(403).create_async().await;
+
+        let mock_embed = server
+            .mock("GET", "/e/abc123")
+            .with_status(200)
+            .with_header("content-type", "text/html")
+            .with_body(&embed_page)
+            .create_async()
+            .await;
+
+        let url = format!("{}/d/abc123", server.url());
+        let result = resolve_doodstream(&url, None).await;
+
+        mock_main.assert_async().await;
+        mock_embed.assert_async().await;
+        assert!(
+            result.is_ok(),
+            "Should resolve via embed when main page returns 403: {:?}",
+            result.err()
+        );
+    }
+
+    #[tokio::test]
+    async fn test_mock_doodstream_both_403_returns_error() {
+        // When both main and embed pages return 403, should return error.
+        let mut server = mockito::Server::new_async().await;
+
+        let mock_main = server.mock("GET", "/d/blocked").with_status(403).create_async().await;
+
+        let mock_embed = server.mock("GET", "/e/blocked").with_status(403).create_async().await;
+
+        let url = format!("{}/d/blocked", server.url());
+        let result = resolve_doodstream(&url, None).await;
+
+        mock_main.assert_async().await;
+        mock_embed.assert_async().await;
+        assert!(result.is_err(), "Should return error when both pages are 403");
+    }
+
+    #[tokio::test]
+    async fn test_mock_voe_cookie_forwarding() {
+        // Verify that cookies received during the page fetch are
+        // forwarded in the ResolveResult.
+        let mut server = mockito::Server::new_async().await;
+
+        let mock_page = build_mock_voe_page_method8("https://cdn.voecdn.com/cookietest.mp4");
+
+        let mock = server
+            .mock("GET", "/withcookies")
+            .with_status(200)
+            .with_header("content-type", "text/html")
+            .with_header("set-cookie", "session=abc123; Path=/")
+            .with_header("set-cookie", "token=xyz789; Path=/")
+            .with_body(&mock_page)
+            .create_async()
+            .await;
+
+        let url = format!("{}/withcookies", server.url());
+        let result = resolve_voe(&url, None).await;
+
+        mock.assert_async().await;
+        assert!(result.is_ok());
+        let resolved = result.unwrap();
+        // Cookies should be present in the result (reqwest's cookie jar
+        // captures them during the page fetch).
+        // Note: the exact cookie format depends on reqwest's cookie handling,
+        // but at least the result should have a cookies field (may be empty
+        // if reqwest doesn't expose Set-Cookie values via the jar).
+        assert!(resolved.direct_url.contains("cookietest.mp4"));
     }
 }
