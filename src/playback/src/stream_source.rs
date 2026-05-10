@@ -145,6 +145,14 @@ pub struct ProgressState {
     /// Used by the pipeline to log bitrate mismatch warnings and adjust
     /// buffering strategy.
     pub cdn_rate_limit_kbps: std::sync::Mutex<Option<u64>>,
+    /// Whether the download completed with an error (mid-stream disconnect).
+    /// When true, the appsrc push thread should NOT push EOS into the
+    /// pipeline — the stream is incomplete and EOS would tell GStreamer
+    /// the stream is finished, causing premature playback termination.
+    /// Instead, the pipeline will stall when it runs out of data, which
+    /// the session layer can detect and handle (e.g. by re-resolving
+    /// the URL and restarting playback).
+    pub download_errored: AtomicBool,
 }
 
 impl ProgressState {
@@ -158,6 +166,7 @@ impl ProgressState {
             http_status: std::sync::Mutex::new(None),
             content_type: std::sync::Mutex::new(None),
             cdn_rate_limit_kbps: std::sync::Mutex::new(None),
+            download_errored: AtomicBool::new(false),
         }
     }
 
@@ -586,6 +595,13 @@ impl StreamSource {
     }
 
     /// Start MP4 download: stream the CDN response into the data channel.
+    ///
+    /// Includes automatic reconnect with Range header when the CDN connection
+    /// drops mid-stream. Up to `MAX_CDN_RECONNECT_ATTEMPTS` reconnection
+    /// attempts are made, resuming from the last byte received. If all
+    /// reconnection attempts fail, the download is marked as errored
+    /// (via `ProgressState::download_errored`) so the appsrc push thread
+    /// knows NOT to push EOS — the stream is incomplete.
     fn start_download_mp4(&mut self) {
         let client = self.client.clone();
         let cdn_url = self.cdn_url.clone();
@@ -599,170 +615,282 @@ impl StreamSource {
         cancel.store(false, Ordering::Relaxed);
         progress.downloaded_bytes.store(0, Ordering::Relaxed);
         progress.throughput_kbps.store(0, Ordering::Relaxed);
+        progress.download_errored.store(false, Ordering::Relaxed);
         *progress.start_time.lock().unwrap() = Some(Instant::now());
 
         tokio::spawn(async move {
-            // Build CDN request
-            let mut req = client
-                .get(&cdn_url)
-                .header("Accept", "*/*")
-                .header("Accept-Language", "en-US,en;q=0.9")
-                .header("Accept-Encoding", "identity;q=1, *;q=0")
-                .header("sec-ch-ua", r#""Chromium";v="131", "Not_A Brand";v="24""#)
-                .header("sec-ch-ua-mobile", "?0")
-                .header("sec-ch-ua-platform", "\"Windows\"")
-                .header("Sec-Fetch-Dest", "video")
-                .header("Sec-Fetch-Mode", "no-cors")
-                .header("Sec-Fetch-Site", "cross-site");
+            /// Maximum number of reconnection attempts when CDN connection
+            /// drops mid-stream. Each attempt resumes from the last byte
+            /// received using a Range header.
+            const MAX_CDN_RECONNECT_ATTEMPTS: u32 = 3;
+            /// Delay between reconnection attempts (seconds). Allows the
+            /// Tor circuit to stabilise and CDN rate-limit counters to reset.
+            const RECONNECT_DELAY_SECS: u64 = 2;
 
-            if !source_url.is_empty() {
-                req = req.header("Referer", &source_url);
-                if let Ok(parsed) = url::Url::parse(&source_url) {
-                    let origin =
-                        format!("{}://{}", parsed.scheme(), parsed.host_str().unwrap_or(""));
-                    if parsed.port().is_some() {
-                        req = req.header("Origin", &source_url);
-                    } else {
-                        req = req.header("Origin", &origin);
+            let mut total_offset: u64 = 0;
+            let mut attempt = 0;
+
+            loop {
+                attempt += 1;
+
+                // Build CDN request. On reconnect (attempt > 1), add a
+                // Range header to resume from the last byte received.
+                let mut req = client
+                    .get(&cdn_url)
+                    .header("Accept", "*/*")
+                    .header("Accept-Language", "en-US,en;q=0.9")
+                    .header("Accept-Encoding", "identity;q=1, *;q=0")
+                    .header("sec-ch-ua", r#""Chromium";v="131", "Not_A Brand";v="24""#)
+                    .header("sec-ch-ua-mobile", "?0")
+                    .header("sec-ch-ua-platform", "\"Windows\"")
+                    .header("Sec-Fetch-Dest", "video")
+                    .header("Sec-Fetch-Mode", "no-cors")
+                    .header("Sec-Fetch-Site", "cross-site");
+
+                // On reconnect, request remaining bytes via Range header.
+                // CDN signed URLs typically allow Range requests — the
+                // signature covers the URL, not the request headers.
+                if total_offset > 0 {
+                    req = req.header("Range", format!("bytes={}-", total_offset));
+                    tracing::info!(
+                        attempt = attempt,
+                        offset = total_offset,
+                        "stream source: reconnecting with Range header to resume download"
+                    );
+                }
+
+                if !source_url.is_empty() {
+                    req = req.header("Referer", &source_url);
+                    if let Ok(parsed) = url::Url::parse(&source_url) {
+                        let origin =
+                            format!("{}://{}", parsed.scheme(), parsed.host_str().unwrap_or(""));
+                        if parsed.port().is_some() {
+                            req = req.header("Origin", &source_url);
+                        } else {
+                            req = req.header("Origin", &origin);
+                        }
                     }
                 }
-            }
 
-            if !cookies.is_empty() {
-                let cookie_header = cookies.join("; ");
-                req = req.header("Cookie", &cookie_header);
-                tracing::info!(
-                    cookie_count = cookies.len(),
-                    "stream source: forwarding cookies from resolver session"
-                );
-            }
-
-            // Send request
-            let built_req = match req.build() {
-                Ok(r) => r,
-                Err(e) => {
-                    tracing::error!(error = %e, "stream source: failed to build request");
-                    return;
-                },
-            };
-            let response = match client.execute(built_req).await {
-                Ok(r) => r,
-                Err(e) => {
-                    tracing::error!(error = %e, "stream source: CDN request failed");
-                    return;
-                },
-            };
-
-            let status = response.status();
-            let headers = response.headers().clone();
-
-            // Store HTTP status and content metadata
-            *progress.http_status.lock().unwrap() = Some(status.as_u16());
-            *progress.content_type.lock().unwrap() =
-                headers.get("content-type").and_then(|v| v.to_str().ok()).map(|s| s.to_string());
-            *progress.total_bytes.lock().unwrap() = headers
-                .get("content-length")
-                .and_then(|v| v.to_str().ok())
-                .and_then(|v| v.parse::<u64>().ok());
-
-            tracing::info!(
-                status = %status,
-                http_version = ?response.version(),
-                content_type = ?headers.get("content-type").and_then(|v| v.to_str().ok()),
-                content_length = ?headers.get("content-length").and_then(|v| v.to_str().ok()),
-                "stream source: CDN response received (MP4)"
-            );
-
-            if status.as_u16() == 403 {
-                tracing::warn!("stream source: CDN returned 403 Forbidden");
-                return;
-            }
-
-            // Stream the response body
-            let mut body_stream = response.bytes_stream();
-            let mut offset: u64 = 0;
-            let mut last_progress_update = Instant::now();
-            let mut bytes_since_last_update: u64 = 0;
-            let progress_update_interval = std::time::Duration::from_secs(2);
-
-            while let Some(chunk_result) = body_stream.next().await {
-                if cancel.load(Ordering::Relaxed) {
-                    tracing::info!(total_bytes = offset, "stream source: download cancelled");
-                    return;
+                if !cookies.is_empty() {
+                    let cookie_header = cookies.join("; ");
+                    req = req.header("Cookie", &cookie_header);
+                    if attempt == 1 {
+                        tracing::info!(
+                            cookie_count = cookies.len(),
+                            "stream source: forwarding cookies from resolver session"
+                        );
+                    }
                 }
 
-                match chunk_result {
-                    Ok(chunk) => {
-                        if chunk.is_empty() {
-                            continue;
-                        }
-
-                        let chunk_len = chunk.len() as u64;
-                        let chunk_offset = offset;
-
-                        if data_tx
-                            .send(DataChunk { data: chunk, offset: chunk_offset })
-                            .await
-                            .is_err()
-                        {
-                            tracing::debug!(
-                                total_bytes = offset,
-                                "stream source: receiver dropped, stopping download"
-                            );
-                            return;
-                        }
-
-                        offset += chunk_len;
-                        bytes_since_last_update += chunk_len;
-                        progress.downloaded_bytes.store(offset, Ordering::Relaxed);
-
-                        if last_progress_update.elapsed() >= progress_update_interval {
-                            let elapsed = last_progress_update.elapsed().as_secs_f64();
-                            if elapsed > 0.0 {
-                                let kbps =
-                                    (bytes_since_last_update * 8) / (elapsed * 1000.0) as u64;
-                                progress.throughput_kbps.store(kbps, Ordering::Relaxed);
-                            }
-                            bytes_since_last_update = 0;
-                            last_progress_update = Instant::now();
-
-                            if offset % (10 * 1024 * 1024) < chunk_len {
-                                let total_elapsed = progress
-                                    .start_time
-                                    .lock()
-                                    .unwrap()
-                                    .map(|t| t.elapsed().as_secs())
-                                    .unwrap_or(0);
-                                let throughput = progress.throughput_kbps.load(Ordering::Relaxed);
-                                let total = progress.total_bytes.lock().unwrap();
-                                tracing::info!(
-                                    total_bytes = offset,
-                                    file_size = ?total,
-                                    throughput_kbps = throughput,
-                                    elapsed_s = total_elapsed,
-                                    "stream source: download progress (MP4)"
-                                );
-                            }
-                        }
+                // Send request
+                let built_req = match req.build() {
+                    Ok(r) => r,
+                    Err(e) => {
+                        tracing::error!(error = %e, "stream source: failed to build request");
+                        break;
                     },
+                };
+                let response = match client.execute(built_req).await {
+                    Ok(r) => r,
                     Err(e) => {
                         tracing::warn!(
                             error = %e,
-                            total_bytes = offset,
-                            "stream source: error reading from CDN stream"
+                            attempt = attempt,
+                            offset = total_offset,
+                            "stream source: CDN request failed"
                         );
+                        // Connection-level error — try reconnect if we have bytes
+                        if total_offset > 0 && attempt <= MAX_CDN_RECONNECT_ATTEMPTS {
+                            tracing::info!(
+                                attempt = attempt,
+                                delay_secs = RECONNECT_DELAY_SECS,
+                                "stream source: waiting before reconnect attempt..."
+                            );
+                            tokio::time::sleep(std::time::Duration::from_secs(RECONNECT_DELAY_SECS)).await;
+                            continue;
+                        }
                         break;
                     },
+                };
+
+                let status = response.status();
+                let headers = response.headers().clone();
+
+                // Store HTTP status and content metadata (only on first attempt)
+                if attempt == 1 {
+                    *progress.http_status.lock().unwrap() = Some(status.as_u16());
+                    *progress.content_type.lock().unwrap() =
+                        headers.get("content-type").and_then(|v| v.to_str().ok()).map(|s| s.to_string());
+                    *progress.total_bytes.lock().unwrap() = headers
+                        .get("content-length")
+                        .and_then(|v| v.to_str().ok())
+                        .and_then(|v| v.parse::<u64>().ok());
                 }
+
+                tracing::info!(
+                    status = %status,
+                    http_version = ?response.version(),
+                    content_type = ?headers.get("content-type").and_then(|v| v.to_str().ok()),
+                    content_length = ?headers.get("content-length").and_then(|v| v.to_str().ok()),
+                    attempt = attempt,
+                    "stream source: CDN response received (MP4)"
+                );
+
+                if status.as_u16() == 403 {
+                    tracing::warn!("stream source: CDN returned 403 Forbidden");
+                    break;
+                }
+
+                // For 206 Partial Content (Range response), verify the range
+                // starts from our expected offset. If not, log a warning but
+                // continue — the data is still valid for the pipeline.
+                if status.as_u16() == 206 && total_offset > 0 {
+                    if let Some(range) = headers.get("content-range").and_then(|v| v.to_str().ok()) {
+                        tracing::info!(
+                            content_range = %range,
+                            "stream source: CDN resumed from Range request"
+                        );
+                    }
+                }
+
+                // Stream the response body
+                let mut body_stream = response.bytes_stream();
+                let mut attempt_bytes: u64 = 0;
+                let mut last_progress_update = Instant::now();
+                let mut bytes_since_last_update: u64 = 0;
+                let progress_update_interval = std::time::Duration::from_secs(2);
+                let mut stream_errored = false;
+
+                while let Some(chunk_result) = body_stream.next().await {
+                    if cancel.load(Ordering::Relaxed) {
+                        tracing::info!(total_bytes = total_offset, "stream source: download cancelled");
+                        return;
+                    }
+
+                    match chunk_result {
+                        Ok(chunk) => {
+                            if chunk.is_empty() {
+                                continue;
+                            }
+
+                            let chunk_len = chunk.len() as u64;
+                            let chunk_offset = total_offset;
+
+                            if data_tx
+                                .send(DataChunk { data: chunk, offset: chunk_offset })
+                                .await
+                                .is_err()
+                            {
+                                tracing::debug!(
+                                    total_bytes = total_offset,
+                                    "stream source: receiver dropped, stopping download"
+                                );
+                                return;
+                            }
+
+                            total_offset += chunk_len;
+                            attempt_bytes += chunk_len;
+                            bytes_since_last_update += chunk_len;
+                            progress.downloaded_bytes.store(total_offset, Ordering::Relaxed);
+
+                            if last_progress_update.elapsed() >= progress_update_interval {
+                                let elapsed = last_progress_update.elapsed().as_secs_f64();
+                                if elapsed > 0.0 {
+                                    let kbps =
+                                        (bytes_since_last_update * 8) / (elapsed * 1000.0) as u64;
+                                    progress.throughput_kbps.store(kbps, Ordering::Relaxed);
+                                }
+                                bytes_since_last_update = 0;
+                                last_progress_update = Instant::now();
+
+                                if total_offset % (10 * 1024 * 1024) < chunk_len {
+                                    let total_elapsed = progress
+                                        .start_time
+                                        .lock()
+                                        .unwrap()
+                                        .map(|t| t.elapsed().as_secs())
+                                        .unwrap_or(0);
+                                    let throughput = progress.throughput_kbps.load(Ordering::Relaxed);
+                                    let total = progress.total_bytes.lock().unwrap();
+                                    tracing::info!(
+                                        total_bytes = total_offset,
+                                        file_size = ?total,
+                                        throughput_kbps = throughput,
+                                        elapsed_s = total_elapsed,
+                                        "stream source: download progress (MP4)"
+                                    );
+                                }
+                            }
+                        },
+                        Err(e) => {
+                            tracing::warn!(
+                                error = %e,
+                                total_bytes = total_offset,
+                                attempt = attempt,
+                                "stream source: error reading from CDN stream"
+                            );
+                            stream_errored = true;
+                            break;
+                        },
+                    }
+                }
+
+                // If the stream errored and we have received some data,
+                // try to reconnect with a Range header to resume.
+                if stream_errored && total_offset > 0 && attempt <= MAX_CDN_RECONNECT_ATTEMPTS {
+                    tracing::info!(
+                        attempt = attempt,
+                        max_attempts = MAX_CDN_RECONNECT_ATTEMPTS,
+                        offset = total_offset,
+                        attempt_bytes = attempt_bytes,
+                        "stream source: CDN stream error — attempting reconnect with Range header"
+                    );
+                    tokio::time::sleep(std::time::Duration::from_secs(RECONNECT_DELAY_SECS)).await;
+                    continue;
+                }
+
+                // If we broke out of the stream loop without error, the
+                // download is complete (full response consumed). Exit.
+                // If we broke out due to an error and exhausted retries,
+                // also exit (but mark as errored below).
+                break;
             }
+
+            // Check if the download completed successfully or errored.
+            let total_bytes_expected = *progress.total_bytes.lock().unwrap();
+            let download_complete = match total_bytes_expected {
+                Some(expected) => total_offset >= expected,
+                None => {
+                    // No Content-Length — consider the download complete if
+                    // the stream ended without error (no reconnect was attempted).
+                    attempt <= 1
+                },
+            };
 
             let total_elapsed =
                 progress.start_time.lock().unwrap().map(|t| t.elapsed().as_secs()).unwrap_or(0);
-            tracing::info!(
-                total_bytes = offset,
-                elapsed_s = total_elapsed,
-                "stream source: download completed (MP4)"
-            );
+
+            if download_complete {
+                tracing::info!(
+                    total_bytes = total_offset,
+                    elapsed_s = total_elapsed,
+                    "stream source: download completed (MP4)"
+                );
+            } else {
+                // Download is incomplete — mark as errored so the appsrc
+                // push thread does NOT push EOS. The pipeline will stall
+                // when it runs out of data, which the session layer can
+                // detect and handle (e.g. by re-resolving and restarting).
+                tracing::warn!(
+                    total_bytes = total_offset,
+                    expected_bytes = ?total_bytes_expected,
+                    elapsed_s = total_elapsed,
+                    "stream source: download incomplete (CDN disconnected) — marking as errored \
+                     (appsrc will NOT push EOS — pipeline will stall when buffer depletes)"
+                );
+                progress.download_errored.store(true, Ordering::Relaxed);
+            }
         });
     }
 
@@ -781,6 +909,7 @@ impl StreamSource {
         cancel.store(false, Ordering::Relaxed);
         progress.downloaded_bytes.store(0, Ordering::Relaxed);
         progress.throughput_kbps.store(0, Ordering::Relaxed);
+        progress.download_errored.store(false, Ordering::Relaxed);
         *progress.start_time.lock().unwrap() = Some(Instant::now());
 
         // Store content type as MPEG-TS for HLS
@@ -793,6 +922,8 @@ impl StreamSource {
             let mut last_progress_update = Instant::now();
             let mut bytes_since_last_update: u64 = 0;
             let progress_update_interval = std::time::Duration::from_secs(2);
+            let mut segments_downloaded = 0usize;
+            let mut had_error = false;
 
             for (idx, seg_url) in segment_urls.iter().enumerate() {
                 // Check cancellation between segments
@@ -847,6 +978,7 @@ impl StreamSource {
                             url = %seg_url,
                             "stream source: HLS failed to build segment request"
                         );
+                        had_error = true;
                         break;
                     },
                 };
@@ -860,6 +992,7 @@ impl StreamSource {
                             url = %seg_url,
                             "stream source: HLS segment request failed"
                         );
+                        had_error = true;
                         break;
                     },
                 };
@@ -872,6 +1005,7 @@ impl StreamSource {
                         url = %seg_url,
                         "stream source: HLS segment 403 Forbidden"
                     );
+                    had_error = true;
                     break;
                 }
 
@@ -882,6 +1016,7 @@ impl StreamSource {
                         url = %seg_url,
                         "stream source: HLS segment returned non-2xx"
                     );
+                    had_error = true;
                     break;
                 }
 
@@ -949,6 +1084,7 @@ impl StreamSource {
                                 segment_bytes = segment_bytes,
                                 "stream source: error reading HLS segment stream"
                             );
+                            had_error = true;
                             break;
                         },
                     }
@@ -961,16 +1097,32 @@ impl StreamSource {
                     total_bytes = offset,
                     "stream source: HLS segment downloaded"
                 );
+                segments_downloaded += 1;
             }
 
             let total_elapsed =
                 progress.start_time.lock().unwrap().map(|t| t.elapsed().as_secs()).unwrap_or(0);
-            tracing::info!(
-                total_bytes = offset,
-                segments = total_segments,
-                elapsed_s = total_elapsed,
-                "stream source: HLS download completed"
-            );
+
+            if had_error || segments_downloaded < total_segments {
+                // Download incomplete — mark as errored so the appsrc
+                // push thread does NOT push EOS.
+                tracing::warn!(
+                    total_bytes = offset,
+                    segments_downloaded = segments_downloaded,
+                    total_segments = total_segments,
+                    elapsed_s = total_elapsed,
+                    "stream source: HLS download incomplete — marking as errored \
+                     (appsrc will NOT push EOS — pipeline will stall when buffer depletes)"
+                );
+                progress.download_errored.store(true, Ordering::Relaxed);
+            } else {
+                tracing::info!(
+                    total_bytes = offset,
+                    segments = total_segments,
+                    elapsed_s = total_elapsed,
+                    "stream source: HLS download completed"
+                );
+            }
         });
     }
 

@@ -1063,11 +1063,18 @@ impl GstPipeline {
         // synchronous GStreamer push-buffer via Handle::block_on(). This is
         // safe because the thread is NOT inside a tokio async context.
         //
-        // When the download completes, an EOS event is pushed into appsrc.
+        // When the download completes successfully, an EOS event is pushed into
+        // appsrc. When the download errors out (CDN disconnect), the channel
+        // closes but download_errored is set, and we do NOT push EOS — the
+        // pipeline will stall when it runs out of buffered data, which the
+        // session layer can detect and handle (e.g. by re-resolving and
+        // restarting playback). Pushing EOS on error would tell GStreamer
+        // the stream is complete, causing premature playback termination.
         if let Some(mut source) = stream_source.take() {
             let appsrc_weak = src.downgrade();
             let cancel = Arc::new(AtomicBool::new(false));
             let cancel_clone = cancel.clone();
+            let progress_clone = download_progress.clone();
             let tokio_handle = tokio::runtime::Handle::current();
 
             std::thread::Builder::new()
@@ -1080,7 +1087,8 @@ impl GstPipeline {
                         let chunk = match tokio_handle.block_on(source.recv_chunk()) {
                             Some(c) => c,
                             None => {
-                                // Channel closed — download completed or source dropped.
+                                // Channel closed — download completed, errored,
+                                // or source dropped.
                                 break;
                             },
                         };
@@ -1132,10 +1140,23 @@ impl GstPipeline {
                         }
                     }
 
-                    // Download completed — push EOS into appsrc.
-                    tracing::info!("appsrc push thread: download complete, pushing EOS");
-                    if let Some(appsrc) = appsrc_weak.upgrade() {
-                        let _ = appsrc.emit_by_name::<gstreamer::FlowReturn>("end-of-stream", &[]);
+                    // Channel closed — check if download completed or errored.
+                    if progress_clone.download_errored.load(Ordering::Relaxed) {
+                        // CDN download errored mid-stream. Do NOT push EOS —
+                        // the stream is incomplete. The pipeline will stall
+                        // when it runs out of buffered data, triggering a
+                        // GStreamer error or a session-layer stall detection.
+                        // The session layer can then re-resolve and restart.
+                        tracing::warn!(
+                            "appsrc push thread: download errored (CDN disconnect) — NOT pushing EOS. \
+                             Pipeline will stall when buffer depletes. Session layer should detect and restart."
+                        );
+                    } else {
+                        // Download completed successfully — push EOS into appsrc.
+                        tracing::info!("appsrc push thread: download complete, pushing EOS");
+                        if let Some(appsrc) = appsrc_weak.upgrade() {
+                            let _ = appsrc.emit_by_name::<gstreamer::FlowReturn>("end-of-stream", &[]);
+                        }
                     }
                 })
                 .expect("failed to spawn appsrc push thread");
@@ -1825,6 +1846,17 @@ impl GstPipeline {
     }
 
     /// Stop the pipeline and release resources.
+    ///
+    /// Sets the pipeline to Null state, which releases all DRM/KMS
+    /// resources held by kmssink and ALSA resources held by alsasink.
+    /// The appsrc push task is cancelled via the cancel token.
+    ///
+    /// NOTE: We do NOT send EOS before stopping. EOS is for graceful
+    /// stream completion (end-of-data), but we're forcefully tearing
+    /// down the pipeline. Sending EOS before Null can cause GStreamer
+    /// to process the EOS event and trigger state-change callbacks
+    /// that conflict with our teardown. Just going to Null directly
+    /// is faster and avoids these race conditions.
     pub fn stop(&mut self) -> Result<(), PlaybackError> {
         // Signal the appsrc push task to stop downloading.
         if let Some(cancel) = self.push_cancel.take() {
@@ -1832,14 +1864,17 @@ impl GstPipeline {
             tracing::debug!("signalled appsrc push task to cancel");
         }
 
-        // Send EOS to allow elements to flush.
-        let _ = self.pipeline.send_event(gstreamer::event::Eos::new());
+        // Drop the bus watch first to prevent callbacks during shutdown.
+        // Bus watch callbacks hold weak references to the pipeline and
+        // may try to set state (e.g. Playing on buffer fill) while
+        // we're tearing down, causing conflicts.
+        self.bus_watch = None;
 
         self.pipeline
             .set_state(State::Null)
             .map_err(|e| PlaybackError::Gstreamer(format!("set_state Null: {}", e)))?;
         self.state = PipelineState::Null;
-        tracing::debug!("pipeline stopped and set to Null");
+        tracing::info!("pipeline stopped and set to Null (DRM/KMS resources released)");
         Ok(())
     }
 
@@ -1854,6 +1889,14 @@ impl GstPipeline {
             cancel.store(true, Ordering::Relaxed);
             tracing::info!("download cancelled via cancel_download()");
         }
+    }
+
+    /// Check whether the CDN download has errored mid-stream.
+    ///
+    /// When true, the appsrc push thread did NOT push EOS, and the
+    /// pipeline will stall when the buffer depletes.
+    pub fn download_errored(&self) -> bool {
+        self.download_progress.download_errored.load(Ordering::Relaxed)
     }
 
     /// Perform a flushing seek to an absolute position.

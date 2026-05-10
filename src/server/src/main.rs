@@ -489,10 +489,17 @@ async fn main() -> Result<()> {
         }
     });
 
-    // 8b. Periodic position update during playback.
+    // 8b. Periodic position update and stall detection during playback.
+    //
     // Queries the playback engine every 2 seconds while a session is
     // active and broadcasts PositionUpdate events so that WebSocket
     // clients receive real-time progress.
+    //
+    // Also detects CDN download stalls: when the download errors out
+    // (CDN disconnected, all reconnect attempts failed) and the buffer
+    // depletes, the pipeline is stuck. We detect this and stop the
+    // session so the user can re-cast (rather than sitting through an
+    // indefinite frozen screen).
     let position_session = session.clone();
     let position_playback = playback_engine.clone();
     let (position_stop_tx, position_stop_rx) = tokio::sync::oneshot::channel::<()>();
@@ -500,6 +507,7 @@ async fn main() -> Result<()> {
         let mut interval = tokio::time::interval(std::time::Duration::from_secs(2));
         interval.tick().await; // skip the first immediate tick
         let mut stop_rx = position_stop_rx;
+        let mut stall_zero_count: u32 = 0;
         loop {
             tokio::select! {
                 _ = interval.tick() => {
@@ -508,6 +516,27 @@ async fn main() -> Result<()> {
                         if let Ok(id) = position_session.active_session_id_public().await {
                             position_session.refresh_playback_position_public(id).await;
                         }
+
+                        // Stall detection: if the CDN download errored and
+                        // the pipeline is no longer making progress (is_playing
+                        // becomes false due to buffer depletion), stop the
+                        // session so the user can re-cast.
+                        if position_playback.download_errored() && !position_playback.is_playing() {
+                            stall_zero_count += 1;
+                            if stall_zero_count >= 5 {
+                                // 10 seconds of stall after download error
+                                info!(
+                                    "CDN download errored and pipeline stalled for 10s — \
+                                     stopping session so user can re-cast"
+                                );
+                                let _ = position_session.stop().await;
+                                stall_zero_count = 0;
+                            }
+                        } else {
+                            stall_zero_count = 0;
+                        }
+                    } else {
+                        stall_zero_count = 0;
                     }
                 }
                 _ = &mut stop_rx => break,

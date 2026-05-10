@@ -990,8 +990,23 @@ impl PlaybackEngine {
             if let Some(ref mut existing) = *guard {
                 let _ = existing.stop();
             }
+            // Drop the pipeline (set to None) while still holding the lock.
+            // This ensures the GstPipeline's Drop impl runs, which:
+            // 1. Sets the bus_watch to None (removes GStreamer callbacks)
+            // 2. Sets the pipeline state to Null (releases DRM/KMS resources)
+            // 3. Cancels the appsrc push task
+            // All of these must complete before we create a new pipeline,
+            // otherwise the new kmssink may fail to acquire DRM master.
             *guard = None;
         }
+
+        // Brief pause to allow DRM/KMS resources to be fully released by
+        // the kernel. Even after GStreamer's set_state(Null) returns,
+        // the kernel's vc4 DRM driver may need a few milliseconds to
+        // complete cleanup (release DRM master, free planes). Without
+        // this pause, the new pipeline's kmssink may fail to acquire
+        // DRM master or set planes, causing "Permission denied" errors.
+        tokio::time::sleep(std::time::Duration::from_millis(200)).await;
 
         // Reset SW fallback flag for the new playback attempt.
         self.sw_fallback_active.store(false, Ordering::Relaxed);
@@ -1097,6 +1112,20 @@ impl PlaybackEngine {
         // message is always logged.
         let last_buffering_percent = std::sync::Arc::new(std::sync::atomic::AtomicU8::new(u8::MAX));
         let last_buffering_percent_bus = last_buffering_percent.clone();
+
+        // Stall detection: track how long the buffer has been at 0% during
+        // playback (not initial buffering). When the CDN disconnects mid-stream
+        // and the appsrc push thread doesn't push EOS (because download_errored
+        // is set), the pipeline stalls at Paused with 0% buffer. We need to
+        // detect this and emit an error event so the session layer can
+        // re-resolve the URL and restart playback.
+        let stall_start = std::sync::Arc::new(std::sync::Mutex::new(None::<std::time::Instant>));
+        let stall_start_bus = stall_start.clone();
+        /// How long the buffer must stay at 0% during playback before we
+        /// consider it a stall. 30 seconds gives the CDN time to resume
+        /// after a brief glitch, but is short enough that the user doesn't
+        /// sit through minutes of a frozen screen.
+        const STALL_TIMEOUT_SECS: u64 = 30;
 
         // Weak reference to the pipeline element for the bus watch to
         // trigger the Paused→Playing auto-transition.
@@ -1364,6 +1393,55 @@ impl PlaybackEngine {
                                     rate_limited_pause_percent
                                 );
                                 let _ = pipe.set_state(State::Paused);
+                            }
+
+                            // Stall detection: when buffer is at 0% during
+                            // playback (not initial buffering), start a timer.
+                            // If the buffer stays at 0% for STALL_TIMEOUT_SECS,
+                            // the CDN download has likely died and the pipeline
+                            // is stuck. Emit an error event so the session layer
+                            // can re-resolve and restart.
+                            if percent == 0 {
+                                let mut stall_guard = stall_start_bus.lock().unwrap();
+                                if stall_guard.is_none() {
+                                    *stall_guard = Some(std::time::Instant::now());
+                                    tracing::warn!(
+                                        "buffer at 0% during playback — stall timer started ({}s until stall error)",
+                                        STALL_TIMEOUT_SECS
+                                    );
+                                } else if stall_guard.unwrap().elapsed().as_secs() >= STALL_TIMEOUT_SECS {
+                                    tracing::error!(
+                                        elapsed_s = stall_guard.unwrap().elapsed().as_secs(),
+                                        "pipeline stalled at 0% buffer for {}s — CDN download likely dead. \
+                                         Emitting error event for session-layer restart.",
+                                        STALL_TIMEOUT_SECS
+                                    );
+                                    let _ = event_tx.send(PlaybackEvent::Error {
+                                        message: format!(
+                                            "Pipeline stalled — buffer at 0% for {}s. \
+                                             CDN download disconnected. Re-resolve needed.",
+                                            STALL_TIMEOUT_SECS
+                                        ),
+                                        debug: Some("stall-detection".into()),
+                                    });
+                                    pending_auto_play_bus.store(false, Ordering::Relaxed);
+                                    is_playing.store(false, Ordering::Relaxed);
+                                    // Clear the stall timer so we don't emit duplicate errors
+                                    *stall_guard = None;
+                                }
+                            }
+                        } else {
+                            // Buffer is in normal range (> pause threshold, < resume
+                            // threshold). Clear stall timer if buffer is recovering.
+                            if percent > 0 {
+                                let mut stall_guard = stall_start_bus.lock().unwrap();
+                                if stall_guard.is_some() {
+                                    tracing::info!(
+                                        percent = percent,
+                                        "buffer recovering from stall — clearing stall timer"
+                                    );
+                                    *stall_guard = None;
+                                }
                             }
                         }
                     }
@@ -2233,6 +2311,30 @@ impl PlaybackEngine {
     #[cfg(not(feature = "hw"))]
     pub async fn cancel_download(&self) {
         // No download task in mock mode.
+    }
+
+    /// Check whether the CDN download has errored mid-stream.
+    ///
+    /// Returns true when the CDN connection dropped during download
+    /// and all reconnection attempts failed. When true, the pipeline
+    /// will stall when the buffer depletes (no EOS was pushed into
+    /// appsrc). The session layer should detect this and either
+    /// re-resolve the URL or stop the session.
+    #[cfg(feature = "hw")]
+    pub fn download_errored(&self) -> bool {
+        match self.gst_pipeline.try_lock() {
+            Ok(guard) => match *guard {
+                Some(ref pipeline) => pipeline.download_errored(),
+                None => false,
+            },
+            Err(_) => false,
+        }
+    }
+
+    /// Check whether the CDN download has errored (mock mode — always false).
+    #[cfg(not(feature = "hw"))]
+    pub fn download_errored(&self) -> bool {
+        false
     }
 
     /// Get the current audio device string.
