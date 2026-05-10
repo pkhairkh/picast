@@ -11,7 +11,7 @@ hyper-util = { version = "0.1", features = ["tokio"] }
 http-body-util = "0.1"
 bytes = { workspace = true }
 tokio = { workspace = true, features = ["net", "sync", "rt", "macros", "time"] }
-tokio-tungstenite = "0.24"
+tokio-tungstenite = "0.29"
 tungstenite = "0.24"
 futures-util = "0.3"
 serde = { workspace = true }
