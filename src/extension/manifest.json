@@ -1,9 +1,11 @@
 {
   "manifest_version": 3,
   "name": "__MSG_extensionName__",
-  "version": "0.2.0",
+  "version": "0.3.0",
   "description": "__MSG_extensionDescription__",
   "default_locale": "en",
+  "author": "boGDan Project",
+  "homepage_url": "https://github.com/pkhairkh/picast",
 
   "icons": {
     "16": "icons/icon-16.png",
@@ -37,8 +39,11 @@
 
   "host_permissions": [
     "http://*.local/*",
+    "https://*.local/*"
+  ],
+
+  "optional_host_permissions": [
     "http://*/*",
-    "https://*.local/*",
     "https://*/*"
   ],
 
@@ -53,5 +58,9 @@
   "options_ui": {
     "page": "options/options.html",
     "open_in_tab": true
+  },
+
+  "content_security_policy": {
+    "extension_pages": "script-src 'self'; object-src 'none'"
   }
 }

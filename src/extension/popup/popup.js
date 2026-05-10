@@ -223,7 +223,10 @@ async function loadDetectedMedia() {
     if (response?.success && response.queue?.length > 0) {
       mediaSection.style.display = "block";
       mediaCount.textContent = response.queue.length;
-      mediaList.innerHTML = "";
+      // Clear existing media items using DOM methods (no innerHTML).
+      while (mediaList.firstChild) {
+        mediaList.removeChild(mediaList.firstChild);
+      }
 
       [...response.queue].reverse().forEach((item) => {
         const div = document.createElement("div");

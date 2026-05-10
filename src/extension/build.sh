@@ -64,7 +64,7 @@ build_extension() {
   echo "  ${#SHARED_FILES[@]} shared files"
 
   # Create zip for distribution.
-  local zip_name="bogdan-${browser}-v0.2.0.zip"
+  local zip_name="bogdan-${browser}-v0.3.0.zip"
   (cd "${target_dir}" && zip -q -r "${BUILD_DIR}/${zip_name}" .)
   echo "  ${zip_name}"
 

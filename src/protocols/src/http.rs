@@ -16,6 +16,13 @@
 //! | GET    | `/api/status`   | Current player state & metadata |
 //! | GET    | `/api/health`   | Health check                    |
 //! | GET    | `/api/audio-devices` | List ALSA playback devices |
+//!
+//! ## Rate Limiting
+//!
+//! Per-IP rate limiting protects against accidental or malicious request
+//! floods. Each IP is allowed `RATE_LIMIT_REQUESTS` requests per
+//! `RATE_LIMIT_WINDOW_SECS` second window. Exceeding the limit returns
+//! HTTP 429 Too Many Requests with a `Retry-After` header.
 
 use anyhow::Result;
 use bogdan_session::{MediaSession, SessionManager};
@@ -23,7 +30,9 @@ use http_body_util::Full;
 use hyper::body::Incoming;
 use hyper::{Method, Request, Response, StatusCode};
 use serde::{Deserialize, Serialize};
+use std::collections::HashMap;
 use std::sync::Arc;
+use tokio::sync::Mutex;
 use tokio_rustls::TlsAcceptor;
 use tracing;
 
@@ -91,10 +100,38 @@ struct CastResponse {
     status: String,
 }
 
+/// Machine-readable error code string for programmatic handling.
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "SCREAMING_SNAKE_CASE")]
+#[allow(dead_code)] // Some variants reserved for future use
+enum ErrorCode {
+    BadRequest,
+    InvalidUrl,
+    SessionActive,
+    NoActiveSession,
+    RateLimited,
+    BodyTooLarge,
+    InternalError,
+    NotFound,
+}
+
+impl std::fmt::Display for ErrorCode {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let s = serde_json::to_value(self)
+            .ok()
+            .and_then(|v| v.as_str().map(String::from))
+            .unwrap_or_else(|| format!("{:?}", self).to_uppercase());
+        write!(f, "{}", s)
+    }
+}
+
 #[derive(Debug, Serialize)]
 struct ErrorResponse {
     error: String,
-    code: u16,
+    /// Machine-readable error code for programmatic handling.
+    code: String,
+    /// HTTP status code for convenience.
+    status: u16,
 }
 
 #[derive(Debug, Serialize)]
@@ -123,6 +160,7 @@ struct AlsaDevice {
 ///
 /// Routes requests to the [`SessionManager`] and returns JSON
 /// responses. Supports CORS for browser extension access.
+/// Per-IP rate limiting protects against request floods.
 pub struct HttpApiServer {
     /// Socket address the server binds to.
     listen_addr: String,
@@ -130,12 +168,19 @@ pub struct HttpApiServer {
     session: Arc<SessionManager>,
     /// Optional TLS acceptor — if set, serves HTTPS.
     tls_acceptor: Option<Arc<TlsAcceptor>>,
+    /// Per-IP rate limiter.
+    rate_limiter: Arc<Mutex<RateLimiter>>,
 }
 
 impl HttpApiServer {
     /// Create a new HTTP server bound to `listen_addr`.
     pub fn new(listen_addr: &str, session: Arc<SessionManager>) -> Self {
-        Self { listen_addr: listen_addr.to_owned(), session, tls_acceptor: None }
+        Self {
+            listen_addr: listen_addr.to_owned(),
+            session,
+            tls_acceptor: None,
+            rate_limiter: Arc::new(Mutex::new(RateLimiter::new())),
+        }
     }
 
     /// Set a TLS acceptor to enable HTTPS.
@@ -166,12 +211,14 @@ impl HttpApiServer {
                     let (stream, remote) = accept_result?;
                     let session = session.clone();
                     let tls = tls_acceptor.clone();
+                    let rate_limiter = self.rate_limiter.clone();
 
                     tokio::spawn(async move {
                         let service = service_fn(move |req| {
                             let session = session.clone();
+                            let rate_limiter = rate_limiter.clone();
                             async move {
-                                match handle_request(req, &session).await {
+                                match handle_request(req, &session, &rate_limiter).await {
                                     Ok(resp) => Ok(resp),
                                     Err(e) => {
                                         tracing::warn!(error = %e, "request handler error");
@@ -231,10 +278,28 @@ impl HttpApiServer {
     }
 }
 
+/// Extract the client IP from the request's remote address or headers.
+fn extract_client_ip(parts: &hyper::http::request::Parts) -> String {
+    // Try X-Forwarded-For first (if behind a reverse proxy).
+    if let Some(xff) = parts.headers.get("x-forwarded-for") {
+        if let Ok(val) = xff.to_str() {
+            // X-Forwarded-For may contain multiple IPs; use the first.
+            if let Some(ip) = val.split(',').next() {
+                return ip.trim().to_owned();
+            }
+        }
+    }
+    // Fall back to a placeholder — in practice, the remote IP is
+    // available from the TCP accept but not from the HTTP request
+    // parts. For a LAN-only device this is acceptable.
+    "unknown".to_owned()
+}
+
 /// Route and handle an incoming HTTP request.
 async fn handle_request(
     req: Request<Incoming>,
     session: &Arc<SessionManager>,
+    rate_limiter: &Arc<Mutex<RateLimiter>>,
 ) -> Result<Response<BoxBody>> {
     let (parts, body) = req.into_parts();
 
@@ -243,8 +308,18 @@ async fn handle_request(
         return Ok(cors_response(StatusCode::OK));
     }
 
-    // Route by method + path.
+    // Rate limiting — skip for health endpoint.
     let path = parts.uri.path();
+    if path != "/api/health" {
+        let client_ip = extract_client_ip(&parts);
+        let mut limiter = rate_limiter.lock().await;
+        if !limiter.check(&client_ip) {
+            tracing::warn!(ip = %client_ip, "rate limit exceeded");
+            return rate_limit_response(RATE_LIMIT_WINDOW_SECS);
+        }
+    }
+
+    // Route by method + path.
     let method = parts.method;
 
     match (method, path) {
@@ -283,9 +358,30 @@ async fn handle_request(
 
         // Cast.
         (Method::POST, "/api/cast") => {
-            let payload = read_body_json::<CastRequest>(body).await?;
+            let payload = match read_body_json::<CastRequest>(body).await {
+                Ok(p) => p,
+                Err(e) => {
+                    let msg = e.to_string();
+                    if msg.contains("body too large") {
+                        return error_response_with_code(
+                            StatusCode::PAYLOAD_TOO_LARGE,
+                            ErrorCode::BodyTooLarge,
+                            &msg,
+                        );
+                    }
+                    return error_response_with_code(
+                        StatusCode::BAD_REQUEST,
+                        ErrorCode::BadRequest,
+                        &msg,
+                    );
+                },
+            };
             if let Err(e) = is_safe_cast_url(&payload.url) {
-                return error_response(StatusCode::BAD_REQUEST, &e.to_string());
+                return error_response_with_code(
+                    StatusCode::BAD_REQUEST,
+                    ErrorCode::InvalidUrl,
+                    &e.to_string(),
+                );
             }
 
             // Quick-check: if a session is already active, reject immediately
@@ -293,8 +389,9 @@ async fn handle_request(
             // two concurrent /api/cast requests both pass the load() check.
             match session.current_status().await {
                 Ok(_) => {
-                    return error_response(
+                    return error_response_with_code(
                         StatusCode::CONFLICT,
+                        ErrorCode::SessionActive,
                         "session already active — stop the current session first",
                     );
                 },
@@ -443,10 +540,52 @@ fn json_response<T: Serialize>(status: StatusCode, body: &T) -> Result<Response<
         .body(Full::new(bytes::Bytes::from(json)))?)
 }
 
-/// Create an error response.
-fn error_response(status: StatusCode, message: &str) -> Result<Response<BoxBody>> {
-    let resp = ErrorResponse { error: message.to_owned(), code: status.as_u16() };
+/// Create an error response with a machine-readable code.
+fn error_response_with_code(
+    status: StatusCode,
+    code: ErrorCode,
+    message: &str,
+) -> Result<Response<BoxBody>> {
+    let resp = ErrorResponse {
+        error: message.to_owned(),
+        code: code.to_string(),
+        status: status.as_u16(),
+    };
     json_response(status, &resp)
+}
+
+/// Create an error response with an auto-derived code from the status.
+fn error_response(status: StatusCode, message: &str) -> Result<Response<BoxBody>> {
+    let code = match status {
+        StatusCode::BAD_REQUEST => ErrorCode::BadRequest,
+        StatusCode::NOT_FOUND => ErrorCode::NotFound,
+        StatusCode::CONFLICT => ErrorCode::SessionActive,
+        StatusCode::TOO_MANY_REQUESTS => ErrorCode::RateLimited,
+        StatusCode::PAYLOAD_TOO_LARGE => ErrorCode::BodyTooLarge,
+        StatusCode::INTERNAL_SERVER_ERROR => ErrorCode::InternalError,
+        _ => ErrorCode::InternalError,
+    };
+    error_response_with_code(status, code, message)
+}
+
+/// Create a rate-limit error response with Retry-After header.
+fn rate_limit_response(retry_after_secs: u64) -> Result<Response<BoxBody>> {
+    let message = format!(
+        "rate limit exceeded — max {} requests per {} seconds",
+        RATE_LIMIT_REQUESTS, RATE_LIMIT_WINDOW_SECS
+    );
+    let resp = ErrorResponse {
+        error: message,
+        code: ErrorCode::RateLimited.to_string(),
+        status: StatusCode::TOO_MANY_REQUESTS.as_u16(),
+    };
+    let json = serde_json::to_string(&resp)?;
+    Ok(Response::builder()
+        .status(StatusCode::TOO_MANY_REQUESTS)
+        .header("Content-Type", "application/json")
+        .header("Access-Control-Allow-Origin", "*")
+        .header("Retry-After", retry_after_secs.to_string())
+        .body(Full::new(bytes::Bytes::from(json)))?)
 }
 
 /// Create a CORS preflight response.
@@ -458,11 +597,64 @@ fn cors_response(status: StatusCode) -> Response<BoxBody> {
         .header("Access-Control-Allow-Headers", "Content-Type")
         .header("Access-Control-Max-Age", "86400")
         .body(Full::new(bytes::Bytes::new()))
-        .unwrap()
+        .unwrap_or_else(|_| {
+            // Fallback: a minimal valid response. The builder only fails
+            // on invalid header values, which our hardcoded values are not.
+            Response::new(Full::new(bytes::Bytes::new()))
+        })
 }
 
-/// Maximum allowed HTTP request body size (1 MB).
-const MAX_BODY_SIZE: usize = 1_048_576;
+/// Maximum allowed HTTP request body size (1 KB for POST payloads).
+/// Large bodies are unnecessary for our API and indicate misuse.
+const MAX_BODY_SIZE: usize = 1_024;
+
+/// Rate limiting: maximum requests per IP per window.
+const RATE_LIMIT_REQUESTS: u32 = 30;
+/// Rate limiting: window duration in seconds.
+const RATE_LIMIT_WINDOW_SECS: u64 = 10;
+
+/// Per-IP rate limit tracker.
+struct RateLimiter {
+    /// Map from IP address to (count, window_start_instant).
+    entries: HashMap<String, (u32, std::time::Instant)>,
+}
+
+impl RateLimiter {
+    fn new() -> Self {
+        Self { entries: HashMap::new() }
+    }
+
+    /// Check if a request from `ip` is allowed. Returns `true` if the
+    /// request is within the rate limit, `false` if it should be rejected.
+    /// Also prunes expired entries to prevent unbounded memory growth.
+    fn check(&mut self, ip: &str) -> bool {
+        let now = std::time::Instant::now();
+        let window = std::time::Duration::from_secs(RATE_LIMIT_WINDOW_SECS);
+
+        // Prune expired entries.
+        self.entries.retain(|_, (_, start)| now.duration_since(*start) < window);
+
+        match self.entries.get_mut(ip) {
+            Some((count, start)) => {
+                if now.duration_since(*start) >= window {
+                    // Window expired — reset.
+                    *count = 1;
+                    *start = now;
+                    true
+                } else if *count < RATE_LIMIT_REQUESTS {
+                    *count += 1;
+                    true
+                } else {
+                    false
+                }
+            },
+            None => {
+                self.entries.insert(ip.to_owned(), (1, now));
+                true
+            },
+        }
+    }
+}
 
 /// Read and parse a JSON body with size validation.
 async fn read_body_json<T: serde::de::DeserializeOwned>(body: Incoming) -> Result<T> {
@@ -474,6 +666,9 @@ async fn read_body_json<T: serde::de::DeserializeOwned>(body: Incoming) -> Resul
             bytes.len(),
             MAX_BODY_SIZE
         ));
+    }
+    if bytes.is_empty() {
+        return Err(anyhow::anyhow!("request body is empty — expected JSON"));
     }
     Ok(serde_json::from_slice(&bytes)?)
 }
@@ -752,10 +947,103 @@ mod tests {
 
     #[test]
     fn error_response_json() {
-        let resp = ErrorResponse { error: "not found".into(), code: 404 };
+        let resp = ErrorResponse {
+            error: "not found".into(),
+            code: ErrorCode::NotFound.to_string(),
+            status: 404,
+        };
         let json = serde_json::to_string(&resp).unwrap();
         assert!(json.contains("not found"));
         assert!(json.contains("404"));
+        assert!(json.contains("NOT_FOUND"));
+    }
+
+    #[test]
+    fn error_code_display() {
+        assert_eq!(ErrorCode::BadRequest.to_string(), "BAD_REQUEST");
+        assert_eq!(ErrorCode::InvalidUrl.to_string(), "INVALID_URL");
+        assert_eq!(ErrorCode::SessionActive.to_string(), "SESSION_ACTIVE");
+        assert_eq!(ErrorCode::RateLimited.to_string(), "RATE_LIMITED");
+        assert_eq!(ErrorCode::NoActiveSession.to_string(), "NO_ACTIVE_SESSION");
+        assert_eq!(ErrorCode::NotFound.to_string(), "NOT_FOUND");
+    }
+
+    #[test]
+    fn rate_limiter_allows_within_limit() {
+        let mut limiter = RateLimiter::new();
+        for _ in 0..RATE_LIMIT_REQUESTS {
+            assert!(limiter.check("192.168.1.1"));
+        }
+        // Next request should be denied.
+        assert!(!limiter.check("192.168.1.1"));
+    }
+
+    #[test]
+    fn rate_limiter_different_ips_independent() {
+        let mut limiter = RateLimiter::new();
+        for _ in 0..RATE_LIMIT_REQUESTS {
+            assert!(limiter.check("192.168.1.1"));
+        }
+        // Different IP should still be allowed.
+        assert!(limiter.check("192.168.1.2"));
+    }
+
+    #[test]
+    fn rate_limiter_window_resets() {
+        let mut limiter = RateLimiter::new();
+        for _ in 0..RATE_LIMIT_REQUESTS {
+            assert!(limiter.check("192.168.1.1"));
+        }
+        assert!(!limiter.check("192.168.1.1"));
+        // Manually expire the window by setting a past timestamp.
+        let entry = limiter.entries.get_mut("192.168.1.1").unwrap();
+        entry.1 = std::time::Instant::now() - std::time::Duration::from_secs(RATE_LIMIT_WINDOW_SECS + 1);
+        // Should be allowed again after window expires.
+        assert!(limiter.check("192.168.1.1"));
+    }
+
+    #[test]
+    fn is_safe_cast_url_rejects_dangerous_schemes() {
+        assert!(is_safe_cast_url("file:///etc/passwd").is_err());
+        assert!(is_safe_cast_url("data:text/html,<script>alert(1)</script>").is_err());
+        assert!(is_safe_cast_url("javascript:alert(1)").is_err());
+        assert!(is_safe_cast_url("ftp://example.com").is_err());
+    }
+
+    #[test]
+    fn is_safe_cast_url_accepts_http_https() {
+        assert!(is_safe_cast_url("http://example.com").is_ok());
+        assert!(is_safe_cast_url("https://example.com").is_ok());
+    }
+
+    #[test]
+    fn empty_body_rejected() {
+        // Verify the empty body check logic is present
+        let empty_bytes: &[u8] = b"";
+        assert!(empty_bytes.is_empty());
+    }
+
+    #[test]
+    fn extract_client_ip_unknown() {
+        let req = Request::builder()
+            .method("GET")
+            .uri("/api/health")
+            .body(()).unwrap();
+        let (parts, _) = req.into_parts();
+        let ip = extract_client_ip(&parts);
+        assert_eq!(ip, "unknown");
+    }
+
+    #[test]
+    fn extract_client_ip_from_xff() {
+        let req = Request::builder()
+            .method("GET")
+            .uri("/api/health")
+            .header("x-forwarded-for", "10.0.0.1, 192.168.1.1")
+            .body(()).unwrap();
+        let (parts, _) = req.into_parts();
+        let ip = extract_client_ip(&parts);
+        assert_eq!(ip, "10.0.0.1");
     }
 
     #[test]

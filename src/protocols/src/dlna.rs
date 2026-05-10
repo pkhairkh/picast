@@ -49,6 +49,10 @@ pub struct DlnaRenderer {
     socks_addr: String,
     /// The spawned gmediarender child process.
     child: Arc<Mutex<Option<Child>>>,
+    /// Whether auto-restart on crash is enabled.
+    auto_restart: bool,
+    /// Number of restart attempts since last successful start.
+    restart_count: Arc<Mutex<u32>>,
 }
 
 impl DlnaRenderer {
@@ -59,6 +63,8 @@ impl DlnaRenderer {
             binary_path: "gmediarender".to_owned(),
             socks_addr: socks_addr.to_owned(),
             child: Arc::new(Mutex::new(None)),
+            auto_restart: true,
+            restart_count: Arc::new(Mutex::new(0)),
         }
     }
 
@@ -67,6 +73,18 @@ impl DlnaRenderer {
         self.binary_path = path.to_owned();
         self
     }
+
+    /// Enable or disable auto-restart on crash (default: enabled).
+    pub fn with_auto_restart(mut self, enabled: bool) -> Self {
+        self.auto_restart = enabled;
+        self
+    }
+
+    /// Maximum number of auto-restart attempts before giving up.
+    const MAX_RESTART_ATTEMPTS: u32 = 3;
+
+    /// Delay between restart attempts (seconds).
+    const RESTART_DELAY_SECS: u64 = 5;
 
     /// Start the DLNA renderer subprocess.
     ///
@@ -184,8 +202,85 @@ impl DlnaRenderer {
         }
 
         *guard = Some(child);
+
+        // Reset restart counter on successful start.
+        *self.restart_count.lock().await = 0;
+
         tracing::info!("gmediarender started successfully");
         Ok(())
+    }
+
+    /// Spawn a background task that monitors the gmediarender subprocess
+    /// and auto-restarts it on crash. The monitor runs until the
+    /// `shutdown` broadcast channel closes.
+    pub async fn start_health_monitor(&self, mut shutdown_rx: broadcast::Receiver<()>) {
+        if !self.auto_restart {
+            return;
+        }
+
+        loop {
+            tokio::select! {
+                _ = tokio::time::sleep(std::time::Duration::from_secs(10)) => {
+                    // Check if gmediarender has crashed (was running, now isn't).
+                    let was_running = {
+                        let mut guard = self.child.lock().await;
+                        match guard.as_mut() {
+                            Some(child) => {
+                                match child.try_wait() {
+                                    Ok(Some(status)) => {
+                                        tracing::warn!(
+                                            exit = ?status.code(),
+                                            "gmediarender process exited unexpectedly"
+                                        );
+                                        *guard = None;
+                                        true // Was running, now crashed
+                                    },
+                                    Ok(None) => false, // Still running
+                                    Err(_) => false,
+                                }
+                            },
+                            None => false, // Not running (may have been stopped intentionally)
+                        }
+                    };
+
+                    if was_running {
+                        let mut restart_count = self.restart_count.lock().await;
+                        if *restart_count < Self::MAX_RESTART_ATTEMPTS {
+                            *restart_count += 1;
+                            let attempt = *restart_count;
+                            drop(restart_count);
+
+                            tracing::warn!(
+                                attempt = attempt,
+                                max = Self::MAX_RESTART_ATTEMPTS,
+                                "auto-restarting gmediarender after crash"
+                            );
+
+                            tokio::time::sleep(
+                                std::time::Duration::from_secs(Self::RESTART_DELAY_SECS)
+                            ).await;
+
+                            if let Err(e) = self.start().await {
+                                tracing::error!(
+                                    error = %e,
+                                    attempt = attempt,
+                                    "auto-restart of gmediarender failed"
+                                );
+                            }
+                        } else {
+                            tracing::error!(
+                                max_attempts = Self::MAX_RESTART_ATTEMPTS,
+                                "gmediarender has crashed too many times — giving up auto-restart"
+                            );
+                        }
+                    }
+                },
+                _ = shutdown_rx.recv() => {
+                    tracing::debug!("gmediarender health monitor shutting down");
+                    break;
+                },
+            }
+        }
     }
 
     /// Stop the gmediarender subprocess.

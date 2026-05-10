@@ -50,8 +50,14 @@ use tokio::sync::{broadcast, Semaphore};
 use tokio_rustls::TlsAcceptor;
 use tokio_tungstenite::tungstenite::Message;
 
-/// Maximum number of concurrent WebSocket clients.
-const MAX_CONNECTIONS: usize = 32;
+/// Maximum number of concurrent WebSocket clients (configurable).
+const MAX_CONNECTIONS: usize = 50;
+/// Interval between server-to-client WebSocket ping frames.
+const WS_PING_INTERVAL_SECS: u64 = 30;
+/// Maximum message size (1 MB) to prevent memory exhaustion.
+const WS_MAX_MESSAGE_SIZE: usize = 1_048_576;
+/// Maximum frame size (1 MB) to prevent memory exhaustion.
+const WS_MAX_FRAME_SIZE: usize = 1_048_576;
 
 // ── Client → Server Commands ─────────────────────────────────────────
 
@@ -108,13 +114,22 @@ enum ServerEvent {
 ///
 /// Clients connect to `ws://<pi>:8586/ws` and receive player-state
 /// events in real time while sending control commands.
+///
+/// ## Connection Management
+///
+/// - Connection limit: `MAX_CONNECTIONS` (default 50) concurrent clients
+/// - Ping interval: `WS_PING_INTERVAL_SECS` (default 30s) server-to-client pings
+/// - Message size limit: `WS_MAX_MESSAGE_SIZE` (default 1MB) per message
+/// - Application-level PING/PONG for clients that can't send WS-level pings
 pub struct WebSocketServer {
     /// Socket address the server binds to.
     listen_addr: String,
     /// Reference to the session manager.
     session: Arc<SessionManager>,
-    /// Connection limiter — at most `MAX_CONNECTIONS` concurrent clients.
+    /// Connection limiter — at most `max_connections` concurrent clients.
     connection_limit: Arc<Semaphore>,
+    /// Maximum number of concurrent connections.
+    max_connections: usize,
     /// Optional TLS acceptor — if set, serves WSS.
     tls_acceptor: Option<Arc<TlsAcceptor>>,
 }
@@ -126,8 +141,16 @@ impl WebSocketServer {
             listen_addr: listen_addr.to_owned(),
             session,
             connection_limit: Arc::new(Semaphore::new(MAX_CONNECTIONS)),
+            max_connections: MAX_CONNECTIONS,
             tls_acceptor: None,
         }
+    }
+
+    /// Create a WebSocket server with a custom connection limit.
+    pub fn with_max_connections(mut self, max: usize) -> Self {
+        self.connection_limit = Arc::new(Semaphore::new(max));
+        self.max_connections = max;
+        self
     }
 
     /// Set a TLS acceptor to enable WSS.
@@ -153,6 +176,7 @@ impl WebSocketServer {
                     let (stream, remote) = accept_result?;
                     let session = self.session.clone();
                     let connection_limit = self.connection_limit.clone();
+                    let max_conns = self.max_connections;
                     let tls = self.tls_acceptor.clone();
 
                     tokio::spawn(async move {
@@ -163,17 +187,17 @@ impl WebSocketServer {
                                 tracing::warn!(
                                     remote = %remote,
                                     "WebSocket connection rejected — limit of {} reached",
-                                    MAX_CONNECTIONS
+                                    max_conns
                                 );
                                 // Do the handshake just to send an error, then close.
                                 let ws_config = tokio_tungstenite::tungstenite::protocol::WebSocketConfig {
-                                    max_message_size: Some(1_048_576),
-                                    max_frame_size: Some(1_048_576),
+                                    max_message_size: Some(WS_MAX_MESSAGE_SIZE),
+                                    max_frame_size: Some(WS_MAX_FRAME_SIZE),
                                     ..Default::default()
                                 };
                                 if let Ok(mut ws_err) = accept_ws(tls.as_deref(), stream, Some(ws_config)).await {
                                     let err = ServerEvent::Error {
-                                        message: format!("too many connections (max {})", MAX_CONNECTIONS),
+                                        message: format!("too many connections (max {})", max_conns),
                                     };
                                     if let Ok(json) = serde_json::to_string(&err) {
                                         let _ = ws_err.send(Message::text(json)).await;
@@ -185,8 +209,8 @@ impl WebSocketServer {
                         };
 
                         let ws_config = tokio_tungstenite::tungstenite::protocol::WebSocketConfig {
-                            max_message_size: Some(1_048_576), // 1 MB
-                            max_frame_size: Some(1_048_576),    // 1 MB
+                            max_message_size: Some(WS_MAX_MESSAGE_SIZE),
+                            max_frame_size: Some(WS_MAX_FRAME_SIZE),
                             ..Default::default()
                         };
                         match accept_ws(tls.as_deref(), stream, Some(ws_config)).await {
@@ -292,8 +316,8 @@ async fn handle_client(
     let connected_json = serde_json::to_string(&connected)?;
     ws.send(Message::text(connected_json)).await?;
 
-    // Ping interval.
-    let mut ping_interval = tokio::time::interval(Duration::from_secs(30));
+    // Ping interval — sends WS-level ping frames to detect dead connections.
+    let mut ping_interval = tokio::time::interval(Duration::from_secs(WS_PING_INTERVAL_SECS));
 
     loop {
         tokio::select! {
@@ -693,5 +717,165 @@ mod tests {
         } else {
             panic!("expected MediaStatus");
         }
+    }
+
+    #[test]
+    fn map_session_event_paused() {
+        use bogdan_session::PlayerState;
+        let mut session = MediaSession::new("https://example.com/video".into());
+        session.state = PlayerState::Paused;
+        session.position_ms = 10000;
+        let event = SessionEvent::Paused { id: session.id };
+        let result = map_session_event(&event, Some(&session));
+        assert!(result.is_some());
+        if let Some(ServerEvent::MediaStatus { state, .. }) = result {
+            assert_eq!(state, "paused");
+        }
+    }
+
+    #[test]
+    fn map_session_event_stopped() {
+        let event = SessionEvent::Stopped { id: uuid::Uuid::new_v4() };
+        let result = map_session_event(&event, None);
+        assert!(result.is_some());
+        if let Some(ServerEvent::MediaStatus { state, .. }) = result {
+            assert_eq!(state, "idle");
+        }
+    }
+
+    #[test]
+    fn map_session_event_buffering() {
+        let event = SessionEvent::Buffering { id: uuid::Uuid::new_v4(), percent: 75 };
+        let result = map_session_event(&event, None);
+        assert!(result.is_some());
+        if let Some(ServerEvent::ResolveProgress { percent }) = result {
+            assert_eq!(percent, 75);
+        }
+    }
+
+    #[test]
+    fn map_session_event_error() {
+        let event = SessionEvent::Error {
+            id: uuid::Uuid::new_v4(),
+            message: "resolve failed".into(),
+        };
+        let result = map_session_event(&event, None);
+        assert!(result.is_some());
+        if let Some(ServerEvent::Error { message }) = result {
+            assert_eq!(message, "resolve failed");
+        }
+    }
+
+    #[test]
+    fn map_session_event_cdn_forbidden() {
+        let event = SessionEvent::CdnForbidden { id: uuid::Uuid::new_v4() };
+        let result = map_session_event(&event, None);
+        assert!(result.is_some());
+        if let Some(ServerEvent::Error { message }) = result {
+            assert!(message.contains("403"));
+        }
+    }
+
+    #[test]
+    fn map_session_event_seeking() {
+        use bogdan_session::PlayerState;
+        let mut session = MediaSession::new("https://example.com/video".into());
+        session.state = PlayerState::Playing;
+        let event = SessionEvent::Seeking { id: session.id, position_ms: 30000 };
+        let result = map_session_event(&event, Some(&session));
+        assert!(result.is_some());
+        if let Some(ServerEvent::MediaStatus { state, position_ms, .. }) = result {
+            assert_eq!(state, "seeking");
+            assert_eq!(position_ms, 30000);
+        }
+    }
+
+    #[test]
+    fn map_session_event_volume_changed() {
+        use bogdan_session::PlayerState;
+        let mut session = MediaSession::new("https://example.com/video".into());
+        session.state = PlayerState::Playing;
+        session.volume = 50;
+        let event = SessionEvent::VolumeChanged { id: session.id, volume: 50 };
+        let result = map_session_event(&event, Some(&session));
+        assert!(result.is_some());
+        if let Some(ServerEvent::MediaStatus { volume, .. }) = result {
+            assert_eq!(volume, 50);
+        }
+    }
+
+    #[test]
+    fn map_session_event_resolving_is_resolve_progress() {
+        let event = SessionEvent::Resolving { id: uuid::Uuid::new_v4() };
+        let result = map_session_event(&event, None);
+        assert!(result.is_some());
+        if let Some(ServerEvent::ResolveProgress { percent }) = result {
+            assert_eq!(percent, 0);
+        }
+    }
+
+    #[test]
+    fn client_command_ping() {
+        let json = r#"{"type":"PING"}"#;
+        let cmd: ClientCommand = serde_json::from_str(json).unwrap();
+        assert!(matches!(cmd, ClientCommand::Ping));
+    }
+
+    #[test]
+    fn client_command_resume() {
+        let json = r#"{"type":"RESUME"}"#;
+        let cmd: ClientCommand = serde_json::from_str(json).unwrap();
+        assert!(matches!(cmd, ClientCommand::Resume));
+    }
+
+    #[test]
+    fn client_command_pause() {
+        let json = r#"{"type":"PAUSE"}"#;
+        let cmd: ClientCommand = serde_json::from_str(json).unwrap();
+        assert!(matches!(cmd, ClientCommand::Pause));
+    }
+
+    #[test]
+    fn server_event_pong() {
+        let event = ServerEvent::Pong;
+        let json = serde_json::to_string(&event).unwrap();
+        assert!(json.contains("PONG"));
+    }
+
+    #[test]
+    fn server_event_resolve_progress() {
+        let event = ServerEvent::ResolveProgress { percent: 42 };
+        let json = serde_json::to_string(&event).unwrap();
+        assert!(json.contains("RESOLVE_PROGRESS"));
+        assert!(json.contains("42"));
+    }
+
+    #[test]
+    fn ws_server_new_default_max() {
+        let session = Arc::new(SessionManager::new(":memory:").unwrap());
+        let server = WebSocketServer::new("0.0.0.0:8586", session);
+        assert_eq!(server.max_connections, MAX_CONNECTIONS);
+    }
+
+    #[test]
+    fn ws_server_with_custom_max_connections() {
+        let session = Arc::new(SessionManager::new(":memory:").unwrap());
+        let server = WebSocketServer::new("0.0.0.0:8586", session)
+            .with_max_connections(10);
+        assert_eq!(server.max_connections, 10);
+    }
+
+    #[test]
+    fn invalid_command_rejected() {
+        let json = r#"{"type":"UNKNOWN"}"#;
+        let result = serde_json::from_str::<ClientCommand>(json);
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn cast_command_rejects_invalid_json() {
+        let json = r#"{"type":"CAST"}"#;  // missing url
+        let result = serde_json::from_str::<ClientCommand>(json);
+        assert!(result.is_err());
     }
 }
