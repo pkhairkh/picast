@@ -17,7 +17,10 @@ SupplementaryGroups=video render audio
 # so the only way to release master is to unbind fbcon first.
 # The "-" prefix makes failure non-fatal (e.g. on vkms or systems
 # without fbcon).
-ExecStartPre=-/bin/sh -c 'for vt in /sys/class/vtconsole/vtcon*/bind; do [ -f "$vt" ] && echo 0 > "$vt" 2>/dev/null; done; true'
+# The "+" prefix runs this as root — required because the bogdan user
+# cannot write to /sys/class/vtconsole/.  The "-" prefix makes failure
+# non-fatal (e.g. on vkms or systems without fbcon).
+ExecStartPre=+-/bin/sh -c 'for vt in /sys/class/vtconsole/vtcon*/bind; do [ -f "$vt" ] && echo 0 > "$vt" 2>/dev/null; done; true'
 
 # CAP_SYS_ADMIN is kept for potential future use (e.g. DRM auth
 # magic).  It does NOT allow stealing DRM master from the console —

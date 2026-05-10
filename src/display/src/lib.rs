@@ -906,9 +906,10 @@ impl DisplayManager {
         tracing::info!("closed DRM device fd — kmssink will open it fresh and acquire DRM master automatically");
 
         // Initialize GBM device for OSD overlay surface allocation.
-        // This must happen after we close our fd above, because GBM
-        // needs to open the DRM device itself. We re-open temporarily
-        // for GBM initialization, then let GBM own its own fd.
+        // GBM now uses the DRM render node (/dev/dri/renderD128) which
+        // does NOT acquire DRM master, so it's safe to call here —
+        // kmssink will still be the first (and only) card node opener
+        // and will get DRM master automatically.
         if let Err(e) = self.init_gbm() {
             tracing::warn!(error = %e, "GBM initialization failed — OSD overlay will not be available");
         }
@@ -1158,15 +1159,40 @@ impl DisplayManager {
 
     /// Initialize GBM on the DRM device for OSD overlay surface allocation.
     ///
-    /// Opens the DRM device independently (kmssink may already have its own
-    /// fd). GBM needs a DRM fd to create scanout-capable buffers.
+    /// **Critical**: Opens the DRM **render node** (e.g. `/dev/dri/renderD128`)
+    /// instead of the card node (e.g. `/dev/dri/card1`). Render nodes are
+    /// designed for GPU compute/rendering without modesetting and do NOT
+    /// acquire DRM master. Using the card node would steal DRM master from
+    /// kmssink, causing `drmModeSetPlane` to fail with EPERM.
+    ///
+    /// On Raspberry Pi 4 with vc4, the render node is `/dev/dri/renderD128`
+    /// (associated with the v3d GPU driver). If the render node is not
+    /// available (e.g. on vkms), falls back to the card node with a warning.
     fn init_gbm(&mut self) -> Result<(), DisplayError> {
+        // Prefer the render node — it does NOT acquire DRM master.
+        let render_path = self.find_render_node();
+        let gbm_path = render_path.as_deref().unwrap_or(&self.device_path);
+
+        if render_path.is_some() {
+            tracing::info!(
+                path = %gbm_path,
+                "GBM: using DRM render node (no DRM master acquisition)"
+            );
+        } else {
+            tracing::warn!(
+                path = %gbm_path,
+                "GBM: no render node found — falling back to card node. \
+                 This may steal DRM master from kmssink and cause \
+                 drmModeSetPlane EPERM errors."
+            );
+        }
+
         let file = OpenOptions::new()
             .read(true)
             .write(true)
-            .open(&self.device_path)
+            .open(gbm_path)
             .map_err(|e| {
-                DisplayError::GbmAlloc(format!("cannot open DRM for GBM: {}: {}", self.device_path, e))
+                DisplayError::GbmAlloc(format!("cannot open DRM for GBM: {}: {}", gbm_path, e))
             })?;
 
         let card = Card(file);
@@ -1177,6 +1203,36 @@ impl DisplayManager {
         tracing::info!("GBM device initialized for OSD overlay surfaces");
         self.gbm_device = Some(GbmDevice { _device: gbm_dev });
         Ok(())
+    }
+
+    /// Find the DRM render node associated with the current device.
+    ///
+    /// On Raspberry Pi 4 with vc4, the render node is typically
+    /// `/dev/dri/renderD128` (v3d GPU). Render nodes do NOT acquire
+    /// DRM master and are safe to open alongside kmssink.
+    ///
+    /// Returns `None` if no render node is found.
+    fn find_render_node(&self) -> Option<String> {
+        let dri_dir = Path::new("/dev/dri");
+        if !dri_dir.exists() {
+            return None;
+        }
+
+        // Scan /dev/dri for render node entries (renderD*).
+        let entries = std::fs::read_dir(dri_dir).ok()?;
+        for entry in entries.flatten() {
+            let name = entry.file_name();
+            let name_str = name.to_string_lossy();
+            if name_str.starts_with("renderD") {
+                let path = format!("/dev/dri/{}", name_str);
+                if Path::new(&path).exists() {
+                    tracing::debug!(path = %path, "found DRM render node");
+                    return Some(path);
+                }
+            }
+        }
+
+        None
     }
 
     /// Allocate a GBM surface for the OSD overlay plane.
