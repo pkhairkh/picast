@@ -6,12 +6,11 @@ description = "DRM/KMS atomic modesetting display manager for boGDan on Raspberr
 
 [features]
 default = []
-hw = ["drm"]
+hw = ["drm", "gbm"]
 
 [dependencies]
 drm = { version = "0.12", optional = true }
-# gbm = { version = "0.2", optional = true }  # Future: for GBM buffer allocation
-# nix = { version = "0.28", features = ["ioctl"], optional = true }  # Future: for raw ioctls
+gbm = { version = "0.18", default-features = false, features = ["drm-support"], optional = true }
 thiserror = { workspace = true }
 tracing = { workspace = true }
 anyhow = { workspace = true }

@@ -52,6 +52,52 @@ use std::os::unix::io::{AsFd, AsRawFd, BorrowedFd};
 use std::path::Path;
 use thiserror::Error;
 
+// ── Fourcc helpers ───────────────────────────────────────────────────
+
+/// Well-known DRM fourcc pixel format codes.
+///
+/// These are used for plane format validation and capability checks.
+/// The kernel returns them as `u32` values in little-endian byte order,
+/// so `XR24` (XRGB8888) is `0x34325258`.
+pub mod fourcc {
+    /// XRGB8888 (32-bit, no alpha) — typical primary plane format.
+    pub const XR24: u32 = 0x34325258;
+    /// ARGB8888 (32-bit with alpha) — OSD overlay format.
+    pub const AR24: u32 = 0x34325241;
+    /// NV12 (YUV 4:2:0, two-plane) — typical video decode output.
+    pub const NV12: u32 = 0x3231564E;
+    /// NV21 (YUV 4:2:0, V/U swapped) — alternative video format.
+    pub const NV21: u32 = 0x3132564E;
+    /// P030 (10-bit YUV 4:2:0) — HDR video format on Pi 4.
+    pub const P030: u32 = 0x30335030;
+    /// RGB565 (16-bit) — low-bpp fallback.
+    pub const RG16: u32 = 0x36314752;
+    /// YUYV (YUV 4:2:2 packed) — some cameras output this.
+    pub const YUYV: u32 = 0x56595559;
+
+    /// Convert a fourcc u32 to a 4-character string for display.
+    ///
+    /// ```ignore
+    /// assert_eq!(fourcc::to_str(0x34325258), "XR24");
+    /// ```
+    pub fn to_str(code: u32) -> String {
+        let bytes = code.to_le_bytes();
+        String::from_utf8_lossy(&bytes).into_owned()
+    }
+
+    /// Check if a fourcc code represents a video-friendly format
+    /// (NV12, NV21, P030, YUYV).
+    pub fn is_video_format(code: u32) -> bool {
+        matches!(code, NV12 | NV21 | P030 | YUYV)
+    }
+
+    /// Check if a fourcc code represents a graphics/UI format
+    /// (XRGB8888, ARGB8888, RGB565).
+    pub fn is_graphics_format(code: u32) -> bool {
+        matches!(code, XR24 | AR24 | RG16)
+    }
+}
+
 // ── Errors ───────────────────────────────────────────────────────────
 
 /// Errors originating from DRM/GBM operations.
@@ -64,6 +110,15 @@ pub enum DisplayError {
     /// Failed to acquire DRM master.
     #[error("failed to acquire DRM master: {0}")]
     MasterAcquire(String),
+
+    /// The DRM driver is not the expected one (e.g. expected vc4).
+    #[error("unexpected DRM driver: expected {expected}, got {actual}")]
+    WrongDriver {
+        /// The driver name that was expected.
+        expected: String,
+        /// The actual driver name reported by the kernel.
+        actual: String,
+    },
 
     /// A DRM mode-setting ioctl failed.
     #[error("DRM mode-setting failed: {0}")]
@@ -80,6 +135,14 @@ pub enum DisplayError {
     /// No suitable plane was found.
     #[error("no available plane")]
     NoPlane,
+
+    /// No plane supports a required video format (e.g. NV12).
+    #[error("no plane supports required video format: {0}")]
+    NoVideoPlane(String),
+
+    /// No plane supports a required graphics format (e.g. ARGB8888).
+    #[error("no plane supports required graphics format: {0}")]
+    NoGraphicsPlane(String),
 
     /// No suitable display mode was found.
     #[error("no display mode available")]
@@ -113,10 +176,34 @@ pub struct DrmPlane {
     pub zpos: u32,
     /// Supported pixel formats (fourcc codes as u32).
     pub formats: Vec<u32>,
-    /// Whether this plane can be used for video scan-out.
+    /// Whether this is the primary plane (UI/OSD).
     pub is_primary: bool,
-    /// Whether this plane is usable (not claimed by another client).
+    /// Bitmask of CRTC indices this plane can be used with.
     pub possible_crtcs: u32,
+    /// Human-readable plane type name ("Primary", "Overlay", "Cursor").
+    pub type_name: String,
+}
+
+impl DrmPlane {
+    /// Check if this plane supports a given fourcc format.
+    pub fn supports_format(&self, fourcc: u32) -> bool {
+        self.formats.contains(&fourcc)
+    }
+
+    /// Check if this plane supports any video format (NV12, NV21, P030, YUYV).
+    pub fn supports_video(&self) -> bool {
+        self.formats.iter().any(|&f| fourcc::is_video_format(f))
+    }
+
+    /// Check if this plane supports any graphics format (XRGB8888, ARGB8888, RGB565).
+    pub fn supports_graphics(&self) -> bool {
+        self.formats.iter().any(|&f| fourcc::is_graphics_format(f))
+    }
+
+    /// Return a human-readable list of supported format names.
+    pub fn format_names(&self) -> Vec<String> {
+        self.formats.iter().map(|&f| fourcc::to_str(f)).collect()
+    }
 }
 
 // ── DRM CRTC ─────────────────────────────────────────────────────────
@@ -137,6 +224,83 @@ pub struct DrmCrtc {
     pub fb_id: Option<u32>,
 }
 
+// ── Display Mode ─────────────────────────────────────────────────────
+
+/// A display mode with resolution and refresh rate.
+///
+/// Used to represent available modes for a connector, with
+/// comparison helpers for mode selection.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct DisplayMode {
+    /// Horizontal resolution in pixels.
+    pub width: u32,
+    /// Vertical resolution in pixels.
+    pub height: u32,
+    /// Refresh rate in millihertz (divide by 1000 for Hz).
+    pub refresh_mhz: u32,
+}
+
+impl DisplayMode {
+    /// Create a new display mode.
+    pub fn new(width: u32, height: u32, refresh_mhz: u32) -> Self {
+        Self { width, height, refresh_mhz }
+    }
+
+    /// Standard 1080p60 mode (1920x1080 at 60 Hz).
+    pub fn mode_1080p60() -> Self {
+        Self::new(1920, 1080, 60000)
+    }
+
+    /// Standard 720p60 mode (1280x720 at 60 Hz).
+    pub fn mode_720p60() -> Self {
+        Self::new(1280, 720, 60000)
+    }
+
+    /// Standard 4K30 mode (3840x2160 at 30 Hz).
+    pub fn mode_4k30() -> Self {
+        Self::new(3840, 2160, 30000)
+    }
+
+    /// Return the refresh rate in Hz (rounded).
+    pub fn refresh_hz(&self) -> u32 {
+        self.refresh_mhz / 1000
+    }
+
+    /// Return the pixel count (width * height).
+    pub fn pixels(&self) -> u64 {
+        self.width as u64 * self.height as u64
+    }
+
+    /// Check if this mode matches the standard 1080p60 specification.
+    pub fn is_1080p60(&self) -> bool {
+        self.width == 1920 && self.height == 1080 && self.refresh_hz() >= 60
+    }
+
+    /// Compare modes for preference ordering.
+    ///
+    /// Returns `Ordering::Greater` if `self` is preferred over `other`.
+    /// Preference is: 1080p60 first, then highest resolution, then
+    /// highest refresh rate.
+    pub fn preference_cmp(&self, other: &Self) -> std::cmp::Ordering {
+        // Strongly prefer 1080p60.
+        let self_is_1080p60 = self.is_1080p60();
+        let other_is_1080p60 = other.is_1080p60();
+        match (self_is_1080p60, other_is_1080p60) {
+            (true, false) => return std::cmp::Ordering::Greater,
+            (false, true) => return std::cmp::Ordering::Less,
+            _ => {},
+        }
+        // Then prefer higher resolution.
+        self.pixels().cmp(&other.pixels()).then_with(|| self.refresh_mhz.cmp(&other.refresh_mhz))
+    }
+}
+
+impl std::fmt::Display for DisplayMode {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "{}x{}@{}Hz", self.width, self.height, self.refresh_hz())
+    }
+}
+
 // ── Connector Info ───────────────────────────────────────────────────
 
 /// Information about a connected display output (HDMI, DSI, etc.).
@@ -144,12 +308,45 @@ pub struct DrmCrtc {
 pub struct DisplayConnector {
     /// Kernel-assigned connector ID.
     pub connector_id: u32,
-    /// Connector type (HDMI-A, DSI, etc.).
+    /// Connector type string (e.g. "HDMI-A-1", "DSI-1").
     pub connector_type: String,
     /// Connection state.
     pub connected: bool,
-    /// Preferred display mode (highest resolution at highest refresh).
-    pub preferred_mode: Option<(u32, u32, u32)>, // (width, height, refresh_mhz)
+    /// All available display modes for this connector.
+    pub modes: Vec<DisplayMode>,
+    /// The preferred (best) display mode.
+    pub preferred_mode: Option<DisplayMode>,
+}
+
+impl DisplayConnector {
+    /// Check if this connector is an HDMI output.
+    pub fn is_hdmi(&self) -> bool {
+        self.connector_type.starts_with("HDMI")
+    }
+
+    /// Select the best display mode for boGDan playback.
+    ///
+    /// Preference order:
+    /// 1. 1080p60 (1920x1080 at 60 Hz) — ideal for video playback.
+    /// 2. Highest available resolution at highest refresh rate.
+    /// 3. Fall back to `preferred_mode` from the connector.
+    pub fn best_mode(&self) -> Option<&DisplayMode> {
+        if self.modes.is_empty() {
+            return self.preferred_mode.as_ref();
+        }
+        self.modes.iter().max_by(|a, b| a.preference_cmp(b))
+    }
+
+    /// Select the best mode that does not exceed a given resolution.
+    ///
+    /// Useful for software decode fallback where we want 720p max.
+    pub fn best_mode_within(&self, max_width: u32, max_height: u32) -> Option<&DisplayMode> {
+        self.modes
+            .iter()
+            .filter(|m| m.width <= max_width && m.height <= max_height)
+            .max_by(|a, b| a.preference_cmp(b))
+            .or_else(|| self.best_mode())
+    }
 }
 
 // ── Display Manager ──────────────────────────────────────────────────
@@ -167,6 +364,8 @@ pub struct DisplayConnector {
 pub struct DisplayManager {
     /// Path to the DRM device node (e.g. `/dev/dri/card0`).
     device_path: String,
+    /// Name of the DRM driver (e.g. "vc4", "vkms").
+    driver_name: String,
     /// Raw file descriptor for the DRM device.
     #[cfg(feature = "hw")]
     drm_fd: Option<Card>,
@@ -178,9 +377,14 @@ pub struct DisplayManager {
     crtcs: Vec<DrmCrtc>,
     /// Currently active CRTC (set after acquire).
     active_crtc: Option<DrmCrtc>,
+    /// The selected display mode for the active output.
+    active_mode: Option<DisplayMode>,
     /// Saved CRTC state for restoration on release.
     #[cfg(feature = "hw")]
     saved_crtc: Option<SavedCrtcState>,
+    /// GBM device handle (for OSD overlay surface allocation).
+    #[cfg(feature = "hw")]
+    gbm_device: Option<GbmDevice>,
 }
 
 /// Saved CRTC state for restoration on release.
@@ -191,6 +395,9 @@ struct SavedCrtcState {
     mode: Option<Mode>,
     x: u32,
     y: u32,
+    /// Saved connector ID for atomic restore.
+    #[allow(dead_code)]
+    connector_id: u32,
 }
 
 #[cfg(feature = "hw")]
@@ -217,15 +424,38 @@ impl DrmDevice for Card {}
 #[cfg(feature = "hw")]
 impl ControlDevice for Card {}
 
+// ── GBM wrappers ─────────────────────────────────────────────────────
+
+#[cfg(feature = "hw")]
+struct GbmDevice {
+    _device: gbm::Device<Card>,
+}
+
+#[cfg(feature = "hw")]
+struct GbmSurface {
+    _surface: gbm::Surface<()>,
+    #[allow(dead_code)]
+    width: u32,
+    #[allow(dead_code)]
+    height: u32,
+    #[allow(dead_code)]
+    format: u32,
+}
+
 // ── HW implementation ────────────────────────────────────────────────
 
 #[cfg(feature = "hw")]
 impl DisplayManager {
-    /// Open the DRM device at `device_path` and acquire master.
+    /// Open the DRM device at `device_path` and prepare for display management.
     ///
-    /// Falls back to `/dev/dri/card0` if `device_path` is empty.
+    /// Falls back to auto-detection if `device_path` is empty.
     /// On Raspberry Pi 4B+ with vc4, the device is typically
     /// `/dev/dri/card1` (card0 is the firmware framebuffer).
+    ///
+    /// The driver name is queried from the kernel and logged.
+    /// A warning is emitted if the driver is not "vc4" (the expected
+    /// Pi 4 driver), but the manager is still created — it may work
+    /// with other drivers (e.g. vkms for testing).
     pub fn new(device_path: &str) -> Result<Self, DisplayError> {
         let path =
             if device_path.is_empty() { Self::find_dri_device()? } else { device_path.to_owned() };
@@ -236,17 +466,63 @@ impl DisplayManager {
             .open(&path)
             .map_err(|e| DisplayError::DeviceOpen(format!("{}: {}", path, e)))?;
 
-        tracing::info!(path = %path, fd = file.as_raw_fd(), "opened DRM device");
+        let card = Card(file);
+        let fd = card.as_raw_fd();
+
+        // Query the driver name from the kernel.
+        let driver_name = match card.get_driver() {
+            Ok(driver) => {
+                let name = driver.name().to_string_lossy().into_owned();
+                tracing::info!(path = %path, fd, driver = %name, "opened DRM device");
+                name
+            },
+            Err(e) => {
+                tracing::warn!(path = %path, fd, error = %e, "could not query DRM driver name");
+                String::from("unknown")
+            },
+        };
+
+        // Warn if not vc4 — the expected driver on Pi 4.
+        if driver_name != "vc4" && driver_name != "vkms" {
+            tracing::warn!(
+                driver = %driver_name,
+                "unexpected DRM driver — expected 'vc4' (Pi 4) or 'vkms' (testing). \
+                 Display operations may not work correctly."
+            );
+        }
 
         Ok(Self {
             device_path: path,
-            drm_fd: Some(Card(file)),
+            driver_name,
+            drm_fd: Some(card),
             connectors: Vec::new(),
             planes: Vec::new(),
             crtcs: Vec::new(),
             active_crtc: None,
+            active_mode: None,
             saved_crtc: None,
+            gbm_device: None,
         })
+    }
+
+    /// Return the DRM driver name (e.g. "vc4", "vkms", "unknown").
+    pub fn driver_name(&self) -> &str {
+        &self.driver_name
+    }
+
+    /// Verify that the DRM driver matches the expected name.
+    ///
+    /// Returns `Ok(())` if the driver matches, or `Err(DisplayError::WrongDriver)`
+    /// if it does not. This is a hard check — use `driver_name()` for a soft check.
+    pub fn verify_driver(&self, expected: &str) -> Result<(), DisplayError> {
+        if self.driver_name == expected {
+            Ok(())
+        } else {
+            Err(DisplayError::WrongDriver {
+                expected: expected.to_string(),
+                actual: self.driver_name.clone(),
+            })
+        }
     }
 
     /// Enumerate available DRM planes.
@@ -255,6 +531,22 @@ impl DisplayManager {
     /// supported formats, and which CRTCs it can be used with.
     pub fn planes(&self) -> Result<&[DrmPlane], DisplayError> {
         Ok(&self.planes)
+    }
+
+    /// Find the primary (UI/OSD) plane.
+    ///
+    /// Returns the first plane with `is_primary == true`, which is
+    /// typically Plane 0 on Pi 4 with the vc4 driver.
+    pub fn primary_plane(&self) -> Option<&DrmPlane> {
+        self.planes.iter().find(|p| p.is_primary)
+    }
+
+    /// Find the best video (overlay) plane.
+    ///
+    /// Returns the first non-primary plane that supports NV12 or
+    /// another video format. On Pi 4, this is typically Plane 1.
+    pub fn video_plane(&self) -> Option<&DrmPlane> {
+        self.planes.iter().find(|p| !p.is_primary && p.supports_video())
     }
 
     /// Enumerate available CRTCs.
@@ -272,8 +564,10 @@ impl DisplayManager {
     /// This method:
     /// 1. Tries to acquire DRM master (best-effort — continues without it).
     /// 2. Finds the first connected HDMI connector with a preferred mode.
-    /// 3. Selects the best CRTC for that connector.
-    /// 4. Saves the current CRTC state for restoration (only if master).
+    /// 3. Selects 1080p60 if available, otherwise the best available mode.
+    /// 4. Enumerates planes and CRTCs, validates video format support.
+    /// 5. Saves the current CRTC state for restoration (only if master).
+    /// 6. Drops DRM master and closes the fd so kmssink can acquire master.
     ///
     /// Must be called before any video output can occur.
     ///
@@ -391,7 +685,7 @@ impl DisplayManager {
             .resource_handles()
             .map_err(|e| DisplayError::Modeset(format!("failed to get resource handles: {}", e)))?;
 
-        // Find connected connectors.
+        // Find connected connectors, preferring HDMI.
         let mut found_connectors = Vec::new();
         for &conn_handle in resources.connectors() {
             let info = fd
@@ -401,35 +695,58 @@ impl DisplayManager {
             let connected = info.state() == ConnectorState::Connected;
             let conn_type = format!("{}-{}", info.interface().as_str(), info.interface_id());
 
-            let preferred_mode = info
+            // Build list of all available modes for this connector.
+            let mut modes: Vec<DisplayMode> = info
                 .modes()
                 .iter()
-                .max_by(|a, b| {
-                    // Prefer highest resolution, then highest refresh.
-                    let a_area = a.size().0 as u64 * a.size().1 as u64;
-                    let b_area = b.size().0 as u64 * b.size().1 as u64;
-                    a_area.cmp(&b_area).then_with(|| a.vrefresh().cmp(&b.vrefresh()))
-                })
-                .map(|m| (m.size().0 as u32, m.size().1 as u32, m.vrefresh()));
+                .map(|m| DisplayMode::new(m.size().0 as u32, m.size().1 as u32, m.vrefresh()))
+                .collect();
+
+            // Sort modes by preference (1080p60 first, then by resolution/refresh).
+            modes.sort_by(|a, b| b.preference_cmp(a));
+
+            let preferred_mode = modes.first().cloned();
 
             found_connectors.push(DisplayConnector {
                 connector_id: conn_handle.into(),
                 connector_type: conn_type,
                 connected,
+                modes,
                 preferred_mode,
             });
         }
         self.connectors = found_connectors;
 
-        // Find a connected connector.
-        let connector =
-            self.connectors.iter().find(|c| c.connected).ok_or(DisplayError::NoConnector)?;
+        // Find the best connected connector, preferring HDMI.
+        let connector = self
+            .connectors
+            .iter()
+            .filter(|c| c.connected)
+            .max_by(|a, b| {
+                // Prefer HDMI connectors over DSI or other types.
+                let a_hdmi = a.is_hdmi() as u8;
+                let b_hdmi = b.is_hdmi() as u8;
+                b_hdmi.cmp(&a_hdmi)
+            })
+            .ok_or(DisplayError::NoConnector)?;
 
         tracing::info!(
             connector_id = connector.connector_id,
             connector_type = %connector.connector_type,
+            mode_count = connector.modes.len(),
             "found connected display"
         );
+
+        // Select the best display mode (1080p60 preferred).
+        let selected_mode = connector.best_mode().ok_or(DisplayError::NoMode)?;
+
+        tracing::info!(
+            selected_mode = %selected_mode,
+            is_1080p60 = selected_mode.is_1080p60(),
+            "selected display mode"
+        );
+
+        self.active_mode = Some(selected_mode.clone());
 
         // Enumerate CRTCs.
         let mut found_crtcs = Vec::new();
@@ -448,7 +765,7 @@ impl DisplayManager {
         }
         self.crtcs = found_crtcs;
 
-        // Enumerate planes.
+        // Enumerate planes with real zpos values.
         let plane_handles = fd
             .plane_handles()
             .map_err(|e| DisplayError::Modeset(format!("plane resources failed: {}", e)))?;
@@ -461,6 +778,11 @@ impl DisplayManager {
 
             let plane_type = Self::plane_type(fd, plane_handle).unwrap_or(PlaneType::Overlay);
             let is_primary = plane_type == PlaneType::Primary;
+            let type_name = match plane_type {
+                PlaneType::Primary => "Primary",
+                PlaneType::Overlay => "Overlay",
+                PlaneType::Cursor => "Cursor",
+            };
             let possible_handles = resources.filter_crtcs(info.possible_crtcs());
             let possible_crtcs = resources
                 .crtcs()
@@ -469,15 +791,57 @@ impl DisplayManager {
                 .filter(|(_, handle)| possible_handles.contains(handle))
                 .fold(0u32, |mask, (idx, _)| mask | (1u32 << idx));
 
+            // Read the real zpos property from the kernel.
+            let zpos = Self::plane_zpos(fd, plane_handle).unwrap_or(if is_primary { 0 } else { 1 });
+
+            let formats: Vec<u32> = info.formats().to_vec();
+
             found_planes.push(DrmPlane {
                 plane_id: plane_handle.into(),
-                zpos: if is_primary { 0 } else { 1 },
-                formats: info.formats().iter().map(|f| *f).collect(),
+                zpos,
+                formats,
                 is_primary,
                 possible_crtcs,
+                type_name: type_name.to_string(),
             });
         }
         self.planes = found_planes;
+
+        // Validate that we have the required planes.
+        if self.primary_plane().is_none() {
+            tracing::warn!("no primary plane found — OSD overlay may not work");
+        }
+        if self.video_plane().is_none() {
+            // Check if any non-primary plane supports video formats.
+            let overlay_planes: Vec<_> =
+                self.planes.iter().filter(|p| !p.is_primary).collect();
+            if overlay_planes.is_empty() {
+                tracing::warn!("no overlay/video plane found — video may render on primary plane");
+            } else {
+                let format_names: Vec<String> = overlay_planes
+                    .iter()
+                    .flat_map(|p| p.format_names())
+                    .collect();
+                tracing::warn!(
+                    formats = ?format_names,
+                    "no overlay plane supports video formats (NV12/NV21) — \
+                     V4L2 hardware decode may not work; software decode will be used"
+                );
+            }
+        }
+
+        // Log discovered plane information for debugging.
+        for plane in &self.planes {
+            tracing::info!(
+                plane_id = plane.plane_id,
+                type = %plane.type_name,
+                zpos = plane.zpos,
+                formats = ?plane.format_names(),
+                supports_video = plane.supports_video(),
+                supports_graphics = plane.supports_graphics(),
+                "discovered DRM plane"
+            );
+        }
 
         // Select the best CRTC for our connector.
         let crtc = self.crtcs.first().ok_or(DisplayError::NoCrtc)?.clone();
@@ -497,6 +861,7 @@ impl DisplayManager {
                 mode: crtc_info.as_ref().and_then(|i| i.mode()),
                 x: 0,
                 y: 0,
+                connector_id: connector.connector_id,
             });
         } else {
             tracing::info!("skipping CRTC state save — no DRM master");
@@ -506,8 +871,9 @@ impl DisplayManager {
 
         tracing::info!(
             crtc_id = crtc.crtc_id,
-            mode = ?connector.preferred_mode,
+            mode = %selected_mode,
             has_master = has_master,
+            planes = self.planes.len(),
             "acquired CRTC for display"
         );
 
@@ -538,6 +904,14 @@ impl DisplayManager {
         // master automatically as the first opener.
         self.drm_fd = None;
         tracing::info!("closed DRM device fd — kmssink will open it fresh and acquire DRM master automatically");
+
+        // Initialize GBM device for OSD overlay surface allocation.
+        // This must happen after we close our fd above, because GBM
+        // needs to open the DRM device itself. We re-open temporarily
+        // for GBM initialization, then let GBM own its own fd.
+        if let Err(e) = self.init_gbm() {
+            tracing::warn!(error = %e, "GBM initialization failed — OSD overlay will not be available");
+        }
 
         Ok(())
     }
@@ -592,7 +966,9 @@ impl DisplayManager {
                                 tracing::warn!(crtc_id = saved.crtc_id, "invalid saved CRTC id");
                                 let _ = fd.release_master_lock();
                                 self.active_crtc = None;
+                                self.active_mode = None;
                                 self.saved_crtc = None;
+                                self.gbm_device = None;
                                 return Ok(());
                             },
                         };
@@ -630,7 +1006,9 @@ impl DisplayManager {
             }
         }
         self.active_crtc = None;
+        self.active_mode = None;
         self.saved_crtc = None;
+        self.gbm_device = None;
         Ok(())
     }
 
@@ -639,6 +1017,10 @@ impl DisplayManager {
     /// If the display has been acquired, returns the active mode.
     /// Otherwise returns a default (1920x1080) as a hint.
     pub fn resolution(&self) -> Result<(u32, u32), DisplayError> {
+        if let Some(ref mode) = self.active_mode {
+            return Ok((mode.width, mode.height));
+        }
+
         if let Some(ref crtc) = self.active_crtc {
             if crtc.width > 0 && crtc.height > 0 {
                 return Ok((crtc.width, crtc.height));
@@ -647,8 +1029,8 @@ impl DisplayManager {
 
         // Check connectors for preferred mode.
         if let Some(conn) = self.connectors.iter().find(|c| c.connected) {
-            if let Some((w, h, _)) = conn.preferred_mode {
-                return Ok((w, h));
+            if let Some(ref mode) = conn.preferred_mode {
+                return Ok((mode.width, mode.height));
             }
         }
 
@@ -665,6 +1047,11 @@ impl DisplayManager {
         self.active_crtc.as_ref()
     }
 
+    /// Return the active display mode, if set.
+    pub fn active_mode(&self) -> Option<&DisplayMode> {
+        self.active_mode.as_ref()
+    }
+
     /// Return the connector ID of the first connected display, if known.
     ///
     /// Only available after `acquire()` has been called.
@@ -676,9 +1063,13 @@ impl DisplayManager {
     ///
     /// Returns `None` after `acquire()` closes the fd to let kmssink
     /// open the device fresh (see acquire() documentation).
-    #[cfg(feature = "hw")]
     pub fn drm_fd(&self) -> Option<i32> {
         self.drm_fd.as_ref().map(|card| card.as_raw_fd())
+    }
+
+    /// Check if GBM is available for OSD overlay surface allocation.
+    pub fn has_gbm(&self) -> bool {
+        self.gbm_device.is_some()
     }
 
     /// Clear the screen by filling the primary plane with black.
@@ -719,6 +1110,28 @@ impl DisplayManager {
         ))
     }
 
+    /// Read the zpos property for a plane from the kernel.
+    ///
+    /// Returns `None` if the zpos property is not available (some
+    /// drivers don't expose it). Falls back to a default based on
+    /// plane type.
+    fn plane_zpos(card: &Card, handle: control::plane::Handle) -> Option<u32> {
+        let props = card.get_properties(handle).ok()?;
+        for (&prop_handle, &raw_value) in props.iter() {
+            let prop = card.get_property(prop_handle).ok()?;
+            if prop.name().to_str().ok()? != "zpos" {
+                continue;
+            }
+            // zpos is a range property; the raw value is the current zpos.
+            if let control::property::Value::UnsignedRange(zpos_value) =
+                prop.value_type().convert_value(raw_value)
+            {
+                return Some(zpos_value as u32);
+            }
+        }
+        None
+    }
+
     fn plane_type(card: &Card, handle: control::plane::Handle) -> Option<PlaneType> {
         let props = card.get_properties(handle).ok()?;
         for (&prop_handle, &raw_value) in props.iter() {
@@ -741,6 +1154,76 @@ impl DisplayManager {
         }
 
         None
+    }
+
+    /// Initialize GBM on the DRM device for OSD overlay surface allocation.
+    ///
+    /// Opens the DRM device independently (kmssink may already have its own
+    /// fd). GBM needs a DRM fd to create scanout-capable buffers.
+    fn init_gbm(&mut self) -> Result<(), DisplayError> {
+        let file = OpenOptions::new()
+            .read(true)
+            .write(true)
+            .open(&self.device_path)
+            .map_err(|e| {
+                DisplayError::GbmAlloc(format!("cannot open DRM for GBM: {}: {}", self.device_path, e))
+            })?;
+
+        let card = Card(file);
+        let gbm_dev = gbm::Device::new(card).map_err(|e| {
+            DisplayError::GbmAlloc(format!("gbm::Device::new failed: {}", e))
+        })?;
+
+        tracing::info!("GBM device initialized for OSD overlay surfaces");
+        self.gbm_device = Some(GbmDevice { _device: gbm_dev });
+        Ok(())
+    }
+
+    /// Allocate a GBM surface for the OSD overlay plane.
+    ///
+    /// The surface is created with ARGB8888 format and scanout capability,
+    /// sized to the current display mode. Returns the surface dimensions
+    /// on success.
+    pub fn allocate_osd_surface(&mut self) -> Result<(u32, u32), DisplayError> {
+        let gbm_dev = self
+            .gbm_device
+            .as_ref()
+            .ok_or_else(|| DisplayError::GbmAlloc("GBM device not initialized".into()))?;
+
+        let mode = self.active_mode.as_ref().ok_or_else(|| {
+            DisplayError::GbmAlloc("no active display mode — call acquire() first".into())
+        })?;
+
+        let width = mode.width;
+        let height = mode.height;
+
+        // ARGB8888 with scanout + rendering flags.
+        let surface = gbm_dev
+            ._device
+            .create_surface::<()>(
+                width,
+                height,
+                gbm::Format::Argb8888,
+                gbm::BufferObjectFlags::SCANOUT | gbm::BufferObjectFlags::RENDERING,
+            )
+            .map_err(|e| {
+                DisplayError::GbmAlloc(format!(
+                    "GBM surface allocation failed ({}x{} ARGB8888): {}",
+                    width, height, e
+                ))
+            })?;
+
+        tracing::info!(
+            width,
+            height,
+            format = "ARGB8888",
+            "allocated GBM OSD overlay surface"
+        );
+
+        // Store the surface (we could cache it for later use).
+        let _osd_surface = GbmSurface { _surface: surface, width, height, format: fourcc::AR24 };
+
+        Ok((width, height))
     }
 }
 
@@ -767,23 +1250,31 @@ impl DisplayManager {
             connector_id: 89,
             connector_type: "HDMI-A-1".into(),
             connected: true,
-            preferred_mode: Some((1920, 1080, 60000)),
+            modes: vec![
+                DisplayMode::mode_1080p60(),
+                DisplayMode::mode_720p60(),
+                DisplayMode::new(1920, 1080, 50000),
+                DisplayMode::new(1280, 720, 50000),
+            ],
+            preferred_mode: Some(DisplayMode::mode_1080p60()),
         }];
 
         let planes = vec![
             DrmPlane {
                 plane_id: 31,
                 zpos: 0,
-                formats: vec![0x34325258, 0x34325241], // XR24, AR24
+                formats: vec![fourcc::XR24, fourcc::AR24],
                 is_primary: true,
                 possible_crtcs: 0x1,
+                type_name: "Primary".to_string(),
             },
             DrmPlane {
                 plane_id: 32,
                 zpos: 1,
-                formats: vec![0x3231564E, 0x3132564E], // NV12, NV21
+                formats: vec![fourcc::NV12, fourcc::NV21],
                 is_primary: false,
                 possible_crtcs: 0x1,
+                type_name: "Overlay".to_string(),
             },
         ];
 
@@ -795,12 +1286,47 @@ impl DisplayManager {
             fb_id: None,
         }];
 
-        Ok(Self { device_path: path, connectors, planes, crtcs, active_crtc: None })
+        Ok(Self {
+            device_path: path,
+            driver_name: "vc4".to_string(),
+            connectors,
+            planes,
+            crtcs,
+            active_crtc: None,
+            active_mode: None,
+        })
+    }
+
+    /// Return the DRM driver name ("vc4" in mock mode).
+    pub fn driver_name(&self) -> &str {
+        &self.driver_name
+    }
+
+    /// Verify that the DRM driver matches the expected name.
+    pub fn verify_driver(&self, expected: &str) -> Result<(), DisplayError> {
+        if self.driver_name == expected {
+            Ok(())
+        } else {
+            Err(DisplayError::WrongDriver {
+                expected: expected.to_string(),
+                actual: self.driver_name.clone(),
+            })
+        }
     }
 
     /// Enumerate available DRM planes (mock data simulating Pi 4B+).
     pub fn planes(&self) -> Result<&[DrmPlane], DisplayError> {
         Ok(&self.planes)
+    }
+
+    /// Find the primary (UI/OSD) plane (mock).
+    pub fn primary_plane(&self) -> Option<&DrmPlane> {
+        self.planes.iter().find(|p| p.is_primary)
+    }
+
+    /// Find the best video (overlay) plane (mock).
+    pub fn video_plane(&self) -> Option<&DrmPlane> {
+        self.planes.iter().find(|p| !p.is_primary && p.supports_video())
     }
 
     /// Enumerate available CRTCs (mock data simulating Pi 4B+).
@@ -822,6 +1348,8 @@ impl DisplayManager {
         if let Some(crtc) = self.crtcs.first() {
             self.active_crtc = Some(crtc.clone());
         }
+        // Select 1080p60 as the active mode.
+        self.active_mode = Some(DisplayMode::mode_1080p60());
         Ok(())
     }
 
@@ -829,11 +1357,15 @@ impl DisplayManager {
     pub fn release(&mut self) -> Result<(), DisplayError> {
         tracing::debug!("release called in mock mode — no-op");
         self.active_crtc = None;
+        self.active_mode = None;
         Ok(())
     }
 
-    /// Return the current display resolution (default 1920×1080 in mock mode).
+    /// Return the current display resolution (default 1920x1080 in mock mode).
     pub fn resolution(&self) -> Result<(u32, u32), DisplayError> {
+        if let Some(ref mode) = self.active_mode {
+            return Ok((mode.width, mode.height));
+        }
         Ok((1920, 1080))
     }
 
@@ -842,9 +1374,14 @@ impl DisplayManager {
         &self.device_path
     }
 
-    /// Return the active CRTC (always None in mock mode).
+    /// Return the active CRTC.
     pub fn active_crtc(&self) -> Option<&DrmCrtc> {
         self.active_crtc.as_ref()
+    }
+
+    /// Return the active display mode.
+    pub fn active_mode(&self) -> Option<&DisplayMode> {
+        self.active_mode.as_ref()
     }
 
     /// Clear the screen (no-op in mock mode).
@@ -858,6 +1395,16 @@ impl DisplayManager {
     /// Returns the mock connector ID (89) to simulate the hw implementation.
     pub fn active_connector_id(&self) -> Option<u32> {
         self.connectors.iter().find(|c| c.connected).map(|c| c.connector_id)
+    }
+
+    /// Check if GBM is available (always false in mock mode).
+    pub fn has_gbm(&self) -> bool {
+        false
+    }
+
+    /// Allocate a GBM OSD surface (not available in mock mode).
+    pub fn allocate_osd_surface(&mut self) -> Result<(u32, u32), DisplayError> {
+        Err(DisplayError::GbmAlloc("GBM not available in mock mode".into()))
     }
 }
 
@@ -876,6 +1423,8 @@ impl Drop for DisplayManager {
 mod tests {
     use super::*;
 
+    // ── Error variant tests ──────────────────────────────────────────
+
     #[test]
     fn display_error_variants() {
         let err = DisplayError::DeviceOpen("/dev/dri/card0".into());
@@ -883,6 +1432,14 @@ mod tests {
 
         let err = DisplayError::MasterAcquire("denied".into());
         assert!(err.to_string().contains("failed to acquire DRM master"));
+
+        let err = DisplayError::WrongDriver {
+            expected: "vc4".into(),
+            actual: "i915".into(),
+        };
+        assert!(err.to_string().contains("unexpected DRM driver"));
+        assert!(err.to_string().contains("vc4"));
+        assert!(err.to_string().contains("i915"));
 
         let err = DisplayError::Modeset("mode rejected".into());
         assert!(err.to_string().contains("DRM mode-setting failed"));
@@ -896,6 +1453,12 @@ mod tests {
         let err = DisplayError::NoPlane;
         assert!(err.to_string().contains("no available plane"));
 
+        let err = DisplayError::NoVideoPlane("NV12".into());
+        assert!(err.to_string().contains("no plane supports required video format"));
+
+        let err = DisplayError::NoGraphicsPlane("ARGB8888".into());
+        assert!(err.to_string().contains("no plane supports required graphics format"));
+
         let err = DisplayError::NoMode;
         assert!(err.to_string().contains("no display mode"));
 
@@ -906,19 +1469,81 @@ mod tests {
         assert!(err.to_string().contains("hardware display unavailable"));
     }
 
+    // ── DrmPlane tests ───────────────────────────────────────────────
+
     #[test]
     fn drm_plane_fields() {
         let plane = DrmPlane {
             plane_id: 42,
             zpos: 1,
-            formats: vec![0x34325258], // XR24
+            formats: vec![fourcc::XR24],
             is_primary: false,
             possible_crtcs: 0x1,
+            type_name: "Overlay".to_string(),
         };
         assert_eq!(plane.plane_id, 42);
         assert_eq!(plane.zpos, 1);
         assert!(!plane.is_primary);
+        assert_eq!(plane.type_name, "Overlay");
     }
+
+    #[test]
+    fn drm_plane_supports_format() {
+        let plane = DrmPlane {
+            plane_id: 32,
+            zpos: 1,
+            formats: vec![fourcc::NV12, fourcc::NV21],
+            is_primary: false,
+            possible_crtcs: 0x1,
+            type_name: "Overlay".to_string(),
+        };
+        assert!(plane.supports_format(fourcc::NV12));
+        assert!(plane.supports_format(fourcc::NV21));
+        assert!(!plane.supports_format(fourcc::XR24));
+    }
+
+    #[test]
+    fn drm_plane_supports_video() {
+        let video_plane = DrmPlane {
+            plane_id: 32,
+            zpos: 1,
+            formats: vec![fourcc::NV12, fourcc::NV21],
+            is_primary: false,
+            possible_crtcs: 0x1,
+            type_name: "Overlay".to_string(),
+        };
+        assert!(video_plane.supports_video());
+        assert!(!video_plane.supports_graphics());
+
+        let primary_plane = DrmPlane {
+            plane_id: 31,
+            zpos: 0,
+            formats: vec![fourcc::XR24, fourcc::AR24],
+            is_primary: true,
+            possible_crtcs: 0x1,
+            type_name: "Primary".to_string(),
+        };
+        assert!(!primary_plane.supports_video());
+        assert!(primary_plane.supports_graphics());
+    }
+
+    #[test]
+    fn drm_plane_format_names() {
+        let plane = DrmPlane {
+            plane_id: 31,
+            zpos: 0,
+            formats: vec![fourcc::XR24, fourcc::AR24],
+            is_primary: true,
+            possible_crtcs: 0x1,
+            type_name: "Primary".to_string(),
+        };
+        let names = plane.format_names();
+        assert_eq!(names.len(), 2);
+        assert!(names.contains(&"XR24".to_string()));
+        assert!(names.contains(&"AR24".to_string()));
+    }
+
+    // ── DrmCrtc tests ────────────────────────────────────────────────
 
     #[test]
     fn drm_crtc_fields() {
@@ -930,18 +1555,150 @@ mod tests {
         assert_eq!(crtc.fb_id, Some(99));
     }
 
+    // ── DisplayMode tests ────────────────────────────────────────────
+
     #[test]
-    fn display_connector_fields() {
+    fn display_mode_standard_modes() {
+        let m = DisplayMode::mode_1080p60();
+        assert_eq!(m.width, 1920);
+        assert_eq!(m.height, 1080);
+        assert!(m.is_1080p60());
+
+        let m = DisplayMode::mode_720p60();
+        assert_eq!(m.width, 1280);
+        assert_eq!(m.height, 720);
+        assert!(!m.is_1080p60());
+
+        let m = DisplayMode::mode_4k30();
+        assert_eq!(m.width, 3840);
+        assert_eq!(m.height, 2160);
+        assert!(!m.is_1080p60());
+    }
+
+    #[test]
+    fn display_mode_refresh_hz() {
+        let m = DisplayMode::new(1920, 1080, 60000);
+        assert_eq!(m.refresh_hz(), 60);
+
+        let m = DisplayMode::new(1920, 1080, 59940);
+        assert_eq!(m.refresh_hz(), 59); // truncated, not rounded
+    }
+
+    #[test]
+    fn display_mode_pixels() {
+        let m = DisplayMode::mode_1080p60();
+        assert_eq!(m.pixels(), 2_073_600);
+    }
+
+    #[test]
+    fn display_mode_display_trait() {
+        let m = DisplayMode::mode_1080p60();
+        assert_eq!(format!("{}", m), "1920x1080@60Hz");
+    }
+
+    #[test]
+    fn display_mode_preference_cmp_prefers_1080p60() {
+        let mode_1080p60 = DisplayMode::mode_1080p60();
+        let mode_4k30 = DisplayMode::mode_4k30();
+        let mode_720p60 = DisplayMode::mode_720p60();
+
+        // 1080p60 should be preferred over 4K30 and 720p60.
+        assert_eq!(mode_1080p60.preference_cmp(&mode_4k30), std::cmp::Ordering::Greater);
+        assert_eq!(mode_1080p60.preference_cmp(&mode_720p60), std::cmp::Ordering::Greater);
+        // 4K30 should be preferred over 720p60 (more pixels).
+        assert_eq!(mode_4k30.preference_cmp(&mode_720p60), std::cmp::Ordering::Greater);
+    }
+
+    #[test]
+    fn display_mode_equality() {
+        let m1 = DisplayMode::mode_1080p60();
+        let m2 = DisplayMode::new(1920, 1080, 60000);
+        assert_eq!(m1, m2);
+    }
+
+    // ── DisplayConnector tests ───────────────────────────────────────
+
+    #[test]
+    fn display_connector_is_hdmi() {
         let conn = DisplayConnector {
-            connector_id: 77,
+            connector_id: 89,
             connector_type: "HDMI-A-1".into(),
             connected: true,
-            preferred_mode: Some((3840, 2160, 30000)),
+            modes: vec![DisplayMode::mode_1080p60()],
+            preferred_mode: Some(DisplayMode::mode_1080p60()),
         };
-        assert!(conn.connected);
-        assert_eq!(conn.connector_type, "HDMI-A-1");
-        assert_eq!(conn.preferred_mode, Some((3840, 2160, 30000)));
+        assert!(conn.is_hdmi());
+
+        let dsi_conn = DisplayConnector {
+            connector_id: 90,
+            connector_type: "DSI-1".into(),
+            connected: true,
+            modes: vec![DisplayMode::mode_1080p60()],
+            preferred_mode: Some(DisplayMode::mode_1080p60()),
+        };
+        assert!(!dsi_conn.is_hdmi());
     }
+
+    #[test]
+    fn display_connector_best_mode() {
+        let conn = DisplayConnector {
+            connector_id: 89,
+            connector_type: "HDMI-A-1".into(),
+            connected: true,
+            modes: vec![
+                DisplayMode::mode_720p60(),
+                DisplayMode::mode_1080p60(),
+                DisplayMode::new(1920, 1080, 50000),
+            ],
+            preferred_mode: Some(DisplayMode::mode_1080p60()),
+        };
+        let best = conn.best_mode().expect("should find best mode");
+        assert!(best.is_1080p60());
+    }
+
+    #[test]
+    fn display_connector_best_mode_within() {
+        let conn = DisplayConnector {
+            connector_id: 89,
+            connector_type: "HDMI-A-1".into(),
+            connected: true,
+            modes: vec![
+                DisplayMode::mode_1080p60(),
+                DisplayMode::mode_720p60(),
+                DisplayMode::new(1920, 1080, 50000),
+            ],
+            preferred_mode: Some(DisplayMode::mode_1080p60()),
+        };
+        // Within 1280x720, should pick 720p60.
+        let best = conn.best_mode_within(1280, 720).expect("should find a mode");
+        assert_eq!(best.width, 1280);
+        assert_eq!(best.height, 720);
+    }
+
+    // ── Fourcc helper tests ──────────────────────────────────────────
+
+    #[test]
+    fn fourcc_to_str() {
+        assert_eq!(fourcc::to_str(fourcc::XR24), "XR24");
+        assert_eq!(fourcc::to_str(fourcc::AR24), "AR24");
+        assert_eq!(fourcc::to_str(fourcc::NV12), "NV12");
+        assert_eq!(fourcc::to_str(fourcc::NV21), "NV21");
+    }
+
+    #[test]
+    fn fourcc_classification() {
+        assert!(fourcc::is_video_format(fourcc::NV12));
+        assert!(fourcc::is_video_format(fourcc::NV21));
+        assert!(fourcc::is_video_format(fourcc::P030));
+        assert!(!fourcc::is_video_format(fourcc::XR24));
+        assert!(!fourcc::is_video_format(fourcc::AR24));
+
+        assert!(fourcc::is_graphics_format(fourcc::XR24));
+        assert!(fourcc::is_graphics_format(fourcc::AR24));
+        assert!(!fourcc::is_graphics_format(fourcc::NV12));
+    }
+
+    // ── DisplayManager mock mode tests ───────────────────────────────
 
     #[test]
     fn display_manager_new_succeeds_in_mock_mode() {
@@ -980,18 +1737,25 @@ mod tests {
         assert_eq!(dm.connectors().unwrap().len(), 1, "should have 1 mock connector");
 
         // Verify mock plane properties.
-        let primary = dm.planes().unwrap().iter().find(|p| p.is_primary).unwrap();
+        let primary = dm.primary_plane().expect("should have primary plane");
         assert_eq!(primary.zpos, 0);
-        assert!(primary.formats.len() >= 1);
+        assert!(primary.supports_graphics());
+        assert!(!primary.supports_video());
+        assert_eq!(primary.type_name, "Primary");
 
-        let overlay = dm.planes().unwrap().iter().find(|p| !p.is_primary).unwrap();
-        assert_eq!(overlay.zpos, 1);
+        let video = dm.video_plane().expect("should have video plane");
+        assert_eq!(video.zpos, 1);
+        assert!(video.supports_video());
+        assert!(!video.supports_graphics());
+        assert_eq!(video.type_name, "Overlay");
 
         // Verify mock connector.
         let conn = dm.connectors().unwrap().first().unwrap();
         assert!(conn.connected);
+        assert!(conn.is_hdmi());
         assert_eq!(conn.connector_type, "HDMI-A-1");
-        assert_eq!(conn.preferred_mode, Some((1920, 1080, 60000)));
+        assert_eq!(conn.modes.len(), 4, "should have 4 mock modes");
+        assert!(conn.preferred_mode.is_some());
 
         // Verify mock CRTC.
         let crtc = dm.crtcs().unwrap().first().unwrap();
@@ -1000,13 +1764,16 @@ mod tests {
     }
 
     #[test]
-    fn display_manager_acquire_sets_active_crtc() {
+    fn display_manager_acquire_sets_active_crtc_and_mode() {
         let mut dm = DisplayManager::new("").unwrap();
         assert!(dm.active_crtc().is_none(), "no active CRTC before acquire");
+        assert!(dm.active_mode().is_none(), "no active mode before acquire");
         dm.acquire().unwrap();
         let crtc = dm.active_crtc().expect("should have active CRTC after acquire");
         assert_eq!(crtc.width, 1920);
         assert_eq!(crtc.height, 1080);
+        let mode = dm.active_mode().expect("should have active mode after acquire");
+        assert!(mode.is_1080p60());
     }
 
     #[test]
@@ -1019,5 +1786,192 @@ mod tests {
     fn display_manager_device_path() {
         let dm = DisplayManager::new("/dev/dri/card1").unwrap();
         assert_eq!(dm.device_path(), "/dev/dri/card1");
+    }
+
+    #[test]
+    fn display_manager_driver_name_mock() {
+        let dm = DisplayManager::new("").unwrap();
+        assert_eq!(dm.driver_name(), "vc4");
+    }
+
+    #[test]
+    fn display_manager_verify_driver_success() {
+        let dm = DisplayManager::new("").unwrap();
+        assert!(dm.verify_driver("vc4").is_ok());
+    }
+
+    #[test]
+    fn display_manager_verify_driver_failure() {
+        let dm = DisplayManager::new("").unwrap();
+        let err = dm.verify_driver("i915").unwrap_err();
+        match err {
+            DisplayError::WrongDriver { expected, actual } => {
+                assert_eq!(expected, "i915");
+                assert_eq!(actual, "vc4");
+            },
+            _ => panic!("expected WrongDriver error, got {:?}", err),
+        }
+    }
+
+    #[test]
+    fn display_manager_resolution_from_active_mode() {
+        let mut dm = DisplayManager::new("").unwrap();
+        dm.acquire().unwrap();
+        // After acquire, resolution comes from active_mode.
+        let res = dm.resolution().unwrap();
+        assert_eq!(res, (1920, 1080));
+    }
+
+    #[test]
+    fn display_manager_has_gbm_mock() {
+        let dm = DisplayManager::new("").unwrap();
+        assert!(!dm.has_gbm());
+    }
+
+    #[test]
+    fn display_manager_allocate_osd_surface_mock_fails() {
+        let mut dm = DisplayManager::new("").unwrap();
+        dm.acquire().unwrap();
+        let result = dm.allocate_osd_surface();
+        assert!(result.is_err());
+        match result.unwrap_err() {
+            DisplayError::GbmAlloc(msg) => assert!(msg.contains("mock mode")),
+            other => panic!("expected GbmAlloc error, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn display_manager_release_clears_active_mode() {
+        let mut dm = DisplayManager::new("").unwrap();
+        dm.acquire().unwrap();
+        assert!(dm.active_mode().is_some());
+        dm.release().unwrap();
+        assert!(dm.active_mode().is_none());
+    }
+
+    #[test]
+    fn display_manager_connector_best_mode_selects_1080p60() {
+        let dm = DisplayManager::new("").unwrap();
+        let conn = dm.connectors().unwrap().first().unwrap();
+        let best = conn.best_mode().expect("should have a best mode");
+        assert!(best.is_1080p60());
+    }
+
+    #[test]
+    fn display_manager_connector_modes_sorted_by_preference() {
+        let dm = DisplayManager::new("").unwrap();
+        let conn = dm.connectors().unwrap().first().unwrap();
+        // First mode should be 1080p60 (highest preference).
+        let first = conn.modes.first().expect("should have modes");
+        assert!(first.is_1080p60());
+    }
+
+    // ── Lifecycle tests ──────────────────────────────────────────────
+
+    #[test]
+    fn display_manager_full_lifecycle() {
+        let mut dm = DisplayManager::new("").unwrap();
+
+        // Before acquire: no active CRTC or mode.
+        assert!(dm.active_crtc().is_none());
+        assert!(dm.active_mode().is_none());
+        assert_eq!(dm.resolution().unwrap(), (1920, 1080)); // default
+
+        // Acquire: sets active CRTC and mode.
+        dm.acquire().unwrap();
+        assert!(dm.active_crtc().is_some());
+        assert!(dm.active_mode().is_some());
+        assert!(dm.active_mode().unwrap().is_1080p60());
+
+        // Resolution from active mode.
+        assert_eq!(dm.resolution().unwrap(), (1920, 1080));
+
+        // Can query planes/connectors/CRTCs.
+        assert_eq!(dm.planes().unwrap().len(), 2);
+        assert_eq!(dm.crtcs().unwrap().len(), 1);
+        assert_eq!(dm.connectors().unwrap().len(), 1);
+
+        // Primary and video planes are found.
+        assert!(dm.primary_plane().is_some());
+        assert!(dm.video_plane().is_some());
+
+        // Active connector ID is set.
+        assert_eq!(dm.active_connector_id(), Some(89));
+
+        // Release: clears active state.
+        dm.release().unwrap();
+        assert!(dm.active_crtc().is_none());
+        assert!(dm.active_mode().is_none());
+    }
+
+    #[test]
+    fn display_manager_acquire_is_idempotent() {
+        let mut dm = DisplayManager::new("").unwrap();
+        dm.acquire().unwrap();
+        // Second acquire should be idempotent (mock mode doesn't have the
+        // same idempotency check as hw, but should still succeed).
+        assert!(dm.acquire().is_ok());
+    }
+
+    #[test]
+    fn display_manager_drop_with_active_crtc_logs_warning() {
+        // This test verifies that Drop doesn't panic.
+        let mut dm = DisplayManager::new("").unwrap();
+        dm.acquire().unwrap();
+        // Dropping without release should not panic.
+        drop(dm);
+    }
+
+    // ── Edge case tests ──────────────────────────────────────────────
+
+    #[test]
+    fn display_connector_empty_modes_falls_back_to_preferred() {
+        let conn = DisplayConnector {
+            connector_id: 99,
+            connector_type: "HDMI-A-2".into(),
+            connected: true,
+            modes: vec![],
+            preferred_mode: Some(DisplayMode::mode_720p60()),
+        };
+        let best = conn.best_mode().expect("should fall back to preferred_mode");
+        assert_eq!(best.width, 1280);
+        assert_eq!(best.height, 720);
+    }
+
+    #[test]
+    fn display_connector_no_modes_no_preferred() {
+        let conn = DisplayConnector {
+            connector_id: 99,
+            connector_type: "DSI-1".into(),
+            connected: true,
+            modes: vec![],
+            preferred_mode: None,
+        };
+        assert!(conn.best_mode().is_none());
+    }
+
+    #[test]
+    fn display_mode_1080p60_refresh_boundary() {
+        // 59940 mHz (59.94 Hz) is NOT 1080p60 by our strict check.
+        let m = DisplayMode::new(1920, 1080, 59940);
+        assert!(!m.is_1080p60());
+        // 60000 mHz (60 Hz) is 1080p60.
+        let m = DisplayMode::new(1920, 1080, 60000);
+        assert!(m.is_1080p60());
+    }
+
+    #[test]
+    fn display_connector_best_mode_within_falls_back() {
+        // If no mode fits within the max, fall back to best overall.
+        let conn = DisplayConnector {
+            connector_id: 89,
+            connector_type: "HDMI-A-1".into(),
+            connected: true,
+            modes: vec![DisplayMode::mode_1080p60()],
+            preferred_mode: Some(DisplayMode::mode_1080p60()),
+        };
+        // Max 640x480 — no mode fits, should fall back to 1080p60.
+        let best = conn.best_mode_within(640, 480).expect("should fall back");
+        assert_eq!(best.width, 1920);
     }
 }

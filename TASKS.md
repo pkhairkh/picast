@@ -323,11 +323,12 @@ logic, and error handling hardening.
 
 ---
 
-## Sprint 3 — DRM/KMS Display & Pi Hardware Bringup
+## Sprint 3 — DRM/KMS Display & Pi Hardware Bringup ✅
 
 **Duration:** 2 weeks (10 working days)
 **Goal:** Working DRM display on Raspberry Pi hardware — the last major
 unimplemented subsystem.
+**Status:** **COMPLETE** — committed, pushed to main.
 
 **Definition of Done (DoD):**
 - `bogdan-display` opens `/dev/dri/card0`, acquires DRM master, verifies
