@@ -1,4 +1,6 @@
 /etc/bogdan/torrc
 /etc/bogdan/iptables.rules
-/etc/systemd/system/bogdan.service
 /etc/bogdan/bogdan.toml
+/etc/bogdan/providers.d/voe.toml
+/etc/bogdan/providers.d/doodstream.toml
+/etc/systemd/system/bogdan.service

@@ -21,6 +21,20 @@ case "$1" in
         mkdir -p /tmp/bogdan/subs
         chown bogdan:bogdan /tmp/bogdan
 
+        # Create providers.d directory if not present
+        if [ ! -d /etc/bogdan/providers.d ]; then
+            mkdir -p /etc/bogdan/providers.d
+            chown bogdan:bogdan /etc/bogdan/providers.d
+        fi
+
+        # Ensure provider config ownership is correct
+        if [ -d /etc/bogdan/providers.d ]; then
+            chown -R bogdan:bogdan /etc/bogdan/providers.d
+            # Count provider configs for status message
+            PROVIDER_COUNT=$(find /etc/bogdan/providers.d -name '*.toml' 2>/dev/null | wc -l)
+            echo "bogdan: ${PROVIDER_COUNT} provider config(s) installed in /etc/bogdan/providers.d/"
+        fi
+
         # Install iptables rules if available
         if [ -f /etc/bogdan/iptables.rules ]; then
             if command -v iptables-restore >/dev/null 2>&1; then
@@ -50,12 +64,37 @@ case "$1" in
             fi
         fi
 
+        # Ensure config file ownership
+        if [ -f /etc/bogdan/bogdan.toml ]; then
+            chown bogdan:bogdan /etc/bogdan/bogdan.toml
+        fi
+
         # Enable systemd service
         if command -v systemctl >/dev/null 2>&1; then
             systemctl daemon-reload
             systemctl enable bogdan 2>/dev/null || true
             echo "bogdan: Service enabled (start with: systemctl start bogdan)"
         fi
+
+        # Print helpful post-install info
+        echo ""
+        echo "boGDan installation complete!"
+        echo ""
+        echo "  Browser extension files:"
+        echo "    Chrome:  /usr/share/bogdan/extension-chrome/"
+        echo "    Firefox: /usr/share/bogdan/extension-firefox/"
+        echo ""
+        echo "  Utility scripts:"
+        echo "    /usr/share/bogdan/scripts/smoke-test.sh"
+        echo "    /usr/share/bogdan/scripts/verify-network-isolation.sh"
+        echo "    /usr/share/bogdan/scripts/mem-test.sh"
+        echo "    /usr/share/bogdan/scripts/soak-test.sh"
+        echo ""
+        echo "  Next steps:"
+        echo "    1. Reboot if kernel overlay was added: sudo reboot"
+        echo "    2. Start boGDan: sudo systemctl start bogdan"
+        echo "    3. Check status:  sudo systemctl status bogdan"
+        echo "    4. View logs:     journalctl -u bogdan -f"
         ;;
 
     abort-upgrade|abort-remove|abort-deconfigure)

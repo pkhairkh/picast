@@ -32,10 +32,26 @@ case "$1" in
             rm -rf /tmp/bogdan
         fi
 
-        # Remove config directory
+        # Remove config directory (including providers.d)
         if [ -d /etc/bogdan ]; then
             rm -rf /etc/bogdan
             echo "bogdan: Removed config directory /etc/bogdan"
+        fi
+
+        # Remove shared files (extension, scripts)
+        if [ -d /usr/share/bogdan ]; then
+            rm -rf /usr/share/bogdan
+            echo "bogdan: Removed shared files /usr/share/bogdan"
+        fi
+
+        # Restore Tor config backup if available
+        if [ -f /etc/tor/torrc.bogdan-backup ]; then
+            cp -a /etc/tor/torrc.bogdan-backup /etc/tor/torrc 2>/dev/null || true
+            rm -f /etc/tor/torrc.bogdan-backup
+            echo "bogdan: Restored original Tor config"
+            if command -v systemctl >/dev/null 2>&1; then
+                systemctl restart tor 2>/dev/null || true
+            fi
         fi
         ;;
 

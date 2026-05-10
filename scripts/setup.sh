@@ -528,6 +528,33 @@ install_bogdan() {
     chown bogdan:bogdan /tmp/bogdan
     info "Temp directory: /tmp/bogdan"
 
+    # Install provider configs
+    mkdir -p /etc/bogdan/providers.d
+    chown bogdan:bogdan /etc/bogdan/providers.d
+    local providers_dir="${REPO_ROOT}/providers.d"
+    if [ -d "$providers_dir" ]; then
+        local provider_count=0
+        for toml_file in "${providers_dir}"/*.toml; do
+            if [ -f "$toml_file" ]; then
+                local toml_name
+                toml_name="$(basename "$toml_file")"
+                if [ ! -f "/etc/bogdan/providers.d/${toml_name}" ]; then
+                    cp "$toml_file" "/etc/bogdan/providers.d/${toml_name}"
+                    chmod 644 "/etc/bogdan/providers.d/${toml_name}"
+                    chown bogdan:bogdan "/etc/bogdan/providers.d/${toml_name}"
+                    provider_count=$((provider_count + 1))
+                    info "  Provider: ${toml_name}"
+                else
+                    info "  Provider: ${toml_name} (already exists, not overwriting)"
+                    provider_count=$((provider_count + 1))
+                fi
+            fi
+        done
+        info "Installed ${provider_count} provider config(s) to /etc/bogdan/providers.d/"
+    else
+        warn "providers.d/ directory not found — provider configs not installed"
+    fi
+
     # Install TOML config file
     mkdir -p /etc/bogdan
     # Prefer deploy/bogdan.toml (production Pi config) over bogdan.toml.example (generic)

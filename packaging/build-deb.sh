@@ -93,9 +93,13 @@ rm -rf "$BUILD_DIR"
 mkdir -p "$DEB_ROOT/DEBIAN"
 mkdir -p "$DEB_ROOT/usr/local/bin"
 mkdir -p "$DEB_ROOT/etc/bogdan"
+mkdir -p "$DEB_ROOT/etc/bogdan/providers.d"
 mkdir -p "$DEB_ROOT/etc/systemd/system"
 mkdir -p "$DEB_ROOT/var/lib/bogdan"
 mkdir -p "$DEB_ROOT/usr/share/doc/bogdan"
+mkdir -p "$DEB_ROOT/usr/share/bogdan/extension-chrome"
+mkdir -p "$DEB_ROOT/usr/share/bogdan/extension-firefox"
+mkdir -p "$DEB_ROOT/usr/share/bogdan/scripts"
 
 # ─── Step 4: Copy files ────────────────────────────────────────────
 log "Installing files into package..."
@@ -122,6 +126,68 @@ sed 's|ExecStart=/usr/local/bin/bogdan|ExecStart=/usr/local/bin/bogdan-server|' 
     "${CONFIG_DIR}/bogdan.service" > "${DEB_ROOT}/etc/systemd/system/bogdan.service"
 chmod 644 "${DEB_ROOT}/etc/systemd/system/bogdan.service"
 
+# Provider configs
+log "Installing provider configs..."
+PROVIDERS_DIR="${REPO_ROOT}/providers.d"
+if [ -d "$PROVIDERS_DIR" ]; then
+    for toml_file in "${PROVIDERS_DIR}"/*.toml; do
+        if [ -f "$toml_file" ]; then
+            cp "$toml_file" "${DEB_ROOT}/etc/bogdan/providers.d/"
+            chmod 644 "${DEB_ROOT}/etc/bogdan/providers.d/$(basename "$toml_file")"
+            info "  Provider: $(basename "$toml_file")"
+        fi
+    done
+else
+    warn "providers.d/ directory not found — provider configs not included"
+fi
+
+# Browser extension files
+log "Installing browser extension files..."
+EXT_DIR="${REPO_ROOT}/src/extension"
+if [ -d "$EXT_DIR" ]; then
+    # Chrome extension
+    for f in manifest-chrome.json popup/ options/ content/ background/ icons/ _locales/; do
+        src_path="${EXT_DIR}/${f}"
+        if [ -e "$src_path" ]; then
+            cp -r "$src_path" "${DEB_ROOT}/usr/share/bogdan/extension-chrome/"
+        fi
+    done
+    # Copy the default manifest as manifest.json for Chrome
+    if [ -f "${EXT_DIR}/manifest-chrome.json" ]; then
+        cp "${EXT_DIR}/manifest-chrome.json" "${DEB_ROOT}/usr/share/bogdan/extension-chrome/manifest.json"
+    fi
+
+    # Firefox extension
+    for f in manifest-firefox.json popup/ options/ content/ background/ icons/ _locales/; do
+        src_path="${EXT_DIR}/${f}"
+        if [ -e "$src_path" ]; then
+            cp -r "$src_path" "${DEB_ROOT}/usr/share/bogdan/extension-firefox/"
+        fi
+    done
+    # Copy the Firefox manifest as manifest.json
+    if [ -f "${EXT_DIR}/manifest-firefox.json" ]; then
+        cp "${EXT_DIR}/manifest-firefox.json" "${DEB_ROOT}/usr/share/bogdan/extension-firefox/manifest.json"
+    fi
+
+    info "  Chrome extension: $(find "${DEB_ROOT}/usr/share/bogdan/extension-chrome" -type f | wc -l) files"
+    info "  Firefox extension: $(find "${DEB_ROOT}/usr/share/bogdan/extension-firefox" -type f | wc -l) files"
+else
+    warn "src/extension/ directory not found — extension files not included"
+fi
+
+# Utility scripts
+log "Installing utility scripts..."
+SCRIPTS_DIR="${REPO_ROOT}/scripts"
+if [ -d "$SCRIPTS_DIR" ]; then
+    for script in smoke-test.sh verify-network-isolation.sh mem-test.sh soak-test.sh; do
+        if [ -f "${SCRIPTS_DIR}/${script}" ]; then
+            cp "${SCRIPTS_DIR}/${script}" "${DEB_ROOT}/usr/share/bogdan/scripts/"
+            chmod 755 "${DEB_ROOT}/usr/share/bogdan/scripts/${script}"
+            info "  Script: ${script}"
+        fi
+    done
+fi
+
 # Data directory ownership will be set by postinst
 # Create a placeholder to ensure the directory is included
 touch "${DEB_ROOT}/var/lib/bogdan/.gitkeep"
@@ -129,6 +195,11 @@ touch "${DEB_ROOT}/var/lib/bogdan/.gitkeep"
 # Copyright / license
 if [ -f "${REPO_ROOT}/LICENSE" ]; then
     cp "${REPO_ROOT}/LICENSE" "${DEB_ROOT}/usr/share/doc/bogdan/copyright"
+fi
+
+# Changelog (Debian format)
+if [ -f "${REPO_ROOT}/CHANGELOG.md" ]; then
+    cp "${REPO_ROOT}/CHANGELOG.md" "${DEB_ROOT}/usr/share/doc/bogdan/changelog"
 fi
 
 # ─── Step 5: Copy debian control files ──────────────────────────────
@@ -164,16 +235,55 @@ sed -i "s/Installed-Size:.*/Installed-Size: ${INSTALLED_SIZE}/" "${DEB_ROOT}/DEB
 log "Building .deb package..."
 dpkg-deb --build --root-owner-group "$DEB_ROOT" "$DEB_FILE"
 
+# ─── Step 8: Generate SHA-256 checksum ─────────────────────────────
+log "Generating SHA-256 checksum..."
+
+CHECKSUM_FILE="${BUILD_DIR}/${PACKAGE_NAME}_${PACKAGE_VERSION}_${PACKAGE_ARCH}.sha256"
+sha256sum "$DEB_FILE" > "$CHECKSUM_FILE"
+info "Checksum: $(cat "$CHECKSUM_FILE")"
+
+# ─── Step 9: Verify the package ────────────────────────────────────
+log "Verifying package structure..."
+
+# Check that dpkg can read it
+if dpkg-deb --info "$DEB_FILE" >/dev/null 2>&1; then
+    info "  [OK] dpkg-deb --info succeeds"
+else
+    err "  [FAIL] dpkg-deb --info failed — package may be corrupt"
+fi
+
+# Check that all expected files are present
+for expected in \
+    /usr/local/bin/bogdan-server \
+    /etc/bogdan/bogdan.toml \
+    /etc/bogdan/torrc \
+    /etc/bogdan/iptables.rules \
+    /etc/systemd/system/bogdan.service; do
+    if dpkg-deb --fsys-tarfile "$DEB_FILE" | tar -t "./$expected" >/dev/null 2>&1; then
+        info "  [OK] ${expected}"
+    else
+        warn "  [MISSING] ${expected}"
+    fi
+done
+
+# Check for provider configs
+PROVIDER_COUNT=$(dpkg-deb --fsys-tarfile "$DEB_FILE" | tar -t 2>/dev/null | grep -c 'providers\.d/.*\.toml' || echo "0")
+info "  Provider configs included: ${PROVIDER_COUNT}"
+
 # ─── Done ───────────────────────────────────────────────────────────
 echo ""
 log "${GREEN}════════════════════════════════════════════${NC}"
 log "${GREEN}  Package built successfully!${NC}"
 log "${GREEN}════════════════════════════════════════════${NC}"
 echo ""
-info "Output: ${DEB_FILE}"
-info "Size:   $(du -h "$DEB_FILE" | cut -f1)"
+info "Output:   ${DEB_FILE}"
+info "Checksum: ${CHECKSUM_FILE}"
+info "Size:     $(du -h "$DEB_FILE" | cut -f1)"
 info ""
 info "Install on target:"
 info "  scp ${DEB_FILE} pi@<ip>:/tmp/"
 info "  ssh pi@<ip> 'sudo dpkg -i /tmp/$(basename "$DEB_FILE")'"
+echo ""
+info "Verify integrity:"
+info "  sha256sum -c $(basename "$CHECKSUM_FILE")"
 echo ""

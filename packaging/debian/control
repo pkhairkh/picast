@@ -1,9 +1,12 @@
 Source: bogdan
 Section: multimedia
 Priority: optional
-Maintainer: boGDan Team <bogdan@example.com>
+Maintainer: boGDan Team <bogdan@pkhairkh.github.io>
 Build-Depends: debhelper (>= 12), cargo, rustc, libgstreamer1.0-dev, libgstreamer-plugins-base1.0-dev, libgstreamer-plugins-bad1.0-dev, libdrm-dev, libgbm-dev, libegl-dev, libgles2-dev, libsqlite3-dev, libssl-dev, gcc-aarch64-linux-gnu [amd64]
 Standards-Version: 4.5.1
+Vcs-Git: https://github.com/pkhairkh/picast.git
+Vcs-Browser: https://github.com/pkhairkh/picast
+Homepage: https://github.com/pkhairkh/picast
 
 Package: bogdan
 Version: 0.1.0
@@ -23,4 +26,6 @@ Description: Tor-routed media casting appliance for Raspberry Pi
   - HTTP API and WebSocket for real-time control
   - DLNA/UPnP MediaRenderer support
   - yt-dlp URL resolution for YouTube and 1000+ sites
+  - Custom video hosting provider resolvers (config-driven)
   - iptables firewall with default-deny policy
+  - Browser extension for Chrome and Firefox

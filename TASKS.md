@@ -820,11 +820,12 @@ and security audit.
 
 ---
 
-## Sprint 7 — Distribution, Documentation & Release
+## Sprint 7 — Distribution, Documentation & Release ✅
 
 **Duration:** 2 weeks (10 working days)
 **Goal:** boGDan can be installed on a fresh Raspberry Pi OS image with a
 single command and minimal configuration. Documentation is complete.
+**Status:** **COMPLETE** — committed, pushed to main.
 
 **Definition of Done (DoD):**
 - `dpkg -i bogdan.deb` installs and configures everything

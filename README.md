@@ -12,15 +12,34 @@ The boGCast protocol provides the communication layer between senders and the re
 
 ## Quick Start
 
+### Option 1: One-Command Install (Recommended)
+
 ```bash
-curl -sSL https://raw.githubusercontent.com/pkhairkh/bogdan/main/scripts/setup.sh | sudo bash
+# On a fresh Raspberry Pi OS Lite 64-bit (Bookworm):
+curl -sSL https://raw.githubusercontent.com/pkhairkh/picast/main/scripts/setup.sh | sudo bash
+sudo reboot
 ```
 
-This installs all dependencies, builds boGDan with hardware acceleration, configures Tor and firewall rules, and installs the systemd service. Then:
+After reboot, boGDan starts automatically. Install the browser extension and cast.
 
-1. **Install the browser extension** — [Chrome](#) or [Firefox](#) (Manifest V3)
-2. **Cast a video** — open a video page, click the boGDan extension icon, press **Cast**
-3. Your TV starts playing within seconds
+### Option 2: Pre-built Debian Package
+
+```bash
+# Download the latest release from GitHub
+scp bogdan_0.1.0_arm64.deb pi@<ip>:/tmp/
+ssh pi@<ip> 'sudo dpkg -i /tmp/bogdan_0.1.0_arm64.deb && sudo systemctl start bogdan'
+```
+
+### Option 3: Pre-built SD Card Image
+
+Download the compressed image from [GitHub Releases](https://github.com/pkhairkh/picast/releases), flash it to an SD card with [Raspberry Pi Imager](https://www.raspberrypi.com/software/), and boot. boGDan is pre-installed and auto-starts.
+
+### First Cast
+
+1. **Install the browser extension** — [Chrome](src/extension/) or [Firefox](src/extension/) (Manifest V3)
+2. **Configure** — click the extension icon, enter your Pi's IP address
+3. **Cast a video** — open a video page, click the boGDan extension icon, press **Cast**
+4. Your TV starts playing within seconds
 
 ## Hardware Requirements
 
@@ -167,9 +186,12 @@ bogdan/
 
 | Document | Description |
 |----------|-------------|
+| [User Guide](docs/USER_GUIDE.md) | Installation, configuration, daily usage, troubleshooting, FAQ |
 | [ARCHITECTURE.md](ARCHITECTURE.md) | System architecture (hardware, pipeline, protocols, Tor) |
 | [SPECIFICATION.md](SPECIFICATION.md) | API contracts, format matrix, GStreamer pipeline specs |
 | [DECISIONS.md](DECISIONS.md) | Architecture Decision Records (ADR-001 through ADR-009) |
+| [Security Hardening](docs/SECURITY.md) | iptables, DNS leaks, circuit isolation, TLS, attack surface |
+| [Security Audit](docs/SECURITY_AUDIT.md) | Comprehensive security audit checklist and findings |
 | [AGENT.md](AGENT.md) | AI agent onboarding and codebase navigation |
 | [CONTRIBUTING.md](CONTRIBUTING.md) | Development workflow and conventions |
 | [SECURITY.md](SECURITY.md) | Vulnerability reporting and threat model |
