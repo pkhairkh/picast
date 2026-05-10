@@ -1131,6 +1131,16 @@ impl PlaybackEngine {
         // trigger the Paused→Playing auto-transition.
         let pipeline_weak_bus = pipeline.pipeline().downgrade();
 
+        // Shared reference to the download progress state so the bus watch
+        // can check cdn_forbidden and download_errored flags without
+        // acquiring the pipeline lock.
+        let progress_state_bus = pipeline.progress_state().clone();
+
+        // One-shot flag to avoid emitting CdnForbidden event multiple times.
+        let cdn_forbidden_emitted =
+            std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let cdn_forbidden_emitted_bus = cdn_forbidden_emitted.clone();
+
         // Capture rate-limited status for the bus watch to use different
         // buffering thresholds. Rate-limited streams need more aggressive
         // buffering (start at 95%, resume at 95%, pause at <5%) compared
@@ -1395,13 +1405,57 @@ impl PlaybackEngine {
                                 let _ = pipe.set_state(State::Paused);
                             }
 
-                            // Stall detection: when buffer is at 0% during
-                            // playback (not initial buffering), start a timer.
-                            // If the buffer stays at 0% for STALL_TIMEOUT_SECS,
-                            // the CDN download has likely died and the pipeline
-                            // is stuck. Emit an error event so the session layer
-                            // can re-resolve and restart.
-                            if percent == 0 {
+                            // CDN 403 during download: if the CDN returned 403
+                            // during a reconnection attempt, the session token
+                            // has expired and Range resume is impossible. Emit
+                            // CdnForbidden immediately so the session layer can
+                            // re-resolve the URL and restart playback.
+                            if progress_state_bus.cdn_forbidden.load(Ordering::Relaxed)
+                                && !cdn_forbidden_emitted_bus.load(Ordering::Relaxed)
+                            {
+                                tracing::warn!(
+                                    percent = percent,
+                                    "CDN returned 403 during download — emitting CdnForbidden \
+                                     event for session-layer re-resolution"
+                                );
+                                cdn_forbidden_emitted_bus.store(true, Ordering::Relaxed);
+                                let _ = event_tx.send(PlaybackEvent::CdnForbidden);
+                                pending_auto_play_bus.store(false, Ordering::Relaxed);
+                                is_playing.store(false, Ordering::Relaxed);
+                            }
+
+                            // Stall detection: when buffer is below the pause
+                            // threshold AND the CDN download has errored (all
+                            // reconnect attempts failed), the pipeline is stuck
+                            // — no more data is coming. Previously, stall detection
+                            // only triggered at exactly 0%, but the pipeline may
+                            // pause at <5% (e.g. 4%) and never reach 0%, causing
+                            // the stall timer to never start and the user to sit
+                            // through an indefinitely frozen screen.
+                            //
+                            // We now trigger stall detection when:
+                            //   1. Buffer is below pause threshold (not just 0%)
+                            //   2. CDN download has errored (no more data coming)
+                            // The timeout is reduced to 10s in this case because
+                            // we already know the download is dead — we're just
+                            // waiting for the buffer to drain completely.
+                            let download_errored = progress_state_bus.download_errored.load(Ordering::Relaxed);
+                            if download_errored {
+                                // CDN download is dead — use short stall timeout
+                                let stall_guard_opt = stall_start_bus.lock().unwrap();
+                                if stall_guard_opt.is_none() {
+                                    drop(stall_guard_opt);
+                                    let mut stall_guard = stall_start_bus.lock().unwrap();
+                                    *stall_guard = Some(std::time::Instant::now());
+                                    tracing::warn!(
+                                        percent = percent,
+                                        "buffer below pause threshold AND CDN download errored — \
+                                         stall timer started (10s until error event)"
+                                    );
+                                }
+                            } else if percent == 0 {
+                                // Original stall detection for percent == 0:
+                                // CDN download might still be alive but slow.
                                 let mut stall_guard = stall_start_bus.lock().unwrap();
                                 if stall_guard.is_none() {
                                     *stall_guard = Some(std::time::Instant::now());
@@ -1409,25 +1463,39 @@ impl PlaybackEngine {
                                         "buffer at 0% during playback — stall timer started ({}s until stall error)",
                                         STALL_TIMEOUT_SECS
                                     );
-                                } else if stall_guard.unwrap().elapsed().as_secs() >= STALL_TIMEOUT_SECS {
-                                    tracing::error!(
-                                        elapsed_s = stall_guard.unwrap().elapsed().as_secs(),
-                                        "pipeline stalled at 0% buffer for {}s — CDN download likely dead. \
-                                         Emitting error event for session-layer restart.",
-                                        STALL_TIMEOUT_SECS
-                                    );
-                                    let _ = event_tx.send(PlaybackEvent::Error {
-                                        message: format!(
-                                            "Pipeline stalled — buffer at 0% for {}s. \
-                                             CDN download disconnected. Re-resolve needed.",
-                                            STALL_TIMEOUT_SECS
-                                        ),
-                                        debug: Some("stall-detection".into()),
-                                    });
-                                    pending_auto_play_bus.store(false, Ordering::Relaxed);
-                                    is_playing.store(false, Ordering::Relaxed);
-                                    // Clear the stall timer so we don't emit duplicate errors
-                                    *stall_guard = None;
+                                }
+                            }
+
+                            // Check if stall timer has expired
+                            {
+                                let stall_guard = stall_start_bus.lock().unwrap();
+                                if let Some(start) = *stall_guard {
+                                    let timeout = if download_errored { 10 } else { STALL_TIMEOUT_SECS };
+                                    if start.elapsed().as_secs() >= timeout {
+                                        tracing::error!(
+                                            elapsed_s = start.elapsed().as_secs(),
+                                            percent = percent,
+                                            download_errored = download_errored,
+                                            "pipeline stalled — buffer below {}% for {}s. \
+                                             CDN download {}. Emitting error event for session-layer restart.",
+                                            rate_limited_pause_percent,
+                                            timeout,
+                                            if download_errored { "dead (all reconnects failed)" } else { "likely dead" }
+                                        );
+                                        let _ = event_tx.send(PlaybackEvent::Error {
+                                            message: format!(
+                                                "Pipeline stalled — buffer at {}% for {}s. \
+                                                 CDN download disconnected. Re-resolve needed.",
+                                                percent, timeout
+                                            ),
+                                            debug: Some("stall-detection".into()),
+                                        });
+                                        pending_auto_play_bus.store(false, Ordering::Relaxed);
+                                        is_playing.store(false, Ordering::Relaxed);
+                                        // Clear the stall timer so we don't emit duplicate errors
+                                        drop(stall_guard);
+                                        *stall_start_bus.lock().unwrap() = None;
+                                    }
                                 }
                             }
                         } else {
@@ -2334,6 +2402,28 @@ impl PlaybackEngine {
     /// Check whether the CDN download has errored (mock mode — always false).
     #[cfg(not(feature = "hw"))]
     pub fn download_errored(&self) -> bool {
+        false
+    }
+
+    /// Check whether the CDN returned 403 Forbidden during download.
+    ///
+    /// When true, the CDN session token (`rq=` parameter) has expired
+    /// and Range resume is impossible. The session layer should
+    /// re-resolve the URL and restart playback from the beginning.
+    #[cfg(feature = "hw")]
+    pub fn cdn_forbidden(&self) -> bool {
+        match self.gst_pipeline.try_lock() {
+            Ok(guard) => match *guard {
+                Some(ref pipeline) => pipeline.cdn_forbidden(),
+                None => false,
+            },
+            Err(_) => false,
+        }
+    }
+
+    /// Check whether CDN 403 occurred (mock mode — always false).
+    #[cfg(not(feature = "hw"))]
+    pub fn cdn_forbidden(&self) -> bool {
         false
     }
 

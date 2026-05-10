@@ -1195,6 +1195,16 @@ impl SessionManager {
         self.active_session_id()
     }
 
+    /// Get the source URL of the currently active session.
+    ///
+    /// Used by the background stall-detection task in `main.rs` to
+    /// auto-re-cast when the CDN returns 403 (session token expired).
+    /// Returns `None` if no session is active.
+    pub async fn active_session_source_url_public(&self) -> Option<String> {
+        let id = self.active_session_id().ok()?;
+        self.load_session(id).ok().map(|s| s.source_url)
+    }
+
     /// Refresh position and duration from the playback subsystem and
     /// broadcast a [`SessionEvent::PositionUpdate`].
     ///

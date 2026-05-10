@@ -153,6 +153,13 @@ pub struct ProgressState {
     /// the session layer can detect and handle (e.g. by re-resolving
     /// the URL and restarting playback).
     pub download_errored: AtomicBool,
+    /// Whether the CDN returned 403 Forbidden during a reconnection attempt.
+    /// This indicates the CDN session token (`rq=` parameter) has expired
+    /// or been consumed, and a Range resume is impossible. The session
+    /// layer should re-resolve the URL to get fresh tokens and restart
+    /// playback from the beginning (Range resume is not possible with
+    /// a new URL since it points to a different CDN session).
+    pub cdn_forbidden: AtomicBool,
 }
 
 impl ProgressState {
@@ -167,6 +174,7 @@ impl ProgressState {
             content_type: std::sync::Mutex::new(None),
             cdn_rate_limit_kbps: std::sync::Mutex::new(None),
             download_errored: AtomicBool::new(false),
+            cdn_forbidden: AtomicBool::new(false),
         }
     }
 
@@ -738,7 +746,14 @@ impl StreamSource {
                 );
 
                 if status.as_u16() == 403 {
-                    tracing::warn!("stream source: CDN returned 403 Forbidden");
+                    tracing::warn!(
+                        attempt = attempt,
+                        offset = total_offset,
+                        "stream source: CDN returned 403 Forbidden — session token expired, \
+                         Range resume impossible. Marking cdn_forbidden so session layer \
+                         can re-resolve the URL."
+                    );
+                    progress.cdn_forbidden.store(true, Ordering::Relaxed);
                     break;
                 }
 
@@ -882,12 +897,20 @@ impl StreamSource {
                 // push thread does NOT push EOS. The pipeline will stall
                 // when it runs out of data, which the session layer can
                 // detect and handle (e.g. by re-resolving and restarting).
+                let cdn_forbidden = progress.cdn_forbidden.load(Ordering::Relaxed);
                 tracing::warn!(
                     total_bytes = total_offset,
                     expected_bytes = ?total_bytes_expected,
                     elapsed_s = total_elapsed,
+                    cdn_forbidden = cdn_forbidden,
                     "stream source: download incomplete (CDN disconnected) — marking as errored \
-                     (appsrc will NOT push EOS — pipeline will stall when buffer depletes)"
+                     (appsrc will NOT push EOS — pipeline will stall when buffer depletes). \
+                     {}",
+                    if cdn_forbidden {
+                        "CDN returned 403 — session token expired, re-resolution needed."
+                    } else {
+                        "CDN connection dropped, Range resume attempts exhausted."
+                    }
                 );
                 progress.download_errored.store(true, Ordering::Relaxed);
             }

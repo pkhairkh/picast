@@ -1883,6 +1883,14 @@ impl GstPipeline {
         self.download_progress.snapshot()
     }
 
+    /// Get a reference to the shared download progress state.
+    ///
+    /// Used by the bus watch to check `cdn_forbidden` and `download_errored`
+    /// flags during BUFFERING messages without acquiring the pipeline lock.
+    pub fn progress_state(&self) -> &Arc<ProgressState> {
+        &self.download_progress
+    }
+
     /// Cancel the active CDN download and appsrc push task.
     pub fn cancel_download(&mut self) {
         if let Some(cancel) = self.push_cancel.take() {
@@ -1897,6 +1905,15 @@ impl GstPipeline {
     /// pipeline will stall when the buffer depletes.
     pub fn download_errored(&self) -> bool {
         self.download_progress.download_errored.load(Ordering::Relaxed)
+    }
+
+    /// Check whether the CDN returned 403 Forbidden during download.
+    ///
+    /// When true, the CDN session token has expired and Range resume
+    /// is impossible. The session layer should re-resolve the URL
+    /// and restart playback from the beginning.
+    pub fn cdn_forbidden(&self) -> bool {
+        self.download_progress.cdn_forbidden.load(Ordering::Relaxed)
     }
 
     /// Perform a flushing seek to an absolute position.

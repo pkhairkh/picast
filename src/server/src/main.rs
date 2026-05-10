@@ -497,9 +497,11 @@ async fn main() -> Result<()> {
     //
     // Also detects CDN download stalls: when the download errors out
     // (CDN disconnected, all reconnect attempts failed) and the buffer
-    // depletes, the pipeline is stuck. We detect this and stop the
-    // session so the user can re-cast (rather than sitting through an
-    // indefinite frozen screen).
+    // depletes, the pipeline is stuck. We detect this and either:
+    //   - Auto-re-cast the URL if the CDN returned 403 (session token
+    //     expired) — this gets a fresh CDN URL and restarts playback
+    //   - Stop the session if the CDN just disconnected (non-403 error)
+    //     — the user can manually re-cast
     let position_session = session.clone();
     let position_playback = playback_engine.clone();
     let (position_stop_tx, position_stop_rx) = tokio::sync::oneshot::channel::<()>();
@@ -519,17 +521,41 @@ async fn main() -> Result<()> {
 
                         // Stall detection: if the CDN download errored and
                         // the pipeline is no longer making progress (is_playing
-                        // becomes false due to buffer depletion), stop the
-                        // session so the user can re-cast.
+                        // becomes false due to buffer depletion), take action.
                         if position_playback.download_errored() && !position_playback.is_playing() {
                             stall_zero_count += 1;
-                            if stall_zero_count >= 5 {
-                                // 10 seconds of stall after download error
-                                info!(
-                                    "CDN download errored and pipeline stalled for 10s — \
-                                     stopping session so user can re-cast"
-                                );
-                                let _ = position_session.stop().await;
+                            if stall_zero_count >= 3 {
+                                // 6 seconds of stall after download error
+                                let cdn_forbidden = position_playback.cdn_forbidden();
+                                if cdn_forbidden {
+                                    // CDN returned 403 — session token expired.
+                                    // Auto-re-cast to get a fresh CDN URL instead of
+                                    // leaving the user with a frozen screen.
+                                    let source_url = position_session.active_session_source_url_public().await;
+                                    info!(
+                                        source_url = ?source_url,
+                                        "CDN 403 Forbidden + pipeline stalled for 6s — \
+                                         auto re-casting to get fresh CDN URL"
+                                    );
+                                    let _ = position_session.stop().await;
+                                    if let Some(ref url) = source_url {
+                                        // Brief pause to allow DRM/KMS resources to be
+                                        // fully released before starting a new session.
+                                        tokio::time::sleep(std::time::Duration::from_millis(500)).await;
+                                        match position_session.load(url).await {
+                                            Ok(_) => info!("auto re-cast succeeded — new CDN session active"),
+                                            Err(e) => warn!(error = %e, "auto re-cast failed — user must manually re-cast"),
+                                        }
+                                    }
+                                } else {
+                                    // Non-403 CDN error (connection drop, etc.).
+                                    // Stop the session so the user can re-cast.
+                                    info!(
+                                        "CDN download errored and pipeline stalled for 6s — \
+                                         stopping session so user can re-cast"
+                                    );
+                                    let _ = position_session.stop().await;
+                                }
                                 stall_zero_count = 0;
                             }
                         } else {
