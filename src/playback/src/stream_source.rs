@@ -659,9 +659,9 @@ impl StreamSource {
 
             let mut total_offset: u64 = 0;
             let mut attempt = 0;
-            /// Tracks the number of consecutive reconnect attempts for
-            /// exponential backoff calculation. Reset when we've received
-            /// enough data to consider the connection stable.
+            // Tracks the number of consecutive reconnect attempts for
+            // exponential backoff calculation. Reset when we've received
+            // enough data to consider the connection stable.
             let mut consecutive_reconnects: u32 = 0;
 
             loop {
