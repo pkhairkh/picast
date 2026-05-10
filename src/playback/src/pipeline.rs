@@ -528,45 +528,70 @@ impl GstPipeline {
         // PulseAudio sink name (not ALSA device). If empty, pulsesink
         // uses PulseAudio's default sink (which auto-routes to Bluetooth
         // if configured).
-        let mut audiosink_builder = ElementFactory::make(&config.audio_sink);
-        if !config.audio_device.is_empty() {
-            // For alsasink: device="plughw:1,0"
-            // For pulsesink: device="alsa_output.bluetooth" (PulseAudio sink name)
-            if config.audio_sink == "pulsesink" {
-                audiosink_builder = audiosink_builder.property("device", &config.audio_device);
-                tracing::info!(
-                    device = %config.audio_device,
-                    "pulsesink: using PulseAudio sink device"
-                );
+        //
+        // When audio_enabled is false (audio device unavailable), we use
+        // a fakesink instead of the real audio sink. This allows video
+        // playback to continue without audio when the audio device (e.g.
+        // BlueALSA Bluetooth) is disconnected or unavailable.
+        let audio_enabled = config.audio_enabled;
+        let audiosink = if audio_enabled {
+            let mut audiosink_builder = ElementFactory::make(&config.audio_sink);
+            if !config.audio_device.is_empty() {
+                // For alsasink: device="plughw:1,0"
+                // For pulsesink: device="alsa_output.bluetooth" (PulseAudio sink name)
+                if config.audio_sink == "pulsesink" {
+                    audiosink_builder = audiosink_builder.property("device", &config.audio_device);
+                    tracing::info!(
+                        device = %config.audio_device,
+                        "pulsesink: using PulseAudio sink device"
+                    );
+                } else {
+                    audiosink_builder = audiosink_builder.property("device", &config.audio_device);
+                    tracing::info!(
+                        device = %config.audio_device,
+                        "alsasink: using explicit ALSA device"
+                    );
+                }
             } else {
-                audiosink_builder = audiosink_builder.property("device", &config.audio_device);
+                if config.audio_sink == "pulsesink" {
+                    tracing::info!("pulsesink: using PulseAudio default sink (auto-routes to Bluetooth if configured)");
+                } else {
+                    tracing::info!("alsasink: using ALSA default device (no device property set)");
+                }
+            }
+
+            // Apply A/V sync compensation: ts-offset delays audio rendering
+            // to compensate for V4L2 hardware decode latency.
+            if config.audio_ts_offset_ns != 0 {
+                audiosink_builder = audiosink_builder.property("ts-offset", config.audio_ts_offset_ns);
                 tracing::info!(
-                    device = %config.audio_device,
-                    "alsasink: using explicit ALSA device"
+                    ts_offset_ms = config.audio_ts_offset_ns as f64 / 1_000_000.0,
+                    sink = %config.audio_sink,
+                    "A/V sync: audio ts-offset applied (compensating for V4L2 decode latency)"
                 );
             }
+
+            audiosink_builder.build().map_err(|e| {
+                PlaybackError::PipelineCreation(format!("{}: {}", config.audio_sink, e))
+            })?
         } else {
-            if config.audio_sink == "pulsesink" {
-                tracing::info!("pulsesink: using PulseAudio default sink (auto-routes to Bluetooth if configured)");
-            } else {
-                tracing::info!("alsasink: using ALSA default device (no device property set)");
-            }
-        }
-
-        // Apply A/V sync compensation: ts-offset delays audio rendering
-        // to compensate for V4L2 hardware decode latency.
-        if config.audio_ts_offset_ns != 0 {
-            audiosink_builder = audiosink_builder.property("ts-offset", config.audio_ts_offset_ns);
-            tracing::info!(
-                ts_offset_ms = config.audio_ts_offset_ns as f64 / 1_000_000.0,
-                sink = %config.audio_sink,
-                "A/V sync: audio ts-offset applied (compensating for V4L2 decode latency)"
+            // Audio disabled — use fakesink to silently discard audio data.
+            // sync=false means fakesink doesn't wait for the clock, and
+            // async=false means it doesn't gate the pipeline state change.
+            // This ensures the pipeline can preroll and play even without
+            // a real audio device.
+            tracing::warn!(
+                "audio disabled — using fakesink (video-only playback mode)"
             );
-        }
-
-        let audiosink = audiosink_builder.build().map_err(|e| {
-            PlaybackError::PipelineCreation(format!("{}: {}", config.audio_sink, e))
-        })?;
+            ElementFactory::make("fakesink")
+                .property("sync", false)
+                .property("silent", true)
+                .property("async", false)
+                .build()
+                .map_err(|e| {
+                    PlaybackError::PipelineCreation(format!("fakesink: {}", e))
+                })?
+        };
 
         // ── Assemble pipeline ───────────────────────────────────────
         let mut all_elements: Vec<&Element> = vec![
@@ -611,7 +636,7 @@ impl GstPipeline {
             })?;
             tracing::info!(
                 "audio chain: audio_queue → avdec_aac → audioconvert → audioresample → volume → {}",
-                config.audio_sink
+                if audio_enabled { &config.audio_sink } else { &"fakesink" }
             );
         } else {
             Element::link_many([&audio_queue, &audioconvert, &audioresample, &volume, &audiosink])

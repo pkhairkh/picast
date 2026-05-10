@@ -232,6 +232,17 @@ pub struct PipelineConfig {
     /// latency at 25-30fps. Can be tuned per-device if needed.
     #[serde(default)]
     pub audio_ts_offset_ns: i64,
+    /// Whether to enable audio output. When false, a fakesink is used
+    /// instead of the real audio sink, allowing video-only playback.
+    /// This is set automatically when the audio device is unavailable
+    /// (e.g. BlueALSA Bluetooth disconnected) and the pipeline is
+    /// retried without audio.
+    #[serde(default = "default_audio_enabled")]
+    pub audio_enabled: bool,
+}
+
+fn default_audio_enabled() -> bool {
+    true
 }
 
 impl Default for PipelineConfig {
@@ -265,6 +276,7 @@ impl Default for PipelineConfig {
             // causing audio to play ahead of video and making kmssink
             // perceive video frames as "late" and drop them.
             audio_ts_offset_ns: if hw_accel { 200_000_000 } else { 0 },
+            audio_enabled: true,
         }
     }
 }
@@ -1267,6 +1279,18 @@ impl PlaybackEngine {
                         || msg.contains("Could not open audio device")
                     );
 
+                    // Detect "not-negotiated" from appsrc — this is often a
+                    // cascading failure caused by the audio device being
+                    // unavailable. When alsasink (BlueALSA) can't preroll
+                    // because the audio device is disconnected, audio data
+                    // backs up and causes a caps negotiation failure that
+                    // propagates upstream to appsrc. The pipeline should be
+                    // retried with audio disabled (fakesink).
+                    let is_audio_cascade_not_negotiated =
+                        source_element.as_ref().map(|s| s.contains("appsrc")).unwrap_or(false)
+                        && debug_info.as_ref().map(|d| d.contains("not-negotiated")).unwrap_or(false)
+                        && config.audio_enabled; // only if audio was enabled
+
                     if is_cdn_forbidden {
                         tracing::warn!(
                             error = %msg,
@@ -1300,6 +1324,32 @@ impl PlaybackEngine {
                         // queue may fill up, but GStreamer demuxers use separate
                         // threads per src pad, so a blocked audio pad should not
                         // block the video pad.
+                    } else if is_audio_cascade_not_negotiated {
+                        // appsrc reported "not-negotiated" — this is likely
+                        // caused by the audio device being unavailable (e.g.
+                        // BlueALSA disconnected). The audio data backs up
+                        // because alsasink can't preroll, causing parsebin to
+                        // stop processing and appsrc to get a not-negotiated
+                        // return. Emit AudioDeviceError so the pipeline can be
+                        // retried with audio disabled.
+                        tracing::warn!(
+                            error = %msg,
+                            debug = ?debug_info,
+                            source = ?source_element,
+                            "not-negotiated from appsrc — likely audio device unavailable, \
+                             pipeline should retry with audio disabled"
+                        );
+                        let _ = event_tx.send(PlaybackEvent::AudioDeviceError {
+                            message: format!(
+                                "Audio device unavailable (not-negotiated cascade): {}",
+                                msg
+                            ),
+                        });
+                        // This IS fatal for the current pipeline — the not-negotiated
+                        // error means data flow has stopped. The playback engine
+                        // should retry with audio_enabled=false.
+                        pending_auto_play_bus.store(false, Ordering::Relaxed);
+                        is_playing.store(false, Ordering::Relaxed);
                     } else {
                         tracing::error!(
                             error = %msg,
@@ -1944,8 +1994,60 @@ impl PlaybackEngine {
                 let mut failed_pipeline = pipeline;
                 let _ = failed_pipeline.stop();
                 drop(failed_pipeline);
-                // Try SW fallback if HW accel was enabled.
-                if self.config.hw_accel {
+
+                // If audio was enabled, the error might be caused by the audio
+                // device being unavailable (e.g. BlueALSA disconnected). When
+                // alsasink can't preroll, it causes a cascading "not-negotiated"
+                // error from appsrc that kills the entire pipeline. Retry with
+                // audio disabled (fakesink) so video can play without audio.
+                if self.config.audio_enabled {
+                    tracing::warn!(
+                        "audio was enabled — retrying with audio disabled (video-only mode)"
+                    );
+                    drop(guard);
+                    match self
+                        .play_audio_disabled(
+                            url,
+                            source_url,
+                            socks_addr,
+                            isolation_username,
+                            &cookies,
+                        )
+                        .await
+                    {
+                        Ok(()) => Ok(()),
+                        Err(audio_fallback_err) => {
+                            // Audio-disabled retry also failed — try SW decode
+                            // if HW accel was enabled (the existing fallback path).
+                            if self.config.hw_accel {
+                                tracing::warn!(
+                                    error = %audio_fallback_err,
+                                    "audio-disabled retry failed — attempting software decode fallback"
+                                );
+                                match self
+                                    .play_software_fallback(
+                                        url,
+                                        source_url,
+                                        socks_addr,
+                                        isolation_username,
+                                        &cookies,
+                                    )
+                                    .await
+                                {
+                                    Ok(()) => Ok(()),
+                                    Err(sw_err) => {
+                                        tracing::error!(error = %sw_err, "all fallbacks failed");
+                                        Err(e) // return original error
+                                    },
+                                }
+                            } else {
+                                tracing::error!(error = %audio_fallback_err, "audio-disabled retry also failed");
+                                Err(e) // return original error
+                            }
+                        },
+                    }
+                } else if self.config.hw_accel {
+                    // Audio already disabled — try SW decode fallback.
                     tracing::warn!("attempting software decode fallback after play failure");
                     drop(guard);
                     match self
@@ -1967,6 +2069,158 @@ impl PlaybackEngine {
                 } else {
                     Err(e)
                 }
+            },
+        }
+    }
+
+    /// Attempt audio-disabled fallback after audio device failure.
+    ///
+    /// Constructs a new pipeline with `audio_enabled = false` (uses
+    /// fakesink instead of alsasink/pulsesink). This allows video
+    /// playback to continue when the audio device (e.g. BlueALSA
+    /// Bluetooth) is disconnected or unavailable.
+    ///
+    /// Called when the primary pipeline fails with a "not-negotiated"
+    /// error from appsrc, which is typically caused by alsasink being
+    /// unable to preroll (device unavailable), causing a cascading
+    /// failure that stops all data flow through the pipeline.
+    #[cfg(feature = "hw")]
+    async fn play_audio_disabled(
+        &self,
+        url: &str,
+        source_url: &str,
+        socks_addr: &str,
+        isolation_username: &str,
+        cookies: &[String],
+    ) -> Result<(), PlaybackError> {
+        // Stop any existing pipeline while holding the lock.
+        {
+            let mut guard = self.gst_pipeline.lock().await;
+            if let Some(ref mut existing) = *guard {
+                let _ = existing.stop();
+            }
+            *guard = None;
+        }
+
+        // Brief pause for DRM/KMS cleanup.
+        tokio::time::sleep(std::time::Duration::from_millis(200)).await;
+
+        let mut noaudio_config = self.config.clone();
+        noaudio_config.audio_enabled = false;
+
+        tracing::info!(
+            url = url,
+            "constructing AUDIO-DISABLED fallback pipeline (fakesink for audio, video-only mode)"
+        );
+
+        let mut pipeline =
+            GstPipeline::new(url, source_url, socks_addr, isolation_username, &noaudio_config, cookies)
+                .await?;
+
+        // Set up bus watch for the audio-disabled pipeline.
+        let event_tx = self.event_tx.clone();
+        let is_playing = self.is_playing.clone();
+        let bus = pipeline.pipeline().bus().expect("pipeline should have a bus");
+
+        let pending_auto_play_na = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(true));
+        let pending_auto_play_na_bus = pending_auto_play_na.clone();
+        let pipeline_weak_na = pipeline.pipeline().downgrade();
+
+        let bus_watch = bus.add_watch(move |_bus, msg| {
+            use gstreamer::MessageView;
+
+            match msg.view() {
+                MessageView::StateChanged(s) => {
+                    let new_state = s.current();
+                    let old_state = s.old();
+                    let pending = s.pending();
+
+                    if new_state != old_state {
+                        tracing::info!(
+                            old = ?old_state,
+                            new = ?new_state,
+                            pending = ?pending,
+                            source = %msg.src().map(|s| s.path_string()).unwrap_or_default(),
+                            "pipeline state change (audio disabled)"
+                        );
+                    }
+
+                    let src_name = msg.src().map(|s| s.path_string()).unwrap_or_default();
+                    let is_pipeline = src_name.starts_with("/GstPipeline:") && !src_name[1..].contains('/');
+
+                    if new_state == State::Playing && is_pipeline {
+                        pending_auto_play_na_bus.store(false, Ordering::Relaxed);
+                        let _ = event_tx.send(PlaybackEvent::Playing);
+                        is_playing.store(true, Ordering::Relaxed);
+                    } else if new_state == State::Paused && pending == State::VoidPending && is_pipeline {
+                        if pending_auto_play_na_bus.load(Ordering::Relaxed) {
+                            tracing::info!(
+                                "audio-disabled pipeline prerolled — auto-transitioning to Playing"
+                            );
+                            if let Some(pipe) = pipeline_weak_na.upgrade() {
+                                let _ = pipe.set_state(State::Playing);
+                            }
+                        } else {
+                            let _ = event_tx.send(PlaybackEvent::Paused);
+                            is_playing.store(false, Ordering::Relaxed);
+                        }
+                    }
+                },
+                MessageView::Eos(_) => {
+                    tracing::info!("end of stream reached (audio disabled)");
+                    let _ = event_tx.send(PlaybackEvent::EndOfStream);
+                    is_playing.store(false, Ordering::Relaxed);
+                },
+                MessageView::Error(e) => {
+                    let msg = e.error().to_string();
+                    let debug_info = e.debug().map(|d| d.to_string());
+                    tracing::error!(
+                        error = %msg,
+                        debug = ?debug_info,
+                        "GStreamer error (audio-disabled pipeline)"
+                    );
+                    let _ = event_tx.send(PlaybackEvent::Error { message: msg, debug: debug_info });
+                    pending_auto_play_na_bus.store(false, Ordering::Relaxed);
+                    is_playing.store(false, Ordering::Relaxed);
+                },
+                MessageView::Buffering(b) => {
+                    let percent = b.percent() as u8;
+                    let _ = event_tx.send(PlaybackEvent::Buffering { percent });
+                    if percent == 100 {
+                        if let Some(pipe) = pipeline_weak_na.upgrade() {
+                            let _ = pipe.set_state(State::Playing);
+                        }
+                    }
+                },
+                MessageView::Warning(w) => {
+                    tracing::warn!(
+                        warning = %w.error(),
+                        "GStreamer warning (audio disabled)"
+                    );
+                },
+                _ => {},
+            }
+
+            gstreamer::glib::ControlFlow::Continue
+        })
+        .expect("failed to add bus watch for audio-disabled pipeline");
+        pipeline.set_bus_watch(bus_watch);
+
+        let play_result = pipeline.preroll();
+
+        let mut guard = self.gst_pipeline.lock().await;
+        match play_result {
+            Ok(()) => {
+                tracing::info!("audio-disabled pipeline prerolled successfully");
+                *guard = Some(pipeline);
+                Ok(())
+            },
+            Err(e) => {
+                tracing::error!(error = %e, "audio-disabled pipeline play() failed");
+                let mut failed_pipeline = pipeline;
+                let _ = failed_pipeline.stop();
+                drop(failed_pipeline);
+                Err(e)
             },
         }
     }
