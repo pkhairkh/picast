@@ -49,7 +49,7 @@ use pipeline::GstPipeline;
 use serde::{Deserialize, Serialize};
 #[cfg(not(feature = "hw"))]
 use std::sync::atomic::AtomicU64;
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
 use std::sync::Arc;
 use thiserror::Error;
 #[cfg(feature = "hw")]
@@ -849,6 +849,18 @@ pub struct PlaybackEngine {
     /// Mock event broadcast channel (simulates GStreamer bus events).
     #[cfg(not(feature = "hw"))]
     mock_event_tx: tokio::sync::broadcast::Sender<PlaybackState>,
+    /// Download progress (mock mode — configurable instead of always-zeros).
+    #[cfg(not(feature = "hw"))]
+    mock_download_progress: std::sync::Mutex<DownloadProgress>,
+    /// Simulate CDN 403 on the next play() call (mock mode).
+    #[cfg(not(feature = "hw"))]
+    mock_cdn_forbidden: AtomicBool,
+    /// Simulate CDN IP mismatch on the next play() call (mock mode).
+    #[cfg(not(feature = "hw"))]
+    mock_cdn_ip_mismatch: AtomicBool,
+    /// Preflight retry count (mock mode — simulates S2.4 CDN retry loop).
+    #[cfg(not(feature = "hw"))]
+    mock_preflight_retry_count: AtomicU32,
 }
 
 impl PlaybackEngine {
@@ -937,6 +949,14 @@ impl PlaybackEngine {
             mock_decode_mode: std::sync::Mutex::new(decode_mode),
             #[cfg(not(feature = "hw"))]
             mock_event_tx,
+            #[cfg(not(feature = "hw"))]
+            mock_download_progress: std::sync::Mutex::new(DownloadProgress::default()),
+            #[cfg(not(feature = "hw"))]
+            mock_cdn_forbidden: AtomicBool::new(false),
+            #[cfg(not(feature = "hw"))]
+            mock_cdn_ip_mismatch: AtomicBool::new(false),
+            #[cfg(not(feature = "hw"))]
+            mock_preflight_retry_count: AtomicU32::new(0),
         })
     }
 
@@ -1897,6 +1917,11 @@ impl PlaybackEngine {
     }
 
     /// Load a URL and transition to the Playing state (mock mode).
+    ///
+    /// If CDN error simulation is enabled via `mock_simulate_cdn_forbidden()`
+    /// or `mock_simulate_cdn_ip_mismatch()`, `play()` returns the
+    /// corresponding error instead of succeeding. This allows the
+    /// session layer to test CDN retry and re-resolution logic.
     #[cfg(not(feature = "hw"))]
     pub async fn play(
         &self,
@@ -1906,6 +1931,28 @@ impl PlaybackEngine {
         _isolation_username: &str,
         _cookies: Vec<String>,
     ) -> Result<(), PlaybackError> {
+        // Check CDN error simulation flags.
+        if self.mock_cdn_forbidden.load(Ordering::Relaxed) {
+            self.mock_cdn_forbidden.store(false, Ordering::Relaxed);
+            let attempts = self.mock_preflight_retry_count.swap(0, Ordering::Relaxed);
+            tracing::warn!(
+                attempts = attempts,
+                "mock: simulating CDN 403 Forbidden"
+            );
+            return Err(PlaybackError::CdnForbidden {
+                attempts: attempts.max(1),
+            });
+        }
+
+        if self.mock_cdn_ip_mismatch.load(Ordering::Relaxed) {
+            self.mock_cdn_ip_mismatch.store(false, Ordering::Relaxed);
+            tracing::warn!("mock: simulating CDN IP mismatch");
+            return Err(PlaybackError::CdnIpMismatch {
+                url_ip_prefix: "192.42".into(),
+                exit_ip: "10.0.0.1".into(),
+            });
+        }
+
         // Store the URL
         {
             let mut guard = self.mock_url.lock().unwrap();
@@ -1916,6 +1963,12 @@ impl PlaybackEngine {
         self.mock_paused.store(false, Ordering::Relaxed);
         self.mock_position_ms.store(0, Ordering::Relaxed);
         self.is_playing.store(true, Ordering::Relaxed);
+
+        // Reset decode mode on new play (same as hw mode resets sw_fallback_active).
+        {
+            let mut guard = self.mock_decode_mode.lock().unwrap();
+            *guard = if self.config.hw_accel { DecodeMode::Hardware } else { DecodeMode::Software };
+        }
 
         // Emit mock Playing event.
         let _ = self.mock_event_tx.send(PlaybackState::Playing);
@@ -1929,6 +1982,17 @@ impl PlaybackEngine {
                 estimated_fill_ms: None,
                 is_buffering: false,
             };
+        }
+
+        // Set realistic download progress after play starts.
+        {
+            let mut guard = self.mock_download_progress.lock().unwrap();
+            guard.downloaded_bytes = 1_048_576; // 1 MB
+            guard.total_bytes = Some(50_000_000); // 50 MB
+            guard.throughput_kbps = 2500; // 2.5 Mbps
+            guard.elapsed_secs = 3.2;
+            guard.http_status = 206; // Partial Content (Range request)
+            guard.content_type = Some("video/mp4".into());
         }
 
         Ok(())
@@ -2145,10 +2209,11 @@ impl PlaybackEngine {
         }
     }
 
-    /// Get the current download progress (mock mode — always returns zeroed).
+    /// Get the current download progress (mock mode — returns configured progress).
     #[cfg(not(feature = "hw"))]
     pub fn download_progress(&self) -> DownloadProgress {
-        DownloadProgress::default()
+        let guard = self.mock_download_progress.lock().unwrap();
+        guard.clone()
     }
 
     /// Cancel the active CDN download.
@@ -2274,6 +2339,60 @@ impl PlaybackEngine {
         let mut guard = self.mock_decode_mode.lock().unwrap();
         tracing::info!(from = %guard, to = "software", "mock decode fallback");
         *guard = DecodeMode::Software;
+    }
+
+    /// Simulate a CDN 403 Forbidden on the next `play()` call (mock mode).
+    ///
+    /// After calling this, the next `play()` will return
+    /// `PlaybackError::CdnForbidden` instead of succeeding. The flag
+    /// is automatically cleared after the simulated error is returned.
+    ///
+    /// Use `mock_set_preflight_retry_count()` to set the number of
+    /// retry attempts that were made before the failure.
+    #[cfg(not(feature = "hw"))]
+    pub fn mock_simulate_cdn_forbidden(&self) {
+        self.mock_cdn_forbidden.store(true, Ordering::Relaxed);
+    }
+
+    /// Simulate a CDN IP mismatch on the next `play()` call (mock mode).
+    ///
+    /// After calling this, the next `play()` will return
+    /// `PlaybackError::CdnIpMismatch` instead of succeeding. The flag
+    /// is automatically cleared after the simulated error is returned.
+    #[cfg(not(feature = "hw"))]
+    pub fn mock_simulate_cdn_ip_mismatch(&self) {
+        self.mock_cdn_ip_mismatch.store(true, Ordering::Relaxed);
+    }
+
+    /// Set the preflight retry count for CDN error simulation (mock mode).
+    ///
+    /// When `mock_simulate_cdn_forbidden()` is active, this count is
+    /// included in the `CdnForbidden { attempts }` error, simulating
+    /// how many preflight retry attempts were made before giving up.
+    #[cfg(not(feature = "hw"))]
+    pub fn mock_set_preflight_retry_count(&self, count: u32) {
+        self.mock_preflight_retry_count.store(count, Ordering::Relaxed);
+    }
+
+    /// Set the download progress for testing (mock mode).
+    ///
+    /// Overrides the default download progress that `play()` sets.
+    /// Use this to test specific download scenarios (e.g. zero bytes,
+    /// high throughput, specific HTTP status codes).
+    #[cfg(not(feature = "hw"))]
+    pub fn mock_set_download_progress(&self, progress: DownloadProgress) {
+        let mut guard = self.mock_download_progress.lock().unwrap();
+        *guard = progress;
+    }
+
+    /// Set the buffer health for testing (mock mode).
+    ///
+    /// Use this to simulate buffering states (low fill, is_buffering=true)
+    /// or healthy states (100% fill, is_buffering=false).
+    #[cfg(not(feature = "hw"))]
+    pub fn mock_set_buffer_health(&self, health: BufferHealth) {
+        let mut guard = self.mock_buffer_health.lock().unwrap();
+        *guard = health;
     }
 }
 
@@ -2643,5 +2762,302 @@ mod tests {
             let deserialized: DecodeMode = serde_json::from_str(&json).expect("deserialize");
             assert_eq!(deserialized, mode);
         }
+    }
+
+    // ── CDN error simulation tests ──────────────────────────────────
+
+    #[tokio::test]
+    async fn mock_cdn_forbidden_simulation() {
+        let engine = PlaybackEngine::new(PipelineConfig::default()).unwrap();
+
+        // Enable CDN 403 simulation
+        engine.mock_simulate_cdn_forbidden();
+        engine.mock_set_preflight_retry_count(3);
+
+        let result = engine
+            .play("https://example.com/video.mp4", "https://example.com/video.mp4", "", "", vec![])
+            .await;
+
+        assert!(result.is_err());
+        match result.unwrap_err() {
+            PlaybackError::CdnForbidden { attempts } => {
+                assert_eq!(attempts, 3, "should report 3 retry attempts");
+            },
+            other => panic!("Expected CdnForbidden, got {:?}", other),
+        }
+
+        // Flag should be auto-cleared, so next play() succeeds
+        let result = engine
+            .play("https://example.com/video.mp4", "https://example.com/video.mp4", "", "", vec![])
+            .await;
+        assert!(result.is_ok(), "second play() should succeed after CDN error clears");
+    }
+
+    #[tokio::test]
+    async fn mock_cdn_ip_mismatch_simulation() {
+        let engine = PlaybackEngine::new(PipelineConfig::default()).unwrap();
+
+        engine.mock_simulate_cdn_ip_mismatch();
+
+        let result = engine
+            .play("https://example.com/video.mp4", "https://example.com/video.mp4", "", "", vec![])
+            .await;
+
+        assert!(result.is_err());
+        match result.unwrap_err() {
+            PlaybackError::CdnIpMismatch { url_ip_prefix, exit_ip } => {
+                assert!(!url_ip_prefix.is_empty(), "URL IP prefix should be populated");
+                assert!(!exit_ip.is_empty(), "exit IP should be populated");
+            },
+            other => panic!("Expected CdnIpMismatch, got {:?}", other),
+        }
+
+        // Flag should be auto-cleared
+        let result = engine
+            .play("https://example.com/video.mp4", "https://example.com/video.mp4", "", "", vec![])
+            .await;
+        assert!(result.is_ok(), "second play() should succeed after IP mismatch clears");
+    }
+
+    #[tokio::test]
+    async fn mock_cdn_forbidden_with_zero_retries_reports_one() {
+        let engine = PlaybackEngine::new(PipelineConfig::default()).unwrap();
+
+        engine.mock_simulate_cdn_forbidden();
+        // Don't set retry count — defaults to 0, should report 1 (max(0, 1))
+
+        let result = engine
+            .play("https://example.com/video.mp4", "https://example.com/video.mp4", "", "", vec![])
+            .await;
+
+        match result.unwrap_err() {
+            PlaybackError::CdnForbidden { attempts } => {
+                assert_eq!(attempts, 1, "should report at least 1 attempt");
+            },
+            other => panic!("Expected CdnForbidden, got {:?}", other),
+        }
+    }
+
+    // ── Download progress tests ──────────────────────────────────────
+
+    #[tokio::test]
+    async fn mock_download_progress_default_before_play() {
+        let engine = PlaybackEngine::new(PipelineConfig::default()).unwrap();
+        let progress = engine.download_progress();
+        assert_eq!(progress.downloaded_bytes, 0);
+        assert!(progress.total_bytes.is_none());
+        assert_eq!(progress.throughput_kbps, 0);
+        assert_eq!(progress.http_status, 0);
+    }
+
+    #[tokio::test]
+    async fn mock_download_progress_after_play() {
+        let engine = PlaybackEngine::new(PipelineConfig::default()).unwrap();
+        engine
+            .play("https://example.com/video.mp4", "https://example.com/video.mp4", "", "", vec![])
+            .await
+            .unwrap();
+
+        let progress = engine.download_progress();
+        assert!(progress.downloaded_bytes > 0, "should have downloaded bytes after play");
+        assert!(progress.total_bytes.is_some(), "should have total bytes after play");
+        assert!(progress.throughput_kbps > 0, "should have throughput after play");
+        assert_eq!(progress.http_status, 206, "should have 206 Partial Content");
+        assert_eq!(progress.content_type.as_deref(), Some("video/mp4"));
+    }
+
+    #[tokio::test]
+    async fn mock_download_progress_custom_override() {
+        let engine = PlaybackEngine::new(PipelineConfig::default()).unwrap();
+        engine
+            .play("https://example.com/video.mp4", "https://example.com/video.mp4", "", "", vec![])
+            .await
+            .unwrap();
+
+        // Override with custom progress (simulating slow download)
+        engine.mock_set_download_progress(DownloadProgress {
+            downloaded_bytes: 500_000,
+            total_bytes: Some(100_000_000),
+            throughput_kbps: 500,
+            elapsed_secs: 8.0,
+            http_status: 200,
+            content_type: Some("video/webm".into()),
+        });
+
+        let progress = engine.download_progress();
+        assert_eq!(progress.downloaded_bytes, 500_000);
+        assert_eq!(progress.total_bytes, Some(100_000_000));
+        assert_eq!(progress.throughput_kbps, 500);
+        assert_eq!(progress.http_status, 200);
+        assert_eq!(progress.content_type.as_deref(), Some("video/webm"));
+    }
+
+    // ── Buffer health manipulation tests ──────────────────────────────
+
+    #[tokio::test]
+    async fn mock_buffer_health_custom_state() {
+        let engine = PlaybackEngine::new(PipelineConfig::default()).unwrap();
+        engine
+            .play("https://example.com/video.mp4", "https://example.com/video.mp4", "", "", vec![])
+            .await
+            .unwrap();
+
+        // Simulate buffering state
+        engine.mock_set_buffer_health(BufferHealth {
+            fill_percent: 15,
+            buffered_seconds: 2.5,
+            estimated_fill_ms: Some(8000),
+            is_buffering: true,
+        });
+
+        let health = engine.buffer_health().await;
+        assert_eq!(health.fill_percent, 15);
+        assert!((health.buffered_seconds - 2.5).abs() < f64::EPSILON);
+        assert_eq!(health.estimated_fill_ms, Some(8000));
+        assert!(health.is_buffering);
+    }
+
+    // ── Decode mode reset on new play ──────────────────────────────
+
+    #[tokio::test]
+    async fn mock_decode_mode_resets_on_new_play() {
+        let engine = PlaybackEngine::new(PipelineConfig::default()).unwrap();
+
+        // Start with hardware decode
+        engine
+            .play("https://example.com/video.mp4", "https://example.com/video.mp4", "", "", vec![])
+            .await
+            .unwrap();
+        assert_eq!(engine.decode_mode(), DecodeMode::Hardware);
+
+        // Fallback to software
+        engine.mock_fallback_to_software();
+        assert_eq!(engine.decode_mode(), DecodeMode::Software);
+
+        // New play() resets decode mode back to Hardware
+        engine
+            .play("https://example.com/video2.mp4", "https://example.com/video2.mp4", "", "", vec![])
+            .await
+            .unwrap();
+        assert_eq!(engine.decode_mode(), DecodeMode::Hardware, "decode mode should reset on new play");
+    }
+
+    // ── PlaybackError variant tests ────────────────────────────────
+
+    #[test]
+    fn playback_error_cdn_forbidden() {
+        let err = PlaybackError::CdnForbidden { attempts: 3 };
+        assert!(err.to_string().contains("CDN 403 Forbidden"));
+        assert!(err.to_string().contains("3"));
+    }
+
+    #[test]
+    fn playback_error_cdn_ip_mismatch() {
+        let err = PlaybackError::CdnIpMismatch {
+            url_ip_prefix: "192.42".into(),
+            exit_ip: "10.0.0.1".into(),
+        };
+        assert!(err.to_string().contains("CDN IP mismatch"));
+        assert!(err.to_string().contains("192.42"));
+        assert!(err.to_string().contains("10.0.0.1"));
+    }
+
+    // ── PipelineConfig audio validation ──────────────────────────────
+
+    #[test]
+    fn pipeline_config_audio_defaults() {
+        let config = PipelineConfig::default();
+        // audio_sink is auto-detected
+        assert!(
+            config.audio_sink == "alsasink" || config.audio_sink == "pulsesink",
+            "audio_sink should be auto-detected"
+        );
+        // audio_device is auto-detected based on /proc/asound/cards
+        // (may be empty or "plughw:N,0" depending on system)
+    }
+
+    #[test]
+    fn pipeline_config_audio_ts_offset_hw() {
+        let config = PipelineConfig::default();
+        // With hw_accel=true, ts-offset should be 200ms
+        assert!(config.hw_accel);
+        assert_eq!(config.audio_ts_offset_ns, 200_000_000);
+    }
+
+    #[test]
+    fn pipeline_config_audio_ts_offset_sw() {
+        let mut config = PipelineConfig::default();
+        config.hw_accel = false;
+        // When switching to SW decode, ts-offset should be set to 0
+        // (SW decode has no V4L2 latency to compensate for)
+        config.audio_ts_offset_ns = 0;
+        assert_eq!(config.audio_ts_offset_ns, 0);
+    }
+
+    #[test]
+    fn pipeline_config_custom_audio_device() {
+        let mut config = PipelineConfig::default();
+        config.audio_device = "plughw:0,0".into();
+        assert_eq!(config.audio_device, "plughw:0,0");
+    }
+
+    #[test]
+    fn pipeline_config_serialization_includes_audio() {
+        let config = PipelineConfig::default();
+        let json = serde_json::to_string(&config).expect("serialize");
+        assert!(json.contains("audio_sink"), "JSON should include audio_sink");
+        assert!(json.contains("audio_device"), "JSON should include audio_device");
+        assert!(json.contains("audio_ts_offset_ns"), "JSON should include audio_ts_offset_ns");
+    }
+
+    // ── DecodeMode HEVC variant tests ──────────────────────────────
+
+    #[test]
+    fn decode_mode_hevc_variants_display() {
+        assert_eq!(DecodeMode::HevcV3d.to_string(), "hevc_v3d");
+        assert_eq!(DecodeMode::HevcIsp.to_string(), "hevc_isp");
+    }
+
+    #[test]
+    fn decode_mode_all_variants_serialization() {
+        let modes = vec![DecodeMode::Hardware, DecodeMode::Software, DecodeMode::HevcV3d, DecodeMode::HevcIsp];
+        for mode in modes {
+            let json = serde_json::to_string(&mode).expect("serialize");
+            let deserialized: DecodeMode = serde_json::from_str(&json).expect("deserialize");
+            assert_eq!(deserialized, mode);
+        }
+    }
+
+    // ── DownloadProgress tests ─────────────────────────────────────
+
+    #[test]
+    fn download_progress_default() {
+        let progress = DownloadProgress::default();
+        assert_eq!(progress.downloaded_bytes, 0);
+        assert!(progress.total_bytes.is_none());
+        assert_eq!(progress.throughput_kbps, 0);
+        assert!((progress.elapsed_secs - 0.0).abs() < f64::EPSILON);
+        assert_eq!(progress.http_status, 0);
+        assert!(progress.content_type.is_none());
+    }
+
+    #[test]
+    fn download_progress_serialization_roundtrip() {
+        let progress = DownloadProgress {
+            downloaded_bytes: 10_000_000,
+            total_bytes: Some(50_000_000),
+            throughput_kbps: 2500,
+            elapsed_secs: 32.0,
+            http_status: 206,
+            content_type: Some("video/mp4".into()),
+        };
+        let json = serde_json::to_string(&progress).expect("serialize");
+        let deserialized: DownloadProgress = serde_json::from_str(&json).expect("deserialize");
+        assert_eq!(deserialized.downloaded_bytes, progress.downloaded_bytes);
+        assert_eq!(deserialized.total_bytes, progress.total_bytes);
+        assert_eq!(deserialized.throughput_kbps, progress.throughput_kbps);
+        assert!((deserialized.elapsed_secs - progress.elapsed_secs).abs() < f64::EPSILON);
+        assert_eq!(deserialized.http_status, progress.http_status);
+        assert_eq!(deserialized.content_type, progress.content_type);
     }
 }

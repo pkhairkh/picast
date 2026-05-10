@@ -457,11 +457,12 @@ unimplemented subsystem.
 
 ---
 
-## Sprint 4 — Full Playback Pipeline on Pi
+## Sprint 4 — Full Playback Pipeline on Pi ✅
 
 **Duration:** 2 weeks (10 working days)
 **Goal:** End-to-end video playback on Raspberry Pi with the appsrc/StreamSource
 architecture, V4L2 hardware decode, and DRM/KMS output.
+**Status:** **COMPLETE** — committed, pushed to main.
 
 **Definition of Done (DoD):**
 - The appsrc + parsebin + v4l2h264dec + kmssink pipeline works on Pi 4
