@@ -1758,6 +1758,12 @@ impl GstPipeline {
                 let msg = format!("set_state Paused failed: {}", e);
                 tracing::error!(%msg);
 
+                // Track whether all errors on the bus are audio sink
+                // device errors. If so, we can continue in video-only
+                // mode instead of failing the entire pipeline.
+                let mut all_errors_are_audio = true;
+                let mut found_any_error = false;
+
                 // Try to get a more specific error from the bus.
                 if let Some(bus) = self.pipeline.bus() {
                     while let Some(bus_msg) =
@@ -1765,16 +1771,47 @@ impl GstPipeline {
                     {
                         match bus_msg.view() {
                             gstreamer::MessageView::Error(err) => {
-                                tracing::error!(
-                                    error = %err.error(),
-                                    debug = ?err.debug(),
-                                    "GStreamer error during set_state Paused"
+                                let err_msg = err.error().to_string();
+                                let debug_info = err.debug().map(|d| d.to_string());
+                                let source_element = err.src().map(|s| s.path_string());
+                                found_any_error = true;
+
+                                // Check if this is an audio sink device error.
+                                // When the audio device (BlueALSA, ALSA HDMI, etc.)
+                                // is unavailable, we can continue in video-only mode.
+                                let is_audio_sink_error = source_element.as_ref().map(|s| {
+                                    s.contains("alsasink") || s.contains("pulsesink")
+                                }).unwrap_or(false) && (
+                                    err_msg.contains("Playback open error")
+                                    || err_msg.contains("Device or resource busy")
+                                    || err_msg.contains("No such file or directory")
+                                    || err_msg.contains("Couldn't open PCM")
+                                    || err_msg.contains("Could not open audio device")
                                 );
-                                return Err(PlaybackError::Gstreamer(format!(
-                                    "{} — {}",
-                                    e,
-                                    err.error()
-                                )));
+
+                                if is_audio_sink_error {
+                                    tracing::warn!(
+                                        error = %err_msg,
+                                        debug = ?debug_info,
+                                        source = ?source_element,
+                                        "audio sink device error during preroll — \
+                                         continuing in video-only mode"
+                                    );
+                                    // Don't return an error — keep polling for
+                                    // other (potentially fatal) errors.
+                                } else {
+                                    all_errors_are_audio = false;
+                                    tracing::error!(
+                                        error = %err_msg,
+                                        debug = ?debug_info,
+                                        "GStreamer error during set_state Paused"
+                                    );
+                                    return Err(PlaybackError::Gstreamer(format!(
+                                        "{} — {}",
+                                        e,
+                                        err.error()
+                                    )));
+                                }
                             },
                             gstreamer::MessageView::Warning(w) => {
                                 tracing::warn!(
@@ -1787,7 +1824,19 @@ impl GstPipeline {
                     }
                 }
 
-                return Err(PlaybackError::Gstreamer(msg));
+                // If all errors were audio sink errors, the video branch
+                // may still work — don't fail the pipeline. With
+                // async-handling=true, the video branch (kmssink) should
+                // preroll independently of the audio sink.
+                if found_any_error && all_errors_are_audio {
+                    tracing::warn!(
+                        "set_state Paused reported errors but all were audio sink — \
+                         continuing in video-only mode"
+                    );
+                    // Fall through to set state = Paused and return Ok
+                } else {
+                    return Err(PlaybackError::Gstreamer(msg));
+                }
             },
         }
 

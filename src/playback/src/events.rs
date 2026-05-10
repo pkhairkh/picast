@@ -40,6 +40,14 @@ pub enum PlaybackEvent {
     /// layer should re-resolve the URL and retry playback.
     CdnForbidden,
 
+    /// Audio device is unavailable (e.g. Bluetooth disconnected, ALSA
+    /// device busy/missing). The pipeline continues in video-only mode.
+    /// The session layer should NOT treat this as a fatal error.
+    AudioDeviceError {
+        /// Human-readable description of the audio device failure.
+        message: String,
+    },
+
     /// Buffering progress update.
     Buffering {
         /// Buffer fill percentage (0–100).
@@ -89,6 +97,9 @@ mod tests {
                 debug: Some("v4l2h264dec: negotiation failed".into()),
             },
             PlaybackEvent::CdnForbidden,
+            PlaybackEvent::AudioDeviceError {
+                message: "BlueALSA device not found".into(),
+            },
             PlaybackEvent::Buffering { percent: 50 },
             PlaybackEvent::PositionUpdate { position_ms: 5000, duration_ms: Some(300000) },
             PlaybackEvent::Latency { latency_ms: 42 },

@@ -588,6 +588,9 @@ fn map_session_event(
             message: "CDN rejected request (403 Forbidden) — Tor exit IP mismatch, re-resolving…"
                 .into(),
         }),
+        SessionEvent::AudioDeviceError { message, .. } => Some(ServerEvent::Error {
+            message: format!("Audio device unavailable: {} — video-only playback", message),
+        }),
     }
 }
 

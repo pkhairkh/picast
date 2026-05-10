@@ -244,6 +244,8 @@ pub enum SessionEvent {
     Error { id: Uuid, message: String },
     /// CDN 403 Forbidden — the Tor circuit may have rotated; re-resolve needed.
     CdnForbidden { id: Uuid },
+    /// Audio device unavailable (e.g. Bluetooth disconnected). Video continues.
+    AudioDeviceError { id: Uuid, message: String },
     /// Buffering progress.
     Buffering { id: Uuid, percent: u8 },
     /// Position update.
@@ -651,6 +653,16 @@ impl SessionManager {
     /// Returns `None` when no session is active.
     pub fn subscribe_state(&self) -> watch::Receiver<Option<MediaSession>> {
         self.watch_tx.subscribe()
+    }
+
+    /// Broadcast an arbitrary session event to all subscribers.
+    ///
+    /// Used by the server's playback event listener to forward events
+    /// (like `AudioDeviceError`) from the playback engine to protocol
+    /// layers (WebSocket, DLNA) without the session manager being the
+    /// sole source of events.
+    pub fn broadcast_event(&self, event: SessionEvent) {
+        let _ = self.event_tx.send(event);
     }
 
     /// Get a clone of the current watch sender for external use.

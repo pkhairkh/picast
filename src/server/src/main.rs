@@ -468,6 +468,41 @@ async fn main() -> Result<()> {
         bogdan_protocols::run_dlna_sync(dlna_sync, dlna_event_rx).await;
     });
 
+    // ── 7b. Playback event listener ──────────────────────────────────
+    // Subscribe to PlaybackEngine events (broadcast channel) and forward
+    // audio device errors to the session layer so WebSocket/DLNA clients
+    // are notified that video is playing without audio.
+    #[cfg(feature = "hw")]
+    {
+        let playback_events = playback_engine.events();
+        let event_session = session.clone();
+        tokio::spawn(async move {
+            let mut rx = playback_events;
+            loop {
+                match rx.recv().await {
+                    Ok(bogdan_playback::PlaybackEvent::AudioDeviceError { message }) => {
+                        if let Ok(id) = event_session.active_session_id_public().await {
+                            let _ = event_session.broadcast_event(
+                                bogdan_session::SessionEvent::AudioDeviceError { id, message },
+                            );
+                        }
+                    },
+                    Ok(_) => {
+                        // Other playback events are handled by the bus watch
+                        // internally or by the session's play() return value.
+                    },
+                    Err(tokio::sync::broadcast::error::RecvError::Lagged(count)) => {
+                        warn!(count = count, "playback event stream lagged — catching up");
+                    },
+                    Err(tokio::sync::broadcast::error::RecvError::Closed) => {
+                        info!("playback event stream closed — stopping listener");
+                        break;
+                    },
+                }
+            }
+        });
+    }
+
     // ── 8. Background tasks ──────────────────────────────────────────
 
     // 8a. Periodic watchdog notification for systemd (if WatchdogSec is set).
@@ -551,13 +586,12 @@ async fn main() -> Result<()> {
                                 );
                                 let _ = position_session.stop().await;
                                 if let Some(ref url) = source_url {
-                                    // Wait for DRM/KMS and ALSA resources to be
-                                    // fully released before starting a new session.
-                                    // BlueALSA needs 2-3 seconds to release the
-                                    // PCM device after the pipeline goes to Null —
-                                    // 500ms was insufficient and caused "Could not
-                                    // open audio device for playback" errors.
-                                    tokio::time::sleep(std::time::Duration::from_secs(3)).await;
+                                    // Wait for DRM/KMS resources to be fully
+                                    // released before starting a new session.
+                                    // Audio device errors are now non-fatal
+                                    // (video-only playback), so we only need
+                                    // to wait for the DRM driver cleanup.
+                                    tokio::time::sleep(std::time::Duration::from_millis(500)).await;
                                     match position_session.load(url).await {
                                         Ok(_) => info!("auto re-cast succeeded — new CDN session active"),
                                         Err(e) => warn!(error = %e, "auto re-cast failed — user must manually re-cast"),
@@ -576,7 +610,8 @@ async fn main() -> Result<()> {
                                 );
                                 let _ = position_session.stop().await;
                                 if let Some(ref url) = source_url {
-                                    tokio::time::sleep(std::time::Duration::from_secs(3)).await;
+                                    // Wait for DRM/KMS cleanup.
+                                    tokio::time::sleep(std::time::Duration::from_millis(500)).await;
                                     match position_session.load(url).await {
                                         Ok(_) => info!("auto re-cast succeeded — new CDN session active"),
                                         Err(e) => warn!(error = %e, "auto re-cast failed — user must manually re-cast"),

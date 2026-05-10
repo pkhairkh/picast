@@ -481,6 +481,13 @@ pub async fn run_dlna_sync(
                             "CDN 403 Forbidden — not starting gmediarender (re-resolve may be attempted)"
                         );
                     },
+                    SessionEvent::AudioDeviceError { .. } => {
+                        // Audio device unavailable (Bluetooth disconnected, etc.)
+                        // Video continues playing without audio — no action needed.
+                        tracing::info!(
+                            "audio device unavailable — video-only playback continues"
+                        );
+                    },
                     _ => {
                         // Other events (Created, Resolved, Buffering, etc.)
                         // are not relevant to the DLNA renderer in v1.

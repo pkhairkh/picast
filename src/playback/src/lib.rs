@@ -1248,6 +1248,25 @@ impl PlaybackEngine {
                     let is_cdn_forbidden = msg.contains("Forbidden")
                         || debug_info.as_ref().map(|d| d.contains("Forbidden (403)")).unwrap_or(false);
 
+                    // Detect audio sink device errors — these are non-fatal.
+                    // When the audio device (BlueALSA Bluetooth, ALSA HDMI, etc.)
+                    // is unavailable (disconnected, busy, or doesn't exist), the
+                    // pipeline can continue in video-only mode. With
+                    // async-handling=true on the pipeline, the video branch
+                    // prerolls and plays independently of the audio sink.
+                    let is_audio_sink_error = source_element.as_ref().map(|s| {
+                        s.contains("alsasink") || s.contains("pulsesink")
+                    }).unwrap_or(false) && (
+                        // ALSA device open failures
+                        msg.contains("Playback open error")
+                        || msg.contains("Device or resource busy")
+                        || msg.contains("No such file or directory")
+                        // BlueALSA-specific: PCM path doesn't exist
+                        || msg.contains("Couldn't open PCM")
+                        // Generic "could not open audio device"
+                        || msg.contains("Could not open audio device")
+                    );
+
                     if is_cdn_forbidden {
                         tracing::warn!(
                             error = %msg,
@@ -1256,6 +1275,31 @@ impl PlaybackEngine {
                             "CDN 403 Forbidden detected — emitting CdnForbidden event for re-resolve"
                         );
                         let _ = event_tx.send(PlaybackEvent::CdnForbidden);
+                        // CDN 403 is fatal for the current stream — clear
+                        // auto-play and mark as not playing so the stall
+                        // detection in main.rs can trigger re-cast.
+                        pending_auto_play_bus.store(false, Ordering::Relaxed);
+                        is_playing.store(false, Ordering::Relaxed);
+                    } else if is_audio_sink_error {
+                        tracing::warn!(
+                            error = %msg,
+                            debug = ?debug_info,
+                            source = ?source_element,
+                            "audio sink device error — continuing in video-only mode"
+                        );
+                        let _ = event_tx.send(PlaybackEvent::AudioDeviceError {
+                            message: msg,
+                        });
+                        // Do NOT set is_playing = false — video continues playing.
+                        // Do NOT clear pending_auto_play — the video branch should
+                        // still auto-transition to Playing once it prerolls.
+                        //
+                        // The failed alsasink will stay in an error state but
+                        // with async-handling=true on the pipeline, the video
+                        // branch (kmssink) prerolls independently. The audio
+                        // queue may fill up, but GStreamer demuxers use separate
+                        // threads per src pad, so a blocked audio pad should not
+                        // block the video pad.
                     } else {
                         tracing::error!(
                             error = %msg,
@@ -1265,11 +1309,10 @@ impl PlaybackEngine {
                         );
                         let _ =
                             event_tx.send(PlaybackEvent::Error { message: msg, debug: debug_info });
+                        // Clear auto-play flag on error to prevent spurious transitions.
+                        pending_auto_play_bus.store(false, Ordering::Relaxed);
+                        is_playing.store(false, Ordering::Relaxed);
                     }
-
-                    // Clear auto-play flag on error to prevent spurious transitions.
-                    pending_auto_play_bus.store(false, Ordering::Relaxed);
-                    is_playing.store(false, Ordering::Relaxed);
                 },
                 MessageView::Buffering(b) => {
                     let percent = b.percent() as u8;
