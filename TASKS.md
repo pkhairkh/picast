@@ -42,11 +42,12 @@ The following phases from the original task breakdown are fully implemented:
 
 ---
 
-## Sprint 1 — Provider Extraction & Resolver Architecture
+## Sprint 1 — Provider Extraction & Resolver Architecture ✅
 
 **Duration:** 2 weeks (10 working days)
 **Goal:** Make the custom resolver system config-driven and pluggable, eliminating
 VOE/DoodStream-specific hardcoded logic from the resolver core.
+**Status:** **COMPLETE** — committed as `dbb2a53`, pushed to main.
 
 **Definition of Done (DoD):**
 - All VOE-specific constants and domain lists moved out of Rust source into
