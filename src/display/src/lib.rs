@@ -855,22 +855,54 @@ impl DisplayManager {
                     DisplayError::Modeset(format!("invalid CRTC id {}", crtc.crtc_id))
                 })?;
             let crtc_info = fd.get_crtc(crtc_handle).ok();
-            let saved_mode = crtc_info.as_ref().and_then(|i| i.mode());
+
+            // Try to get the mode from the CRTC info first.
+            let mut mode: Option<Mode> = crtc_info.as_ref().and_then(|i| i.mode());
+
             // If get_crtc() didn't return a mode (e.g. fbcon never set
-            // one, or the CRTC is inactive), fall back to the connector's
-            // current mode. This ensures release() can restore a valid
-            // mode instead of logging "no saved mode — cannot restore CRTC".
-            let mode = saved_mode.unwrap_or_else(|| {
+            // one, or the CRTC is inactive), fall back to finding the
+            // matching DRM Mode from the connector.  We can't use our
+            // DisplayMode directly because SavedCrtcState expects a
+            // drm::control::Mode, so we re-query the connector and match
+            // by resolution + refresh rate.
+            if mode.is_none() {
                 tracing::info!(
                     crtc_id = crtc.crtc_id,
                     "CRTC has no active mode from get_crtc() — using connector's current mode for restore"
                 );
-                selected_mode.clone()
-            });
+                let conn_handle = control::from_u32::<control::connector::Handle>(connector.connector_id);
+                if let Some(handle) = conn_handle {
+                    if let Ok(conn_info) = fd.get_connector(handle, false) {
+                        // Exact match: resolution + refresh rate.
+                        mode = conn_info.modes().iter().find(|m| {
+                            m.size().0 as u32 == selected_mode.width
+                                && m.size().1 as u32 == selected_mode.height
+                                && m.vrefresh() == selected_mode.refresh_mhz
+                        }).cloned();
+                        // Fallback: match by resolution only (refresh may differ slightly).
+                        if mode.is_none() {
+                            mode = conn_info.modes().iter().find(|m| {
+                                m.size().0 as u32 == selected_mode.width
+                                    && m.size().1 as u32 == selected_mode.height
+                            }).cloned();
+                            if mode.is_some() {
+                                tracing::warn!(
+                                    "no DRM mode with exact refresh rate — using first match by resolution"
+                                );
+                            }
+                        }
+                    }
+                }
+                if mode.is_none() {
+                    tracing::warn!(
+                        "could not find DRM Mode for CRTC fallback — CRTC restore may fail on release()"
+                    );
+                }
+            }
             self.saved_crtc = Some(SavedCrtcState {
                 crtc_id: crtc.crtc_id,
                 fb_id: crtc_info.as_ref().and_then(|i| i.framebuffer().map(|fb| fb.into())),
-                mode: Some(mode),
+                mode,
                 x: 0,
                 y: 0,
                 connector_id: connector.connector_id,

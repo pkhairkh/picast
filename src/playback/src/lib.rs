@@ -48,9 +48,7 @@ use gstreamer::State;
 use pipeline::GstPipeline;
 use serde::{Deserialize, Serialize};
 #[cfg(not(feature = "hw"))]
-use std::sync::atomic::AtomicU64;
-#[cfg(not(feature = "hw"))]
-use std::sync::atomic::AtomicU32;
+use std::sync::atomic::{AtomicU32, AtomicU64};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use thiserror::Error;

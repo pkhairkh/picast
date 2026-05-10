@@ -518,47 +518,67 @@ async fn main() -> Result<()> {
                         if let Ok(id) = position_session.active_session_id_public().await {
                             position_session.refresh_playback_position_public(id).await;
                         }
+                    }
 
-                        // Stall detection: if the CDN download errored and
-                        // the pipeline is no longer making progress (is_playing
-                        // becomes false due to buffer depletion), take action.
-                        if position_playback.download_errored() && !position_playback.is_playing() {
-                            stall_zero_count += 1;
-                            if stall_zero_count >= 3 {
-                                // 6 seconds of stall after download error
-                                let cdn_forbidden = position_playback.cdn_forbidden();
-                                if cdn_forbidden {
-                                    // CDN returned 403 — session token expired.
-                                    // Auto-re-cast to get a fresh CDN URL instead of
-                                    // leaving the user with a frozen screen.
-                                    let source_url = position_session.active_session_source_url_public().await;
-                                    info!(
-                                        source_url = ?source_url,
-                                        "CDN 403 Forbidden + pipeline stalled for 6s — \
-                                         auto re-casting to get fresh CDN URL"
-                                    );
-                                    let _ = position_session.stop().await;
-                                    if let Some(ref url) = source_url {
-                                        // Brief pause to allow DRM/KMS resources to be
-                                        // fully released before starting a new session.
-                                        tokio::time::sleep(std::time::Duration::from_millis(500)).await;
-                                        match position_session.load(url).await {
-                                            Ok(_) => info!("auto re-cast succeeded — new CDN session active"),
-                                            Err(e) => warn!(error = %e, "auto re-cast failed — user must manually re-cast"),
-                                        }
+                    // Stall detection: if the CDN download errored and the
+                    // pipeline is no longer playing (paused or stopped due to
+                    // buffer depletion), take action.
+                    //
+                    // IMPORTANT: This MUST run outside the is_playing() check
+                    // above, because when the pipeline stalls (buffer depletion
+                    // causes GStreamer to pause), is_playing() returns false.
+                    // If we only check stall inside is_playing(), we never
+                    // detect the stall and the user sees a frozen screen forever.
+                    //
+                    // We also check for an active session to avoid false positives
+                    // when no session exists and download_errored() returns stale
+                    // values from a previous pipeline.
+                    let has_active_session = position_session.active_session_id_public().await.is_ok();
+                    if has_active_session && position_playback.download_errored() && !position_playback.is_playing() {
+                        stall_zero_count += 1;
+                        if stall_zero_count >= 3 {
+                            // 6 seconds of stall after download error
+                            let cdn_forbidden = position_playback.cdn_forbidden();
+                            if cdn_forbidden {
+                                // CDN returned 403 — session token expired.
+                                // Auto-re-cast to get a fresh CDN URL instead of
+                                // leaving the user with a frozen screen.
+                                let source_url = position_session.active_session_source_url_public().await;
+                                info!(
+                                    source_url = ?source_url,
+                                    "CDN 403 Forbidden + pipeline stalled for 6s — \
+                                     auto re-casting to get fresh CDN URL"
+                                );
+                                let _ = position_session.stop().await;
+                                if let Some(ref url) = source_url {
+                                    // Brief pause to allow DRM/KMS resources to be
+                                    // fully released before starting a new session.
+                                    tokio::time::sleep(std::time::Duration::from_millis(500)).await;
+                                    match position_session.load(url).await {
+                                        Ok(_) => info!("auto re-cast succeeded — new CDN session active"),
+                                        Err(e) => warn!(error = %e, "auto re-cast failed — user must manually re-cast"),
                                     }
-                                } else {
-                                    // Non-403 CDN error (connection drop, etc.).
-                                    // Stop the session so the user can re-cast.
-                                    info!(
-                                        "CDN download errored and pipeline stalled for 6s — \
-                                         stopping session so user can re-cast"
-                                    );
-                                    let _ = position_session.stop().await;
                                 }
-                                stall_zero_count = 0;
+                            } else {
+                                // Non-403 CDN error (connection drop, etc.).
+                                // Auto-re-cast as well — the CDN connection dropped
+                                // but the URL may still be valid. If it's also expired,
+                                // the next attempt will get 403 and trigger re-resolution.
+                                let source_url = position_session.active_session_source_url_public().await;
+                                info!(
+                                    source_url = ?source_url,
+                                    "CDN download errored (non-403) + pipeline stalled for 6s — \
+                                     auto re-casting (URL may still be valid)"
+                                );
+                                let _ = position_session.stop().await;
+                                if let Some(ref url) = source_url {
+                                    tokio::time::sleep(std::time::Duration::from_millis(500)).await;
+                                    match position_session.load(url).await {
+                                        Ok(_) => info!("auto re-cast succeeded — new CDN session active"),
+                                        Err(e) => warn!(error = %e, "auto re-cast failed — user must manually re-cast"),
+                                    }
+                                }
                             }
-                        } else {
                             stall_zero_count = 0;
                         }
                     } else {
