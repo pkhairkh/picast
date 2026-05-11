@@ -16,7 +16,7 @@ anyhow = { workspace = true }
 # OpenGL ES 3.1 bindings — used for compute shader dispatch on V3D.
 # `glow` provides a safe, cross-platform GL wrapper that supports GLES 3.1
 # compute shaders via `glDispatchCompute()`, `glBindBufferBase()`, SSBOs, etc.
-glow = { version = "0.16", optional = true }
+glow = { version = "0.17", optional = true }
 
 # Low-level Linux APIs: `memfd_create` for zero-copy buffer allocation,
 # `ioctl` for DRM/V3D ioctls, `mmap` for buffer mapping.
