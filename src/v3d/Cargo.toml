@@ -20,7 +20,7 @@ glow = { version = "0.16", optional = true }
 
 # Low-level Linux APIs: `memfd_create` for zero-copy buffer allocation,
 # `ioctl` for DRM/V3D ioctls, `mmap` for buffer mapping.
-nix = { version = "0.29", features = ["mman", "ioctl", "fs"], optional = true }
+nix = { version = "0.31", features = ["mman", "ioctl", "fs"], optional = true }
 
 # Dynamic loading of libEGL.so and libGLESv2.so at runtime.
 # We use `libloading` instead of linking directly because:
