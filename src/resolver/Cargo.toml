@@ -13,7 +13,7 @@ serde_json = { workspace = true }
 thiserror = { workspace = true }
 tracing = { workspace = true }
 url = { workspace = true }
-rusqlite = { version = "0.31", features = ["bundled"] }
+rusqlite = { version = "0.39", features = ["bundled"] }
 async-trait = { workspace = true }
 tempfile = "3"
 reqwest = { version = "0.12", features = ["rustls-tls", "cookies", "gzip", "brotli", "socks"], default-features = false }
