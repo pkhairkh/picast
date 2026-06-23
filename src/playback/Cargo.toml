@@ -12,7 +12,7 @@ hevc = []  # Enable HEVC/H.265 decode support (requires V3D compute shader for S
 [dependencies]
 bogdan-display = { path = "../display", default-features = false }
 bogdan-v3d = { path = "../v3d", default-features = false }
-gstreamer = { version = "0.23", optional = true }
+gstreamer = { version = "0.25", optional = true }
 # gstreamer-app = { version = "0.23", optional = true }    # Future: for AppSink/AppSrc
 # gstreamer-video = { version = "0.23", optional = true }  # Future: for video caps helpers
 # gstreamer-audio = { version = "0.23", optional = true }  # Future: for audio caps helpers
