@@ -7,6 +7,34 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Implemented
+- Full implementation of all 7 crates: bogdan-tor, bogdan-display, bogdan-playback, bogdan-resolver, bogdan-session, bogdan-protocols, bogdan-server
+- Tor daemon lifecycle management with SOCKS5 stream isolation (SHA-256 hostname hashing)
+- DRM/KMS direct mode-setting with GBM zero-copy buffer allocation
+- GStreamer playback pipeline: souphttpsrc → queue2 → parsebin → V4L2 → kmssink
+- yt-dlp subprocess integration with H.264 format selection and Tor proxying
+- Custom resolvers for Voe, DoodStream, and other streaming providers
+- Session state machine with CDN retry logic and SQLite WAL-mode persistence
+- HTTP REST API (11 endpoints), WebSocket event stream, DLNA MediaRenderer
+- SOCKS5 forwarder for Tor circuit isolation between resolver and media fetcher
+- Browser extension (Manifest V3) with popup UI
+- Configuration system (TOML + env vars + defaults)
+- Deploy script for Raspberry Pi 4B+ (`deploy.sh`)
+- 7 development sprints complete (see TASKS.md)
+- 14 code reviews in docs/blueprint/ (review-01 through review-14)
+
+### Fixed
+- SOCKS5 greeting: offer only username/password auth (0x02) to guarantee Tor circuit isolation
+- Sec-Fetch-* headers added to souphttpsrc for CDN anti-bot compatibility
+- Added missing Voe front-end domains to resolver domain list
+- Buffering mode: 100MB buffer with 80% fill threshold for Tor throughput smoothing
+- PulseAudio sink support for Bluetooth audio output
+- parsebin lookup by factory name instead of hardcoded element name
+- Rate-limited buffering logs to prevent SD card I/O overflow
+- Bluetooth audio auto-detection with BlueALSA support
+- Proactive CDN IP mismatch detection before playback starts
+- False "NO video pad linked" alarm eliminated
+
 ### Added
 - Project scaffold: Rust workspace with 7 crates (bogdan-server, bogdan-protocols, bogdan-session, bogdan-resolver, bogdan-playback, bogdan-display, bogdan-tor)
 - Architecture documentation (ARCHITECTURE.md, SPECIFICATION.md, DECISIONS.md)

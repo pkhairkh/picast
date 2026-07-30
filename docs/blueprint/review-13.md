@@ -5,155 +5,181 @@ version: 1
 phase: code_review
 author: agent
 created: 2026-07-30T00:00:00Z
-updated: 2026-07-30T00:00:00Z
+updated: 2026-07-30T12:25:00Z
 ---
 
-# Code Review: `src/playback/src/stream_source.rs`
+# Code Review: `src/playback/src/pipeline.rs`
 
-**File:** `src/playback/src/stream_source.rs`
-**Lines:** 1575
+**File:** `src/playback/src/pipeline.rs`
+**Lines:** 2123 (0 lines of tests — entirely untested)
 **Reviewer:** agent
 **Date:** 2026-07-30
 
 ## Summary
 
-The stream source provides progressive download for GStreamer's `appsrc` element. It replaces the previous real-time proxy chain with a buffered architecture: CDN → Tor → SOCKS Forwarder → reqwest → shared buffer → appsrc → queue2. This decouples download speed from playback bitrate, allowing pre-buffering when Tor throughput is low. It supports both MP4 (direct download) and HLS (segment-by-segment) modes, with CDN preflight checks, throughput measurement, and flow control via a bounded channel. The implementation is well-documented with clear rationale for the architecture change. However, there are several issues.
+This file implements the GStreamer pipeline construction and lifecycle management for the boGDan playback engine. It builds H.264 (V4L2 stateful) and HEVC (V4L2 stateless) hardware decode pipelines with direct DRM/KMS scanout, handles software decode fallback, manages the appsrc-based progressive download path through Tor, and exposes a clean API for the `PlaybackEngine` to drive. The documentation is outstanding — the `async-handling`, `max-lateness`/`qos`/`skip-vsync`, and `capssetter` removal comments are among the best in the codebase, each explaining not just what the code does but why, what failure mode it prevents, and what was tried before. However, the file has zero test coverage (it's `#![cfg(feature = "hw")]` so never compiled in CI), the `new()` constructor is ~1000 lines long, and `rebuild_sw()` has a state-management bug where a failed reconstruction leaves the pipeline in a broken state.
 
-## Key Components Reviewed
+## Scope Reviewed
 
 | Component | Lines | Purpose |
 |-----------|-------|---------|
-| `StreamSourceConfig` | 54–70 | Preflight retry configuration |
-| `DataChunk` | 77–85 | Downloaded data chunk with offset |
-| `StreamSource` struct | 108–130 | Main source with channel, client, mode |
-| `ProgressState` | 135–205 | Shared download progress tracking |
-| `start()` | 214–330 | Build reqwest client, start SOCKS forwarder, detect HLS |
-| `preflight_check()` | 343–595 | CDN reachability verification (GET Range:0-0) |
-| `start_download()` | 595–1200 | Background download task |
-| `recv_chunk()` | 1203–1207 | Receive next data chunk |
-| `Drop` impl | 1223+ | Cancel download on drop |
+| `GstPipeline` struct | 89–119 | Pipeline, video_sink, volume, state, bus_watch, push_cancel, download_progress |
+| `PipelineState` enum | 121–132 | Null / Ready / Playing / Paused / Error |
+| `new()` | 155–1200 | Pipeline construction (~1000 lines) |
+| `build_kmssink()` | 1211–1360 | DRM/KMS sink with max-lateness, qos, skip-vsync tuning |
+| `build_hw_video_bin()` | 1360–1498 | V4L2 H.264 decode bin (v4l2h264dec + v4l2convert) |
+| `build_hevc_video_bin()` | 1498–1688 | V4L2 HEVC decode bin (h265parse + v4l2slh265dec) |
+| `build_sw_video_bin()` | 1688–1758 | Software decode fallback (avdec_h264 + videoconvert) |
+| `preroll()` | 1758–1880 | Non-blocking set_state(Paused) |
+| `stop()` / `seek()` / `set_volume()` | 1934–2012 | Pipeline control methods |
+| `rebuild_sw()` | 2073–2105 | SW decode fallback reconstruction |
+| `Drop` impl | 2105–2123 | Cleanup: cancel push, drop bus_watch, set_state(Null) |
 
 ## Findings
 
 ### Bugs
 
-#### BUG-001: `cdn_rate_limit_kbps.lock().unwrap()` can panic on poisoned mutex
-- **Severity:** Low
-- **Location:** Lines 295, 335, and throughout (`progress.cdn_rate_limit_kbps.lock().unwrap()`)
-- **Description:** The `cdn_rate_limit_kbps` mutex is locked with `.unwrap()` which panics if the mutex is poisoned. This pattern appears in multiple places. If any thread panics while holding this lock, all subsequent accesses will panic, cascading the failure.
-- **Impact:** A single panic poisons the mutex, causing all subsequent rate-limit queries to panic.
-- **Recommendation:** Use `.lock().unwrap_or_else(|e| e.into_inner())` to recover from poison, or switch to `tokio::sync::Mutex` (which doesn't poison). Or use `AtomicU64` instead of `Mutex<Option<u64>>` for the rate limit.
+#### BUG-001: `rebuild_sw()` leaves pipeline in broken state on reconstruction failure
+- **Severity:** Medium
+- **Location:** Lines 2073–2104 (`rebuild_sw()` — `self.stop()?` at line 2078, `Self::new(...)` at line 2089)
+- **Description:** The method calls `self.stop()?` to tear down the current pipeline, then `Self::new(...)` to construct a new SW pipeline, then `*self = new` to replace it. If `Self::new()` fails (e.g. GStreamer element creation fails, preflight check fails), the method returns `Err` — but `self` has already been stopped (state=Null, bus_watch=None, push_cancel taken). The old `GstPipeline` is now in a broken state: stopped but not replaced. Any subsequent call to `stop()`, `pause()`, or `seek()` on this pipeline will operate on the stopped pipeline, likely returning errors or no-ops.
+- **Impact:** After a failed SW fallback, the playback engine has a zombie pipeline that can't be used. The session layer's retry logic may try to use it, leading to confusing errors.
+- **Recommendation:** Don't mutate `self` until the new pipeline is fully constructed. Use a local variable and swap on success:
+  ```rust
+  pub async fn rebuild_sw(&mut self, ...) -> Result<(), PlaybackError> {
+      // Construct the new pipeline FIRST, without touching self.
+      let mut sw_config = config.clone();
+      sw_config.hw_accel = false;
+      sw_config.audio_ts_offset_ns = 0;
+      let mut new = Self::new(url, source_url, _socks_addr, _isolation_username, &sw_config, cookies).await?;
+      
+      // Only now stop the old pipeline and swap.
+      // The old pipeline's Drop impl will clean it up.
+      new.preroll()?;
+      std::mem::swap(self, &mut new);
+      // old pipeline (now in `new`) is dropped here, running its Drop impl.
+      Ok(())
+  }
+  ```
 
-#### BUG-002: Browser User-Agent is hardcoded and may not match the resolver's UA
+#### BUG-002: `position_ms()` silently returns 0 when position is unavailable
 - **Severity:** Low
-- **Location:** Line 67 (`const BROWSER_UA: &str = "Mozilla/5.0 ...";`)
-- **Description:** The `BROWSER_UA` is hardcoded as a Chrome 131 string. The comment says "Must match the resolver's UA" but there's no mechanism to ensure they match. If the resolver's UA is updated but this one isn't (or vice versa), the CDN will see different UAs for resolution and download, which could trigger anti-bot detection.
-- **Impact:** CDN anti-bot systems may flag the mismatch between resolver UA and download UA, returning 403.
-- **Recommendation:** Move the `BROWSER_UA` constant to a shared module (e.g., `src/playback/src/lib.rs` or a `constants` crate) and import it in both the resolver and the stream source. Add a test that verifies both use the same constant.
+- **Location:** Lines 2012–2020 (`position_ms()` — `query_position(...).unwrap_or(0)`)
+- **Description:** When `query_position::<ClockTime>()` returns `None` (which happens before the pipeline reaches Playing state, or if the pipeline doesn't support position queries), the method returns `Ok(0)`. Callers can't distinguish between "playback is at position 0" and "position is unknown."
+- **Impact:** The session layer's `refresh_playback_position()` stores this 0 in the DB, overwriting the actual position if the pipeline was seeked before the query succeeds. A `/api/status` poll during the first few seconds of playback reports position 0.
+- **Recommendation:** Return `Option<u64>` to distinguish "no position available" from "position is 0":
+  ```rust
+  pub fn position_ms(&self) -> Result<Option<u64>, PlaybackError> {
+      Ok(self.pipeline.query_position::<gstreamer::ClockTime>().map(|p| p.mseconds()))
+  }
+  ```
+  Or return an error when the query fails.
 
-#### BUG-003: HLS segment download doesn't handle segment deletion
+#### BUG-003: `buffer_health()` always reports `buffered_seconds: 0.0`
 - **Severity:** Low
-- **Location:** `start_download()` HLS mode (lines 595+)
-- **Description:** For HLS live streams, segments are added to the playlist over time and eventually removed (sliding window). The stream source fetches the playlist once and downloads segments sequentially. It doesn't re-fetch the playlist to discover new segments or handle removed segments.
-- **Impact:** HLS live streams will stop playing after the initial playlist's segments are exhausted.
-- **Recommendation:** For HLS live streams, periodically re-fetch the playlist (every segment duration) to discover new segments. Use the `#EXT-X-MEDIA-SEQUENCE` tag to track which segments have been downloaded.
+- **Location:** Line 2037 (`buffered_seconds: 0.0, // Approximated from fill_percent`)
+- **Description:** The `buffer_health()` method queries the queue2 buffering stats and fills in `fill_percent`, `is_buffering`, but sets `buffered_seconds: 0.0` with a comment saying "Approximated from fill_percent." The approximation is never actually computed — the field is always 0.0.
+- **Impact:** Any consumer that reads `buffered_seconds` (e.g. a UI showing "buffered: 12.3s") always sees 0.0. The field is misleading.
+- **Recommendation:** Either compute the approximation (`buffered_seconds = fill_percent / 100.0 * estimated_duration_seconds`), or remove the field and document that only `fill_percent` is available from GStreamer's buffering query.
 
-#### BUG-004: No timeout on individual segment downloads in HLS mode
+#### BUG-004: `stop()` propagates `set_state(Null)` error but has already dropped the bus_watch
 - **Severity:** Low
-- **Location**: HLS segment download in `start_download()`
-- **Description:** In HLS mode, each segment is downloaded via reqwest. If a segment download hangs (e.g., Tor circuit stalls), there's no per-segment timeout. The overall download task has a cancel flag, but it's only checked between segments.
-- **Impact:** A stalled segment download blocks all subsequent segments, causing playback to stall indefinitely.
-- **Recommendation:** Wrap each segment download in `tokio::time::timeout` (e.g., 30 seconds per segment). On timeout, cancel the download and retry with a fresh circuit.
+- **Location:** Lines 1934–1953 (`stop()` — `self.bus_watch = None` at line 1943, `self.pipeline.set_state(State::Null)?` at line 1946)
+- **Description:** The method drops `self.bus_watch` (line 1943) before calling `set_state(State::Null)` (line 1946). If `set_state` fails and the `?` propagates the error, the bus_watch is already gone but the pipeline state is not Null and `self.state` is not updated. A subsequent `stop()` call would skip the bus_watch drop (already None) and try `set_state(Null)` again.
+- **Impact:** Low — `set_state(Null)` rarely fails. But the ordering means a failed stop leaves the pipeline in a partially-torn-down state (no bus_watch, but state still Playing/Paused).
+- **Recommendation:** Set `self.state = PipelineState::Null` before the `?`, or use best-effort cleanup (log the error but don't propagate):
+  ```rust
+  if let Err(e) = self.pipeline.set_state(State::Null) {
+      tracing::warn!(error = %e, "set_state(Null) failed during stop — pipeline may leak resources");
+  }
+  self.state = PipelineState::Null;
+  ```
 
 ### Design Issues
 
-#### DESIGN-001: 1575-line file is too large
+#### DESIGN-001: `new()` constructor is ~1000 lines long
 - **Severity:** Medium
-- **Location**: Entire file
-- **Description:** The `stream_source.rs` file is 1575 lines, covering: reqwest client construction, SOCKS forwarder integration, HLS playlist parsing, segment download, MP4 download, flow control, progress tracking, and CDN preflight. This is too much for one file.
-- **Impact:** Maintenance burden; high risk of merge conflicts.
-- **Recommendation:** Split into sub-modules:
-  - `stream_source/mp4.rs` — MP4 direct download
-  - `stream_source/hls.rs` — HLS playlist parsing and segment download
-  - `stream_source/preflight.rs` — CDN preflight check
-  - `stream_source/progress.rs` — `ProgressState` and `DownloadProgress`
+- **Location:** Lines 155–1200 (`pub async fn new(...)`)
+- **Description:** The `new()` method handles: GStreamer init, pipeline creation, async-handling configuration, StreamSource startup, preflight CDN check, CDN rate limit detection, appsrc creation, push task spawning, queue2 configuration, parsebin setup, pad-added callback, audio bin construction, video bin construction (HW/SW/HEVC), element linking, and property configuration. This is one of the longest constructor methods in the codebase.
+- **Impact:** Extremely hard to read, maintain, or test. Any change risks breaking subtle invariants. The pad-added callback alone (which dynamically links the video/audio branches) is complex enough to warrant its own method.
+- **Recommendation:** Break into stages:
+  - `create_pipeline() -> Pipeline`
+  - `create_source(url, socks_addr, ...) -> (Element, Option<StreamSource>, Option<Arc<AtomicBool>>)`
+  - `create_queue2(config) -> Element`
+  - `create_parsebin() -> Element`
+  - `create_audio_bin(config) -> Element`
+  - `setup_pad_added_callback(pipeline, parsebin, video_sink, audio_queue)`
+  - `new()` calls these in sequence and assembles the result.
 
-#### DESIGN-002: `start_download()` is a 600-line function
-- **Severity:** Medium
-- **Location**: Lines 595–1200 (`start_download`)
-- **Description:** The `start_download()` method is approximately 600 lines long. It handles both MP4 and HLS modes, with inline logic for each. This is far too long for a single function.
-- **Impact:** The function is extremely difficult to read, test, or modify. Bugs are hard to locate.
-- **Recommendation:** Extract into separate functions: `download_mp4()`, `download_hls()`, `download_segment()`. Each should be 50–100 lines max. Use an enum dispatch pattern to route to the correct downloader.
+#### DESIGN-002: Zero test coverage — file is `#![cfg(feature = "hw")]`
+- **Severity:** High
+- **Location:** Line 1 (`#![cfg(feature = "hw")]`)
+- **Description:** The entire file is conditionally compiled with the `hw` feature. CI runs without `hw`, so this file is never compiled in automated tests. There are 0 test functions in 2123 lines. The pipeline construction logic, element linking, pad-added callbacks, and SW fallback are all completely untested.
+- **Impact:** Critical — this file contains the most complex GStreamer pipeline construction in the project. A bug in element linking, property configuration, or the pad-added callback would only manifest on a Pi, not in CI.
+- **Recommendation:** (a) Extract the pure logic (URL classification, rate limit calculation, config validation) into non-`cfg` helper functions and test those. (b) Add a `hw-mock` feature that replaces GStreamer calls with mock implementations. (c) Run `cargo test --features hw` on a Pi 4 CI runner (as noted in the blueprint progress doc).
 
-#### DESIGN-003: Flow control relies on channel capacity — no explicit backpressure signal
+#### DESIGN-003: `_video_sink` field stored but never used
 - **Severity:** Low
-- **Location:** Line 73 (`const CHANNEL_CAPACITY: usize = 128;`)
-- **Description:** Flow control is implemented via the bounded channel's natural backpressure: when the channel is full, `data_tx.send()` awaits. The comment mentions "need-data" and "enough-data" signals from appsrc, but the actual implementation uses channel capacity, not appsrc signals.
-- **Impact:** The buffer size (128 chunks × ~256 KB = ~32 MB) is fixed. For high-bitrate streams, this may be too small; for low-bitrate streams, it wastes memory.
-- **Recommendation:** Make the channel capacity configurable. Consider using appsrc's `need-data`/`enough-data` signals for more precise flow control, as the comment suggests.
+- **Location:** Line 93 (`_video_sink: Element,`)
+- **Description:** The `_video_sink` field is stored in the struct (prefixed with `_` to suppress the dead_code warning) but is never read after construction. The comment says "retained for future use (e.g. querying display resolution, DRM master status)" but no code uses it.
+- **Impact:** Minor — the field holds a reference to a GStreamer element, preventing it from being garbage-collected. But since the element is also owned by the pipeline, this is just an extra reference count.
+- **Recommendation:** Either remove the field (and let the pipeline own the element exclusively), or add a method that uses it (e.g. `pub fn video_sink_resolution(&self) -> Result<(u32, u32), PlaybackError>`).
 
-#### DESIGN-004: `sp=` bypass logic removed but diagnostic logging remains
+#### DESIGN-004: `is_rate_limited` is immutable after construction
 - **Severity:** Low
-- **Location**: Lines 275–280 (comment about removed bypass logic)
-- **Description:** The comment notes that the `sp=` bypass logic (replacing/stripping the speed-limit parameter) was removed because it "ALWAYS fails — modifying the URL's query parameters invalidates the CDN's &t= signature." However, the `extract_cdn_speed_param()` function still parses `sp=` for diagnostic logging. This is correct (diagnostics are useful), but the architecture suggests the bypass was a significant effort that was abandoned.
-- **Impact:** No functional issue. The diagnostic logging is helpful.
-- **Recommendation:** Document the failed bypass attempt in an ADR so future developers don't re-attempt it. The comment is good; an ADR would be more discoverable.
+- **Location:** Line 112 (`is_rate_limited: bool,`) and line ~1160 (set during `new()`)
+- **Description:** The `is_rate_limited` field is set during pipeline construction based on the CDN URL's `sp=` parameter. It's used by the bus watch to select buffering thresholds (95% for rate-limited, 80% for normal). The field is a plain `bool`, not an `AtomicBool`, so it can't be updated after construction. If the CDN changes its rate limit mid-stream (unlikely but possible), the bus watch uses stale thresholds.
+- **Impact:** Low — CDN rate limits don't typically change mid-stream. But the design is inflexible.
+- **Recommendation:** Acceptable for v1. For v2, wrap in `AtomicBool` and add a method to update it if the CDN sends a new rate limit header.
+
+#### DESIGN-005: `build_*` methods are sync `fn` but called from `async fn new()`
+- **Severity:** Low (informational)
+- **Location:** Lines 1211, 1360, 1498, 1688 (`fn build_kmssink`, `fn build_hw_video_bin`, `fn build_hevc_video_bin`, `fn build_sw_video_bin`)
+- **Description:** The `build_*` methods are synchronous (`fn`, not `async fn`) but are called from the `async fn new()` constructor. This is correct — GStreamer element construction is synchronous and doesn't need async. But the inconsistency with the rest of the codebase (which uses `async fn` for most methods) is worth noting.
+- **Impact:** None — the sync functions are correct. The inconsistency is stylistic.
+- **Recommendation:** No action needed. The sync `fn` is the right choice for GStreamer element construction.
 
 ### Security
 
-#### SEC-001: CDN URL logged at info level
+#### SEC-001: Cookies passed to StreamSource without validation
 - **Severity:** Low
-- **Location**: Lines 260, 278, 285 (`cdn_url = %cdn_url`)
-- **Description:** The CDN URL (which may contain user-specific tokens) is logged at `info` level. On an appliance with journald persistence, these URLs are stored in the journal and could reveal the user's viewing history if the journal is accessed.
-- **Impact:** Privacy concern — the journald log contains CDN URLs that could identify viewed content.
-- **Recommendation:** Log the CDN URL at `debug` level only. At `info` level, log only the CDN hostname (not the full URL with tokens).
+- **Location:** Line ~245 (`cookies.to_vec()` passed to `StreamSource::start()`)
+- **Description:** The `cookies` parameter (a `&[String]`) is passed directly to `StreamSource::start()` without any validation. Malicious cookies (e.g. very long strings, cookies with special characters that could inject HTTP headers) could potentially cause issues in the HTTP request.
+- **Impact:** Low — the cookies come from the resolver, which is trusted code. But if a malicious resolver is ever added, the cookies could be used for HTTP header injection.
+- **Recommendation:** Validate cookie format (max length, no newlines, no control characters) before passing to StreamSource. Low priority for v1.
 
-#### SEC-002: `cookie_store(true)` on reqwest client may retain cookies across sessions
-- **Severity:** Low
-- **Location:** Lines 239 and 261 (`.cookie_store(true)` — two separate reqwest client builders)
-- **Description:** The reqwest client is built with `.cookie_store(true)`, which enables an in-memory cookie jar. Cookies from one download (e.g., a Set-Cookie from the CDN) will be sent on subsequent requests through the same client. If the client is reused across sessions, cookies from a previous session could leak.
-- **Impact:** Low — the client is created per `StreamSource` instance, which is per-session. But if the client is ever reused, cookies could cross-contaminate.
-- **Recommendation:** Verify that each `StreamSource` creates a fresh reqwest client (which it does in `start()`). Document that the cookie jar is per-session. For v2, consider explicitly clearing the cookie jar after download completes.
+### Positive Observations
 
-### Missing Tests
+1. **Outstanding `async-handling` documentation** — the comment at lines 165–185 explaining why `async-handling=true` is required is exemplary. It explains the deadlock that occurs without it (kmssink can't preroll without data, but data can't flow until kmssink is linked via the pad-added callback), and why the fix is safe (the bus watch controls the Playing transition based on buffer fill).
 
-#### TEST-001: Only 11 tests for a 1575-line file
-- **Severity:** Medium
-- **Description:** The file has 11 tests, which is low coverage for 1575 lines. The tests likely cover pure functions (URL parsing, HLS detection) but not the download logic, preflight, or flow control.
-- **Impact:** The core download and preflight logic is untested.
-- **Recommendation:** Add tests with a mock HTTP server (using `wiremock` or `mockito`) that verify: preflight check success/failure, MP4 download, HLS segment download, flow control backpressure, and cancel behavior.
+2. **`max-lateness` / `qos` / `skip-vsync` comments are the gold standard** — the comment block at lines 1220–1320 explaining the V4L2 QoS death spiral (late frames → QoS events → decoder skips → fewer frames → more QoS → ~1 fps) is one of the best bug-prevention comments in the codebase. It explains what was tried (500ms max-lateness + qos=true), what went wrong (death spiral), and the fix (5s max-lateness + qos=false).
 
-#### TEST-002: No test for HLS playlist parsing
-- **Severity:** Low
-- **Description**: HLS playlist parsing (master playlist → variant selection → segment URLs) is not tested.
-- **Recommendation**: Add tests with sample HLS playlists (master + variant) and verify the correct variant is selected and segment URLs are extracted.
+3. **`capssetter` removal documented** — the comment at lines 48–54 explains why a `capssetter` element was previously used (to force `colorimetry=bt709`) and why it was removed (it destroyed essential raw video caps fields, causing "not-negotiated (-4)"). This prevents a future developer from re-adding it.
 
-## Positive Observations
+4. **CDN rate limit detection with bitrate mismatch warning** — the logic at lines ~275–315 detects the CDN's `sp=` rate limit parameter, estimates the video bitrate from Content-Length, and warns if the rate limit is below the estimated bitrate. This is a thoughtful UX feature that warns the user before playback starts that stuttering is likely.
 
-1. **Excellent architecture documentation** — the module doc comment explains *why* the progressive download architecture replaced the real-time proxy chain, with a clear problem statement and solution rationale.
-2. **Flow control via bounded channel** — using `mpsc::channel(128)` provides natural backpressure without complex signaling.
-3. **Direct mode vs Tor mode** — correctly handles both: when `socks_addr` is empty, connects directly (no Tor); when set, uses the SOCKS forwarder.
-4. **CDN preflight check** — verifies the CDN accepts the URL before starting the full download, using `GET Range: bytes=0-0` (not HEAD, which CDNs reject).
-5. **Throughput measurement** — measures download speed before playback starts, enabling bitrate-aware buffering.
-6. **`sp=` diagnostic logging** — even though the bypass was removed, the speed-limit parameter is still detected and logged as a warning, helping users understand why playback stutters.
-7. **Cancel flag** — `AtomicBool` allows the download to be cancelled from another thread.
-8. **`Drop` impl cancels download** — when `StreamSource` is dropped, the cancel flag is set, preventing orphaned download tasks.
-9. **Browser-like User-Agent** — uses a Chrome UA string to avoid CDN anti-bot detection.
-10. **HLS support** — handles HLS playlists (master → variant → segments), not just direct MP4.
+5. **`rebuild_sw()` correctly resets `audio_ts_offset_ns`** — the SW decode path doesn't have V4L2 pipeline latency, so the 100ms audio offset compensation is correctly set to 0. The comment explains why (would cause A/V desync in the opposite direction).
+
+6. **`Drop` impl ordering is correct** — the bus_watch is dropped first (to prevent callbacks during teardown), then the push task is cancelled, then the pipeline is set to Null. This prevents the bus watch from receiving messages during shutdown.
+
+7. **Pipeline topology ASCII art** — the H.264 and HEVC pipeline diagrams in the module-level docs (lines 9–31) are excellent documentation. They show the exact element topology, including the ISP format conversion (SAND→NV12) and the audio branch.
+
+8. **Preflight CDN check before pipeline construction** — the `source.preflight_check()` at line ~250 verifies the CDN accepts the Tor circuit before constructing the full pipeline. This avoids the cost of building a pipeline that will immediately fail.
+
+9. **`progress_state()` exposes shared state for bus watch** — the `Arc<ProgressState>` is shared between the pipeline and the bus watch, allowing the bus watch to check `cdn_forbidden` and `download_errored` flags without acquiring the pipeline mutex. This is a well-designed concurrency pattern.
+
+10. **HEVC stateless decoder note** — the comment at lines 33–35 notes that `v4l2slh265dec` doesn't have `output-io-mode`/`capture-io-mode` properties (unlike the stateful `v4l2h264dec`). This prevents a future developer from trying to set these properties and getting a runtime error.
 
 ## Recommendations Summary
 
 | Priority | Finding | Effort |
 |----------|---------|--------|
-| Medium | BUG-001: Replace `lock().unwrap()` with poison recovery | S (1 h) |
-| Medium | DESIGN-001: Split 1575-line file into sub-modules | L (4–8 h) |
-| Medium | DESIGN-002: Split 600-line `start_download()` function | M (3–4 h) |
-| Medium | TEST-001: Add mock HTTP server tests | L (4–8 h) |
-| Low | BUG-002: Share BROWSER_UA constant between resolver and stream source | S (30 min) |
-| Low | BUG-003: Handle HLS live playlist refresh | M (2–3 h) |
-| Low | BUG-004: Add per-segment timeout in HLS mode | S (1 h) |
-| Low | DESIGN-003: Make channel capacity configurable | S (30 min) |
-| Low | DESIGN-004: Document the failed sp= bypass in an ADR | S (30 min) |
-| Low | SEC-001: Log CDN URL at debug level, not info | S (15 min) |
-| Low | SEC-002: Document cookie jar per-session scope | S (15 min) |
-| Low | TEST-002: Add HLS playlist parsing tests | S (1–2 h) |
+| High | DESIGN-002: Add test coverage for hw pipeline code | L (8–16 h) |
+| Medium | BUG-001: Fix `rebuild_sw()` to not leave broken state on failure | S (1 h) |
+| Medium | DESIGN-001: Break `new()` into smaller methods | L (4–8 h) |
+| Low | BUG-002: Return `Option<u64>` from `position_ms()` | S (30 min) |
+| Low | BUG-003: Compute or remove `buffered_seconds` in `buffer_health()` | S (30 min) |
+| Low | BUG-004: Use best-effort cleanup in `stop()` | S (15 min) |
+| Low | DESIGN-003: Remove or use the `_video_sink` field | S (15 min) |
+| Low | DESIGN-004: Document `is_rate_limited` immutability | S (5 min) |
+| Low | SEC-001: Validate cookie format before passing to StreamSource | S (30 min) |
