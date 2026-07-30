@@ -5,7 +5,7 @@ version: 1
 phase: code_review
 author: agent
 created: 2026-07-30T00:00:00Z
-updated: 2026-07-30T00:00:00Z
+updated: 2026-07-30T11:45:00Z
 ---
 
 # Code Review: `src/playback/src/socks_forwarder.rs`
@@ -37,21 +37,21 @@ The SOCKS forwarder is a local HTTP CONNECT → SOCKS5 proxy that bridges `souph
 
 #### SEC-001: `check_exit_ip()` connects to `api.ipify.org` — creates a traffic fingerprint
 - **Severity:** Low
-- **Location:** Lines 115–175 (`check_exit_ip`)
+- **Location:** Line 124 (`pub async fn check_exit_ip`) — the function spans lines 124–175
 - **Description:** The `check_exit_ip()` diagnostic method connects through Tor to `api.ipify.org:80` (plain HTTP) to retrieve the exit IP. This creates a recognizable traffic pattern: the Tor exit relay sees a connection to `api.ipify.org`. While this is a diagnostic method (not called during normal playback), if it's called frequently, it could fingerprint boGDan appliances.
 - **Impact:** Minimal — the method is diagnostic-only and not on the hot path. But it uses plain HTTP (`:80`), which means the exit relay can see the full request and response (the IP address).
 - **Recommendation:** Use HTTPS (`api.ipify.org:443`) instead of HTTP. Consider making the diagnostic opt-in or removing it from production builds. Document that calling it creates observable traffic.
 
 #### SEC-002: No authentication on the local HTTP CONNECT proxy
 - **Severity:** Low
-- **Location:** Lines 55–110 (`start`)
+- **Location:** Line 58 (`pub async fn start`) — the function spans lines 58–110
 - **Description:** The forwarder listens on `127.0.0.1:0` (random port) with no authentication. Any local process can connect and use it to tunnel through Tor. On a single-user appliance, this is acceptable, but on a multi-user system, a malicious local process could use the forwarder to anonymize its traffic through boGDan's Tor circuit.
 - **Impact:** Low on the appliance model (single `bogdan` user), but worth noting for defense-in-depth.
 - **Recommendation:** Acceptable for v1. For v2, consider binding to a Unix domain socket with file permissions, or adding a random shared-secret token that `souphttpsrc` must include in the CONNECT request.
 
 #### SEC-003: Username length not checked before `as u8` cast
 - **Severity:** Low
-- **Location:** Line 375 (`username_bytes.len() as u8`)
+- **Location:** Lines 395–400 (`let username_bytes = username.as_bytes();` at line 395, `username_bytes.len() as u8` at line 400)
 - **Description:** The username length is checked (`if username_bytes.len() > 255`) before the `as u8` cast, which is correct. However, the hostname length check (line 400) has the same pattern. Both are correct, but the pattern is worth verifying — a `> 255` check before `as u8` is the right approach.
 - **Impact:** None — the check is present and correct.
 - **Recommendation:** No action needed. The code is correct. Noting for completeness.
@@ -74,7 +74,7 @@ The SOCKS forwarder is a local HTTP CONNECT → SOCKS5 proxy that bridges `souph
 
 #### BUG-003: `parse_host_port` returns `[::1]` with brackets for IPv6
 - **Severity:** Low
-- **Location:** Lines 475–495 (`parse_host_port`)
+- **Location:** Line 500 (`fn parse_host_port(target: &str)`) — the function spans lines 500–530
 - **Description:** For IPv6 targets like `[::1]:443`, the function returns `("[::1]", 443)` — the host includes the brackets. When this host is passed to the SOCKS5 CONNECT request (line 410: `host.as_bytes()`), the brackets are included in the domain name sent to Tor. Tor may not recognize `[::1]` as a valid hostname.
 - **Impact:** IPv6 CONNECT targets may fail. In practice, CDNs rarely use IPv6 literals in CONNECT requests (they use domain names), so this is unlikely to be hit. But it's a latent bug.
 - **Recommendation:** Strip the brackets from the IPv6 host before returning:
@@ -86,7 +86,7 @@ The SOCKS forwarder is a local HTTP CONNECT → SOCKS5 proxy that bridges `souph
 
 #### DESIGN-001: Only one session at a time, but the proxy accepts multiple connections
 - **Severity:** Low
-- **Location:** Lines 55–110 (`start`)
+- **Location:** Line 58 (`pub async fn start`) — the function spans lines 58–110
 - **Description:** The doc comment says "handles one session at a time," but the accept loop spawns a new task for each incoming connection (`tokio::spawn(async move { handle_connect(...) })`). Multiple concurrent connections would share the same `isolation_username`, all using the same Tor circuit. This is actually correct behavior (they should share the circuit), but the doc comment is misleading.
 - **Impact:** No functional issue, but the documentation is inaccurate.
 - **Recommendation:** Update the doc comment to say "handles multiple connections, all sharing the same isolation username (and thus the same Tor circuit)."
