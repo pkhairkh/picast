@@ -382,12 +382,10 @@ async fn main() -> Result<()> {
                 Some(acceptor)
             },
             Ok(None) => {
-                warn!("TLS cert/key paths set but acceptor returned None — falling back to plain HTTP/WS");
-                None
+                anyhow::bail!("TLS cert/key paths are set but acceptor returned None — refusing to start with plain HTTP when TLS was requested. Check that the cert and key files are valid.");
             },
             Err(e) => {
-                warn!(error = %e, "Failed to load TLS cert/key — falling back to plain HTTP/WS");
-                None
+                anyhow::bail!("Failed to load TLS cert/key: {} — refusing to start with plain HTTP when TLS was requested.", e);
             },
         }
     } else {
