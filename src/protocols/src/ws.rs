@@ -35,7 +35,7 @@
 //!
 //! ## Connection Limit
 //!
-//! A maximum of 32 concurrent WebSocket clients are allowed.
+//! A maximum of 50 concurrent WebSocket clients are allowed.
 //! Connections beyond this limit are rejected with a 429-style
 //! error event before the socket is closed.
 
