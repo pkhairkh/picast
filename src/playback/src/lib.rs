@@ -1161,6 +1161,11 @@ impl PlaybackEngine {
         let rate_limited_resume_percent: u8 = if is_rate_limited { 95 } else { 80 };
         let rate_limited_pause_percent: u8 = if is_rate_limited { 5 } else { 10 };
 
+        // NOTE: The config is captured by move into this closure. If
+        // audio_enabled is changed at runtime (e.g. via /api/audio-device),
+        // the bus watch will still use the old value until the pipeline
+        // is restarted. Full fix requires Arc<AtomicBool> for audio_enabled
+        // (see review-09.md BUG-005).
         let bus_watch = bus.add_watch(move |_bus, msg| {
             use gstreamer::MessageView;
 
