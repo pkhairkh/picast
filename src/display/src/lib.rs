@@ -582,6 +582,13 @@ impl DisplayManager {
     /// will attempt to acquire master itself when it transitions to Playing;
     /// if it also fails, the GStreamer pipeline will fail, and our HW→SW
     /// fallback will kick in.
+    /// Acquire DRM master and prepare the display for playback.
+    ///
+    /// **Blocking:** This function uses `std::thread::sleep` for backoff
+    /// between DRM master acquisition attempts (up to 10 attempts with
+    /// exponential backoff). It blocks the current thread and should NOT
+    /// be called directly from an async context — use
+    /// `tokio::task::spawn_blocking` to avoid stalling the Tokio runtime.
     pub fn acquire(&mut self) -> Result<(), DisplayError> {
         // Idempotent: if we already acquired and cached connector/CRTC info,
         // return Ok immediately.  After the first acquire(), the DRM fd is
