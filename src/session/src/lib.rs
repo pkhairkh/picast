@@ -36,6 +36,7 @@
 //! `Arc` and shared across protocol handlers.
 
 pub mod interfaces;
+pub mod state_machine;
 
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
