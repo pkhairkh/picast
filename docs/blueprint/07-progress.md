@@ -58,6 +58,7 @@ Conventions:
 
 | Branch | Purpose | Status | Merged to main? |
 |---|---|---|---|
+| `docs/blueprint-problem-catalog` | Problem catalog (phase 1) | pushed | no |
 | `docs/blueprint-rough-draft` | Rough draft (phase 2) | pushed | no |
 | `docs/blueprint-adrs` | Blueprint ADRs (phase 3) | pushed | no |
 | `docs/blueprint-fine-draft` | Fine draft (phase 4) | pushed | no |
@@ -66,7 +67,7 @@ Conventions:
 | `docs/blueprint-progress` | This doc (phase 7) | pushed | no |
 | `main` | Integration branch | clean | — |
 
-**Action required:** A maintainer should review and merge the six blueprint branches into `main` (in order: rough-draft → adrs → fine-draft → spec → tasks → progress) before implementation starts, so that implementation PRs can reference the canonical paths.
+**Action required:** A maintainer should review and merge the seven blueprint branches into `main` (in order: problem-catalog → rough-draft → adrs → fine-draft → spec → tasks → progress) before implementation starts, so that implementation PRs can reference the canonical paths.
 
 ## Blockers
 
