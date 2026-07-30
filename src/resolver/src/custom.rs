@@ -3028,3 +3028,477 @@ mod tests {
         assert!(resolved.direct_url.contains("cookietest.mp4"));
     }
 }
+
+
+// ── YouTube Resolver ─────────────────────────────────────────────────
+
+/// Domains handled by the YouTube custom resolver.
+const YOUTUBE_DOMAINS: &[&str] = &[
+    "youtube.com",
+    "www.youtube.com",
+    "m.youtube.com",
+    "youtu.be",
+    "youtube-nocookie.com",
+    "www.youtube-nocookie.com",
+];
+
+/// Check if a hostname should be handled by the YouTube custom resolver.
+pub fn is_youtube_domain(host: &str) -> bool {
+    let host_lower = host.to_lowercase();
+    YOUTUBE_DOMAINS
+        .iter()
+        .any(|d| host_lower == *d || host_lower.ends_with(&format!(".{}", d)))
+}
+
+/// Extract the YouTube video ID from a watch URL.
+///
+/// Supports:
+/// - `https://www.youtube.com/watch?v=VIDEO_ID`
+/// - `https://youtu.be/VIDEO_ID`
+/// - `https://www.youtube.com/embed/VIDEO_ID`
+/// - `https://www.youtube.com/shorts/VIDEO_ID`
+fn extract_youtube_video_id(url: &str) -> Option<String> {
+    let parsed = url::Url::parse(url).ok()?;
+    let host = parsed.host_str()?.to_lowercase();
+
+    // youtu.be/VIDEO_ID
+    if host == "youtu.be" {
+        let path = parsed.path().trim_start_matches('/');
+        if !path.is_empty() {
+            return Some(path.to_owned());
+        }
+        return None;
+    }
+
+    // youtube.com/watch?v=VIDEO_ID
+    if host.ends_with("youtube.com") || host.ends_with("youtube-nocookie.com") {
+        // Check query parameter `v`
+        if let Some(v) = parsed
+            .query_pairs()
+            .find(|(k, _)| k == "v")
+            .map(|(_, v)| v.to_string())
+        {
+            if !v.is_empty() {
+                return Some(v);
+            }
+        }
+
+        // /embed/VIDEO_ID or /shorts/VIDEO_ID
+        let path = parsed.path();
+        if let Some(rest) = path.strip_prefix("/embed/") {
+            let id = rest.split('/').next().unwrap_or("");
+            if !id.is_empty() {
+                return Some(id.to_owned());
+            }
+        }
+        if let Some(rest) = path.strip_prefix("/shorts/") {
+            let id = rest.split('/').next().unwrap_or("");
+            if !id.is_empty() {
+                return Some(id.to_owned());
+            }
+        }
+    }
+
+    None
+}
+
+/// Resolve a YouTube watch URL to a direct media URL.
+///
+/// This is a lightweight in-tree resolver that avoids the 5-15 second
+/// Python startup overhead of yt-dlp. It fetches the YouTube watch page
+/// through Tor, extracts the `ytInitialPlayerResponse` JSON blob embedded
+/// in a `<script>` tag, and parses the `streamingData` to find the best
+/// H.264 direct media URL.
+///
+/// Returns a `ResolveResult` with:
+/// - `direct_url`: the best H.264 video URL (≤1080p, avc1 codec)
+/// - `audio_url`: the best audio-only URL (if adaptive formats are used)
+/// - `title`, `duration`, `thumbnail`: extracted from the player response
+///
+/// If the in-tree resolver fails (e.g. YouTube changes its page structure),
+/// the caller should fall back to yt-dlp.
+pub async fn resolve_youtube(
+    url: &str,
+    socks5_proxy: Option<&str>,
+) -> Result<ResolveResult, ResolveError> {
+    let video_id = extract_youtube_video_id(url).ok_or_else(|| {
+        ResolveError::NoMediaFound(format!("could not extract YouTube video ID from {}", url))
+    })?;
+
+    tracing::info!(
+        url = url,
+        video_id = %video_id,
+        "YouTube custom resolver: resolving"
+    );
+
+    let (client, _forwarder) = build_client(socks5_proxy).await?;
+
+    // Fetch the watch page. We use the no-cookie variant to reduce
+    // tracking, but it serves the same player response data.
+    let watch_url = format!("https://www.youtube.com/watch?v={}", video_id);
+
+    let response = timeout(
+        Duration::from_secs(CUSTOM_RESOLVER_TIMEOUT_SECS),
+        client.get(&watch_url).header("Accept-Language", "en-US,en;q=0.9").send(),
+    )
+    .await
+    .map_err(|_| {
+        ResolveError::Network(format!("YouTube page fetch timed out after {}s", CUSTOM_RESOLVER_TIMEOUT_SECS))
+    })?
+    .map_err(|e| ResolveError::Network(format!("YouTube page fetch failed: {}", e)))?;
+
+    let html = response.text().await.map_err(|e| {
+        ResolveError::Network(format!("failed to read YouTube page body: {}", e))
+    })?;
+
+    // Extract ytInitialPlayerResponse from the page.
+    // YouTube embeds it in a <script> tag as:
+    //   var ytInitialPlayerResponse = {...};
+    let player_response_json = extract_player_response(&html).ok_or_else(|| {
+        tracing::warn!(
+            url = url,
+            "YouTube custom resolver: could not find ytInitialPlayerResponse in page — falling back to yt-dlp"
+        );
+        ResolveError::NoMediaFound(
+            "ytInitialPlayerResponse not found in YouTube page (YouTube may have changed its page structure)".to_owned(),
+        )
+    })?;
+
+    // Parse the JSON.
+    let player_response: serde_json::Value = serde_json::from_str(&player_response_json)
+        .map_err(|e| {
+            ResolveError::NoMediaFound(format!(
+                "failed to parse ytInitialPlayerResponse JSON: {}",
+                e
+            ))
+        })?;
+
+    // Extract metadata.
+    let title = player_response
+        .pointer("/videoDetails/title")
+        .and_then(|v| v.as_str())
+        .map(|s| s.to_owned());
+    let length_secs = player_response
+        .pointer("/videoDetails/lengthSeconds")
+        .and_then(|v| v.as_str())
+        .and_then(|s| s.parse::<u64>().ok());
+    let thumbnail = player_response
+        .pointer("/videoDetails/thumbnail/thumbnails/0/url")
+        .and_then(|v| v.as_str())
+        .map(|s| s.to_owned());
+
+    // Extract streaming data.
+    let streaming_data = player_response
+        .pointer("/streamingData")
+        .ok_or_else(|| {
+            ResolveError::NoMediaFound(
+                "streamingData not found in ytInitialPlayerResponse (video may be DRM-protected or region-blocked)".to_owned(),
+            )
+        })?;
+
+    // Try combined formats first (video+audio in one URL, max 720p).
+    // These are simpler — single URL, no need for separate audio.
+    let combined_formats = streaming_data
+        .pointer("/formats")
+        .and_then(|v| v.as_array());
+
+    if let Some(formats) = combined_formats {
+        // Find the best H.264 combined format (highest resolution ≤1080p).
+        let best_combined = formats
+            .iter()
+            .filter(|f| {
+                f.get("mimeType")
+                    .and_then(|v| v.as_str())
+                    .map(|mt| mt.contains("avc1") || mt.contains("mp4v"))
+                    .unwrap_or(false)
+            })
+            .max_by_key(|f| {
+                f.get("height")
+                    .and_then(|v| v.as_u64())
+                    .unwrap_or(0)
+            });
+
+        if let Some(best) = best_combined {
+            if let Some(direct_url) = best.get("url").and_then(|v| v.as_str()) {
+                let height = best
+                    .get("height")
+                    .and_then(|v| v.as_u64())
+                    .map(|h| h as u32);
+                let mime_type = best
+                    .get("mimeType")
+                    .and_then(|v| v.as_str())
+                    .map(|s| s.to_owned());
+                let content_length = best
+                    .get("contentLength")
+                    .and_then(|v| v.as_str())
+                    .and_then(|s| s.parse::<u64>().ok());
+
+                tracing::info!(
+                    url = url,
+                    video_id = %video_id,
+                    height = ?height,
+                    "YouTube custom resolver: resolved via combined format"
+                );
+
+                return Ok(ResolveResult {
+                    source_url: url.to_owned(),
+                    direct_url: direct_url.to_owned(),
+                    audio_url: None,
+                    category: UrlCategory::WebPage,
+                    mime_type,
+                    content_length,
+                    used_tor: socks5_proxy.is_some(),
+                    title,
+                    duration: length_secs.map(|s| s * 1000),
+                    thumbnail,
+                    vcodec: Some("avc1".to_owned()),
+                    acodec: Some("mp4a".to_owned()),
+                    width: height.map(|h| h * 16 / 9),
+                    height,
+                    subtitle_tracks: vec![],
+                    cookies: vec![],
+                    resolver_type: "custom".to_owned(),
+                });
+            }
+        }
+    }
+
+    // Fall back to adaptive formats: separate video-only and audio-only.
+    let adaptive_formats = streaming_data
+        .pointer("/adaptiveFormats")
+        .and_then(|v| v.as_array())
+        .ok_or_else(|| {
+            ResolveError::NoMediaFound(
+                "no adaptiveFormats found in streamingData".to_owned(),
+            )
+        })?;
+
+    // Find the best H.264 video-only format (≤1080p).
+    let best_video = adaptive_formats
+        .iter()
+        .filter(|f| {
+            f.get("mimeType")
+                .and_then(|v| v.as_str())
+                .map(|mt| mt.contains("avc1") && mt.contains("video"))
+                .unwrap_or(false)
+        })
+        .filter(|f| {
+            // ≤1080p per ADR-009 (HEVC deferred, H.264 only)
+            f.get("height")
+                .and_then(|v| v.as_u64())
+                .map(|h| h <= 1080)
+                .unwrap_or(true)
+        })
+        .max_by_key(|f| {
+            f.get("height")
+                .and_then(|v| v.as_u64())
+                .unwrap_or(0)
+        });
+
+    // Find the best audio-only format (mp4a/AAC preferred).
+    let best_audio = adaptive_formats
+        .iter()
+        .filter(|f| {
+            f.get("mimeType")
+                .and_then(|v| v.as_str())
+                .map(|mt| mt.contains("audio") && mt.contains("mp4"))
+                .unwrap_or(false)
+        })
+        .max_by_key(|f| {
+            f.get("bitrate")
+                .and_then(|v| v.as_u64())
+                .unwrap_or(0)
+        });
+
+    let video_url = best_video
+        .and_then(|f| f.get("url").and_then(|v| v.as_str()))
+        .ok_or_else(|| {
+            ResolveError::NoMediaFound(
+                "no suitable H.264 video format found in adaptiveFormats (video may be DRM-protected or use VP9/AV1 only)".to_owned(),
+            )
+        })?;
+
+    let audio_url = best_audio.and_then(|f| f.get("url").and_then(|v| v.as_str()));
+
+    let height = best_video
+        .and_then(|f| f.get("height").and_then(|v| v.as_u64()))
+        .map(|h| h as u32);
+
+    tracing::info!(
+        url = url,
+        video_id = %video_id,
+        height = ?height,
+        has_audio = audio_url.is_some(),
+        "YouTube custom resolver: resolved via adaptive formats"
+    );
+
+    Ok(ResolveResult {
+        source_url: url.to_owned(),
+        direct_url: video_url.to_owned(),
+        audio_url: audio_url.map(|s| s.to_owned()),
+        category: UrlCategory::WebPage,
+        mime_type: best_video
+            .and_then(|f| f.get("mimeType").and_then(|v| v.as_str()))
+            .map(|s| s.to_owned()),
+        content_length: None,
+        used_tor: socks5_proxy.is_some(),
+        title,
+        duration: length_secs.map(|s| s * 1000),
+        thumbnail,
+        vcodec: Some("avc1".to_owned()),
+        acodec: Some("mp4a".to_owned()),
+        width: height.map(|h| h * 16 / 9),
+        height,
+        subtitle_tracks: vec![],
+        cookies: vec![],
+        resolver_type: "custom".to_owned(),
+    })
+}
+
+/// Extract the `ytInitialPlayerResponse` JSON from a YouTube watch page.
+///
+/// YouTube embeds this as:
+///   var ytInitialPlayerResponse = { ... };
+///
+/// We find the start of the JSON object after the assignment, then
+/// brace-match to find the end.
+fn extract_player_response(html: &str) -> Option<String> {
+    // Look for the assignment pattern.
+    let marker = "var ytInitialPlayerResponse = ";
+    let start_idx = html.find(marker)?;
+    let json_start = start_idx + marker.len();
+
+    // The JSON starts with '{' and we need to find the matching '}'.
+    // We can't just find the next ';' because the JSON may contain
+    // string values with ';' inside them.
+    if html.as_bytes().get(json_start) != Some(b'{') {
+        return None;
+    }
+
+    let bytes = html.as_bytes();
+    let mut depth: i32 = 0;
+    let mut in_string = false;
+    let mut escape = false;
+    let mut end_idx = json_start;
+
+    for (i, &byte) in bytes[json_start..].iter().enumerate() {
+        let idx = json_start + i;
+        if escape {
+            escape = false;
+            continue;
+        }
+        if byte == b'\\' && in_string {
+            escape = true;
+            continue;
+        }
+        if byte == b'"' {
+            in_string = !in_string;
+            continue;
+        }
+        if in_string {
+            continue;
+        }
+        if byte == b'{' {
+            depth += 1;
+        } else if byte == b'}' {
+            depth -= 1;
+            if depth == 0 {
+                end_idx = idx + 1;
+                break;
+            }
+        }
+    }
+
+    if depth != 0 {
+        return None;
+    }
+
+    Some(html[json_start..end_idx].to_owned())
+}
+
+#[cfg(test)]
+mod youtube_tests {
+    use super::*;
+
+    #[test]
+    fn test_extract_video_id_watch_url() {
+        let id = extract_youtube_video_id("https://www.youtube.com/watch?v=dQw4w9WgXcQ");
+        assert_eq!(id, Some("dQw4w9WgXcQ".to_owned()));
+    }
+
+    #[test]
+    fn test_extract_video_id_short_url() {
+        let id = extract_youtube_video_id("https://youtu.be/dQw4w9WgXcQ");
+        assert_eq!(id, Some("dQw4w9WgXcQ".to_owned()));
+    }
+
+    #[test]
+    fn test_extract_video_id_embed_url() {
+        let id = extract_youtube_video_id("https://www.youtube.com/embed/dQw4w9WgXcQ");
+        assert_eq!(id, Some("dQw4w9WgXcQ".to_owned()));
+    }
+
+    #[test]
+    fn test_extract_video_id_shorts_url() {
+        let id = extract_youtube_video_id("https://www.youtube.com/shorts/dQw4w9WgXcQ");
+        assert_eq!(id, Some("dQw4w9WgXcQ".to_owned()));
+    }
+
+    #[test]
+    fn test_extract_video_id_with_params() {
+        let id = extract_youtube_video_id("https://www.youtube.com/watch?v=dQw4w9WgXcQ&t=42s&feature=share");
+        assert_eq!(id, Some("dQw4w9WgXcQ".to_owned()));
+    }
+
+    #[test]
+    fn test_extract_video_id_invalid_url() {
+        let id = extract_youtube_video_id("https://example.com/watch?v=abc");
+        assert_eq!(id, None);
+    }
+
+    #[test]
+    fn test_is_youtube_domain() {
+        assert!(is_youtube_domain("youtube.com"));
+        assert!(is_youtube_domain("www.youtube.com"));
+        assert!(is_youtube_domain("m.youtube.com"));
+        assert!(is_youtube_domain("youtu.be"));
+        assert!(is_youtube_domain("youtube-nocookie.com"));
+        assert!(!is_youtube_domain("example.com"));
+        assert!(!is_youtube_domain("vimeo.com"));
+    }
+
+    #[test]
+    fn test_extract_player_response_simple() {
+        let html = r#"<html><script>var ytInitialPlayerResponse = {"videoDetails":{"title":"Test"}};</script></html>"#;
+        let json = extract_player_response(html);
+        assert!(json.is_some());
+        let json = json.unwrap();
+        assert!(json.contains("\"title\":\"Test\""));
+    }
+
+    #[test]
+    fn test_extract_player_response_with_nested_braces() {
+        let html = r#"<script>var ytInitialPlayerResponse = {"a":{"b":1},"c":"}"};
+        "#;
+        let json = extract_player_response(html);
+        assert!(json.is_some());
+        let json = json.unwrap();
+        // Should end at the correct closing brace, not the one inside the string
+        assert!(json.ends_with('}'));
+        assert!(json.starts_with('{'));
+    }
+
+    #[test]
+    fn test_extract_player_response_not_found() {
+        let html = r#"<html><body>No player response here</body></html>"#;
+        let json = extract_player_response(html);
+        assert!(json.is_none());
+    }
+
+    #[test]
+    fn test_extract_player_response_with_escaped_quotes() {
+        let html = r#"<script>var ytInitialPlayerResponse = {"title":"He said \"hello\""};</script>"#;
+        let json = extract_player_response(html);
+        assert!(json.is_some());
+    }
+}
