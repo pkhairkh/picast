@@ -213,7 +213,9 @@ async fn handle_connect(
 ) -> Result<(), String> {
     // Read the CONNECT request line: "CONNECT host:port HTTP/1.1\r\n"
     // followed by headers until "\r\n\r\n".
-    let mut buf = vec![0u8; 4096];
+    // 8KB buffer — standard HTTP request buffer size. The CONNECT
+    // request line + headers should fit well within this limit.
+    let mut buf = vec![0u8; 8192];
     let mut total = 0usize;
 
     loop {
