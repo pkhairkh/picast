@@ -407,6 +407,14 @@ async fn handle_client(
                     }
                     Err(broadcast::error::RecvError::Lagged(count)) => {
                         tracing::warn!(count = count, "event stream lagged — client may be slow");
+                        // Notify the client so they can re-sync from /api/status
+                        let lag_msg = serde_json::json!({
+                            "type": "ERROR",
+                            "message": format!("event stream lagged — {} events missed, re-sync from /api/status", count)
+                        });
+                        if let Ok(json) = serde_json::to_string(&lag_msg) {
+                            let _ = ws.send(Message::text(json)).await;
+                        }
                     }
                     Err(broadcast::error::RecvError::Closed) => {
                         break;
