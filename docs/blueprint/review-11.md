@@ -67,14 +67,14 @@ The DLNA module provides UPnP/DLNA MediaRenderer support by delegating to `gmedi
 
 #### DESIGN-001: gmediarender stdout is discarded (`Stdio::null()`)
 - **Severity:** Low
-- **Location:** Line 180 (`stdout(Stdio::null())`)
+- **Location:** Line 160 (`.stdout(std::process::Stdio::null())`)
 - **Description:** gmediarender's stdout is discarded while stderr is captured and logged. If gmediarender outputs useful information on stdout (e.g., discovery announcements, state changes), it's lost.
 - **Impact:** Debugging DLNA issues is harder without stdout.
 - **Recommendation:** Capture stdout at `debug` level alongside stderr, or document why stdout is expected to be empty.
 
 #### DESIGN-002: Port 49152 hardcoded
 - **Severity:** Low
-- **Location:** Line 183 (`--port 49152`)
+- **Location:** Line 159 (`.arg("49152")` — the port argument)
 - **Description:** The DLNA port is hardcoded to 49152. The `DlnaConfig.port` field in the config module defaults to 49152, but it's not passed to the `DlnaRenderer`. The renderer always uses 49152 regardless of the config.
 - **Impact:** Users who change `dlna.port` in the config will find it has no effect.
 - **Recommendation:** Pass the port to `DlnaRenderer::new()` and use it in the `--port` argument.
@@ -90,7 +90,7 @@ The DLNA module provides UPnP/DLNA MediaRenderer support by delegating to `gmedi
 
 #### SEC-001: gmediarender runs with boGDan's permissions
 - **Severity:** Low
-- **Location:** Line 178 (`Command::new(&self.binary_path)`)
+- **Location:** Line 154 (`let mut child = Command::new(&self.binary_path)`)
 - **Description:** gmediarender is spawned as a child of `bogdand`, inheriting its permissions (including DRM master access via the `video` group). If gmediarender has a vulnerability, it could be exploited to gain boGDan's privileges.
 - **Impact:** Low — gmediarender is a well-tested, minimal C program. But it runs with more privileges than it needs (it only needs network and DRM access, not Tor SOCKS access).
 - **Recommendation:** For v2, consider running gmediarender under a separate user (e.g., `gmediarender`) with more limited permissions. Use systemd's `User=` directive or `setuid`. This is documented in the spec (BP-ADR-009) as a v2 hardening target.
