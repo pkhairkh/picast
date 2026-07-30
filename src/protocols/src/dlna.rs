@@ -134,14 +134,27 @@ impl DlnaRenderer {
             "souphttpsrc location=%s ! queue2 max-size-bytes=52428800 use-buffering=true ! parsebin ! h264parse ! v4l2h264dec output-io-mode=dmabuf capture-io-mode=dmabuf ! kmssink driver-name=vc4 can-scale=true".to_owned()
         } else {
             // Safely extract the port number from socks_addr, validating it's numeric.
-            let port_str = self.socks_addr.split(':').next_back().unwrap_or("9050");
-            let port: u16 = port_str.parse().unwrap_or_else(|_| {
-                tracing::warn!(socks_addr = %self.socks_addr, "invalid SOCKS port — defaulting to 9050");
-                9050
-            });
+            // Parse host and port from socks_addr using rsplit_once(':')
+            // to correctly handle IPv6 addresses like [::1]:9050.
+            let (proxy_ip, port) = if let Some((host, port_str)) = self.socks_addr.rsplit_once(':') {
+                let port: u16 = port_str.parse().unwrap_or_else(|_| {
+                    tracing::warn!(socks_addr = %self.socks_addr, "invalid SOCKS port — defaulting to 9050");
+                    9050
+                });
+                // Strip IPv6 brackets if present: [::1] -> ::1, but
+                // GStreamer souphttpsrc expects the IP without brackets.
+                let ip = host
+                    .strip_prefix('[')
+                    .and_then(|h| h.strip_suffix(']'))
+                    .unwrap_or(host);
+                (ip.to_string(), port)
+            } else {
+                tracing::warn!(socks_addr = %self.socks_addr, "no port in SOCKS address — defaulting to 127.0.0.1:9050");
+                ("127.0.0.1".to_string(), 9050)
+            };
             format!(
-                "souphttpsrc location=%s socks5-proxy-ip=127.0.0.1 socks5-proxy-port={} ! queue2 max-size-bytes=52428800 use-buffering=true ! parsebin ! h264parse ! v4l2h264dec output-io-mode=dmabuf capture-io-mode=dmabuf ! kmssink driver-name=vc4 can-scale=true",
-                port
+                "souphttpsrc location=%s socks5-proxy-ip={} socks5-proxy-port={} ! queue2 max-size-bytes=52428800 use-buffering=true ! parsebin ! h264parse ! v4l2h264dec output-io-mode=dmabuf capture-io-mode=dmabuf ! kmssink driver-name=vc4 can-scale=true",
+                proxy_ip, port
             )
         };
 
