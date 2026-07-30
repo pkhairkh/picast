@@ -457,10 +457,17 @@ async fn handle_request(
         // Seek.
         (Method::POST, "/api/seek") => {
             let payload = read_body_json::<SeekRequest>(body).await?;
-            let position_ms = payload
-                .position_ms
-                .or_else(|| payload.position_seconds.map(|s| (s * 1000.0) as u64))
-                .unwrap_or(0);
+            let position_ms = match (payload.position_ms, payload.position_seconds) {
+                (Some(ms), _) => ms,
+                (None, Some(s)) => (s * 1000.0) as u64,
+                (None, None) => {
+                    return error_response_with_code(
+                        StatusCode::BAD_REQUEST,
+                        ErrorCode::BadRequest,
+                        "either position_ms or position_seconds is required",
+                    );
+                }
+            };
 
             match session.seek(position_ms).await {
                 Ok(()) => {
