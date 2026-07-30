@@ -421,6 +421,9 @@ async fn socks5_connect(
     }
 
     // VER=5, CMD=1(CONNECT), RSV=0, ATYP=3(DOMAINNAME), LEN, HOST, PORT
+    if host_bytes.len() > 255 {
+        return Err(format!("SOCKS5 hostname too long ({} bytes, max 255)", host_bytes.len()));
+    }
     let mut connect_req = vec![0x05, 0x01, 0x00, 0x03, host_bytes.len() as u8];
     connect_req.extend_from_slice(host_bytes);
     connect_req.extend_from_slice(&[(port >> 8) as u8, (port & 0xFF) as u8]);
