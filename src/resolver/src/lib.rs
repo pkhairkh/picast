@@ -252,6 +252,13 @@ impl Resolver {
     /// 3. Route to the appropriate resolution strategy.
     /// 4. Cache the result and return it.
     pub async fn resolve(&self, url: &str) -> Result<ResolveResult, ResolveError> {
+        // Reject excessively long URLs to prevent memory exhaustion.
+        // 2048 characters is the common browser limit.
+        if url.len() > 2048 {
+            return Err(ResolveError::InvalidUrl(format!(
+                "URL too long ({} bytes, max 2048)", url.len()
+            )));
+        }
         let parsed = Url::parse(url).map_err(|e| ResolveError::InvalidUrl(e.to_string()))?;
         let category = classify_url(&parsed);
 
