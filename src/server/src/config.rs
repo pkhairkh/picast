@@ -91,6 +91,27 @@ impl ServerConfig {
     pub fn tls_enabled(&self) -> bool {
         !self.tls_cert_path.is_empty() && !self.tls_key_path.is_empty()
     }
+
+    /// Validate that TLS cert and key files exist when TLS is enabled.
+    /// Returns an error message if files are missing.
+    pub fn validate_tls_files(&self) -> Result<(), String> {
+        if !self.tls_enabled() {
+            return Ok(());
+        }
+        if !std::path::Path::new(&self.tls_cert_path).exists() {
+            return Err(format!(
+                "TLS cert file not found: {} (set via tls_cert_path or BOGDAN_TLS_CERT)",
+                self.tls_cert_path
+            ));
+        }
+        if !std::path::Path::new(&self.tls_key_path).exists() {
+            return Err(format!(
+                "TLS key file not found: {} (set via tls_key_path or BOGDAN_TLS_KEY)",
+                self.tls_key_path
+            ));
+        }
+        Ok(())
+    }
 }
 
 impl Default for ServerConfig {
