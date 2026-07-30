@@ -500,7 +500,7 @@ async fn socks5_connect(
 fn parse_host_port(target: &str) -> Result<(String, u16), String> {
     // Handle [IPv6]:port format.
     if let Some(close) = target.find(']') {
-        let host = &target[..=close];
+        let host = &target[1..close];  // Strip [ and ] brackets
         let port_str = target[close + 1..].trim_start_matches(':');
         let port: u16 =
             port_str.parse().map_err(|_| format!("invalid port in CONNECT target: {}", target))?;
