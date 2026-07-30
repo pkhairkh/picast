@@ -439,19 +439,52 @@ async fn handle_request(
                 };
                 json_response(StatusCode::OK, &resp)
             },
-            Err(e) => error_response(StatusCode::CONFLICT, &e.to_string()),
+            Err(e) => {
+                match &e {
+                    bogdan_session::SessionError::NoActiveSession => {
+                        error_response_with_code(
+                            StatusCode::NOT_FOUND,
+                            ErrorCode::NoActiveSession,
+                            "no active session",
+                        )
+                    },
+                    _ => error_response(StatusCode::INTERNAL_SERVER_ERROR, &e.to_string()),
+                }
+            },
         },
 
         // Pause.
         (Method::POST, "/api/pause") => match session.pause().await {
             Ok(()) => json_response(StatusCode::OK, &serde_json::json!({"status": "paused"})),
-            Err(e) => error_response(StatusCode::CONFLICT, &e.to_string()),
+            Err(e) => {
+                match &e {
+                    bogdan_session::SessionError::NoActiveSession => {
+                        error_response_with_code(
+                            StatusCode::NOT_FOUND,
+                            ErrorCode::NoActiveSession,
+                            "no active session",
+                        )
+                    },
+                    _ => error_response(StatusCode::INTERNAL_SERVER_ERROR, &e.to_string()),
+                }
+            },
         },
 
         // Resume.
         (Method::POST, "/api/resume") => match session.resume().await {
             Ok(()) => json_response(StatusCode::OK, &serde_json::json!({"status": "playing"})),
-            Err(e) => error_response(StatusCode::CONFLICT, &e.to_string()),
+            Err(e) => {
+                match &e {
+                    bogdan_session::SessionError::NoActiveSession => {
+                        error_response_with_code(
+                            StatusCode::NOT_FOUND,
+                            ErrorCode::NoActiveSession,
+                            "no active session",
+                        )
+                    },
+                    _ => error_response(StatusCode::INTERNAL_SERVER_ERROR, &e.to_string()),
+                }
+            },
         },
 
         // Seek.
@@ -466,7 +499,18 @@ async fn handle_request(
                 Ok(()) => {
                     json_response(StatusCode::OK, &serde_json::json!({"position_ms": position_ms}))
                 },
-                Err(e) => error_response(StatusCode::CONFLICT, &e.to_string()),
+                Err(e) => {
+                match &e {
+                    bogdan_session::SessionError::NoActiveSession => {
+                        error_response_with_code(
+                            StatusCode::NOT_FOUND,
+                            ErrorCode::NoActiveSession,
+                            "no active session",
+                        )
+                    },
+                    _ => error_response(StatusCode::INTERNAL_SERVER_ERROR, &e.to_string()),
+                }
+            },
             }
         },
 
