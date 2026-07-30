@@ -342,7 +342,12 @@ async fn main() -> Result<()> {
     info!("Playback engine created");
 
     // 4d. Resolver — use a persistent cache so resolved URLs survive restarts.
-    let cache_path = std::path::Path::new("/var/lib/bogdan/resolve-cache.db");
+    // Resolver cache path — configurable via env var, defaults to
+    // /var/lib/bogdan/resolve-cache.db for production deployments.
+    let cache_path = std::path::Path::new(
+        &std::env::var("BOGDAN_RESOLVER_CACHE")
+            .unwrap_or_else(|_| "/var/lib/bogdan/resolve-cache.db".to_owned())
+    );
     let resolver =
         Arc::new(bogdan_resolver::Resolver::with_persistent_cache(tor_manager.clone(), cache_path));
     info!(cache = %cache_path.display(), "Resolver created (persistent cache)");
