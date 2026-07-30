@@ -104,7 +104,7 @@ The URL resolver takes a user-supplied URL and resolves it to a direct, playable
 
 #### SEC-002: Cookies from resolution are passed to playback without validation
 - **Severity:** Low
-- **Location:** Lines 125–128 (`cookies` field in `ResolveResult`)
+- **Location:** Line 109 (`pub cookies: Vec<String>` field in `ResolveResult` struct, which starts at line 69)
 - **Description:** The `cookies` field collects Set-Cookie headers from the resolver's HTTP requests and passes them to the playback engine. These cookies are sent with the media request. If a malicious resolver (or a compromised CDN) sets cookies with special characters, they could potentially be injected into GStreamer's HTTP headers.
 - **Impact:** Low — GStreamer's `souphttpsrc` should handle cookie encoding safely. But the cookies are not validated before being passed through.
 - **Recommendation:** Validate cookie format (alphanumeric, `=`, `;`, ` ` only) before adding to the `cookies` vector. Reject cookies with newlines, quotes, or other special characters.
