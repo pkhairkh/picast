@@ -8,157 +8,119 @@ created: 2026-07-30T00:00:00Z
 updated: 2026-07-30T00:00:00Z
 ---
 
-# Code Review: `src/playback/src/pipeline.rs`
+# Code Review: `src/resolver/src/classifier.rs`
 
-**File:** `src/playback/src/pipeline.rs`
-**Lines:** 2123
+**File:** `src/resolver/src/classifier.rs`
+**Lines:** 593
 **Reviewer:** agent
 **Date:** 2026-07-30
 
 ## Summary
 
-The GStreamer pipeline module constructs and manages the media playback pipeline for H.264 (and HEVC fallback) video with V4L2 hardware decode and direct DRM/KMS output on Raspberry Pi 4B+. This is the core decode path — the zero-copy DMA-BUF pipeline from network to HDMI that defines boGDan's value proposition. The file is behind `#![cfg(feature = "hw")]` and is only compiled on Pi hardware. The implementation is sophisticated: it handles dynamic codec detection via `parsebin`, DMA-BUF export, ISP format conversion, audio/video synchronization, and software-decode fallback. The documentation of the pipeline topology (including ASCII art diagrams) is excellent. However, there are several issues.
+The URL classifier performs pure URL-based classification (no network access) to determine the `UrlCategory` for a given URL. It uses hostname patterns, path extensions, and known site domains to categorize URLs as DirectMedia, HlsManifest, DashManifest, WebPage, Magnet, or Onion. The classification determines which resolution path is taken. The implementation is clean, well-tested (47 tests), and follows a clear rule-based approach. This is a low-risk module with a few minor issues.
 
 ## Key Components Reviewed
 
 | Component | Lines | Purpose |
 |-----------|-------|---------|
-| `GstPipeline` struct | 89–130 | Main pipeline with elements, bus watch, download state |
-| `new()` | 155–400 | Pipeline construction: source, queue2, parsebin, decode chain |
-| `preroll()` | 1758–1880 | Async state change to Paused |
-| `start_playing()` | 1880–1900 | State change to Playing |
-| `pause()/resume()/stop()` | 1902–1955 | Playback control |
-| `seek()` | 1994–2003 | Position seek |
-| `set_volume()` | 2004–2011 | Volume control |
-| `buffer_health()` | 2028–2046 | Buffer level query |
-| `rebuild_sw()` | 2073–2105 | Software-decode fallback rebuild |
-| `Drop` impl | 2105+ | Pipeline cleanup |
+| `UrlCategory` enum | 16–45 | 6 categories with Display/serde |
+| `from_str()` | 52–70 | Parse category string (non-fallible) |
+| `WEB_PAGE_DOMAINS` | 90–130 | Static list of known video hosting domains |
+| `DIRECT_MEDIA_EXTENSIONS` | 135–145 | File extensions for direct media |
+| `classify_url()` | 150–200 | Rule-based classification (7 rules) |
 
 ## Findings
 
 ### Bugs
 
-#### BUG-001: `async-handling=true` comment says kmssink is "initially unconnected" but pipeline still links it at construction
+#### BUG-001: `.onion` URLs with direct media extensions are classified as `Onion`, not `DirectMedia`
 - **Severity:** Low
-- **Location:** Lines 170–190 (async-handling comment) vs the construction logic
-- **Description:** The comment explains that `async-handling=true` is needed because "kmssink's sink pad is initially unconnected (the video decode chain is created dynamically in parsebin's pad-added callback)." However, kmssink is added to the pipeline at construction time — its sink pad exists but isn't linked until `pad-added` fires. The async-handling prevents the Ready→Paused transition from blocking on kmssink's preroll.
-- **Impact:** The comment is accurate about the behavior but slightly misleading about the cause. The issue isn't that kmssink is "unconnected" — it's that it hasn't received its first buffer yet (preroll). This is a documentation clarity issue, not a bug.
-- **Recommendation:** Reword the comment to say "kmssink can't preroll until it receives its first buffer, which only flows after parsebin's pad-added callback links the decode chain."
+- **Location:** Lines 152–157 (Rule 1: .onion check before extension check)
+- **Description:** An `.onion` URL like `http://something.onion/video.mp4` is classified as `Onion` (Rule 1) before the extension check (Rule 4-6). This means all `.onion` URLs go through yt-dlp, even direct media files.
+- **Impact:** Direct media files on `.onion` sites are unnecessarily processed by yt-dlp, adding 3–15 seconds of latency. (Same issue as resolver review DESIGN-003.)
+- **Recommendation:** Move the `.onion` check after the extension check, or add a special case: if the `.onion` URL has a direct media extension, classify as `DirectMedia` with a flag indicating Tor is needed.
 
-#### BUG-002: Loopback URL detection misses `https://` and non-standard ports
+#### BUG-002: Extension extraction via `rsplit('.')` is fragile
 - **Severity:** Low
-- **Location:** Lines 218–221 (`is_loopback_url` check)
-- **Description:** The loopback detection checks `http://127.0.0.1:`, `http://localhost:`, and `http://[::1]:`. It misses:
-  - `https://127.0.0.1:` (HTTPS loopback)
-  - `http://127.0.0.1` without a port (no colon)
-  - `http://bogdan.local:` (mDNS hostname that resolves to loopback)
-- **Impact:** A loopback URL with HTTPS or no port would be routed through `StreamSource` (Tor) instead of `souphttpsrc` directly, adding unnecessary overhead.
-- **Recommendation:** Use `url::Url::parse` to properly parse the URL and check `host_str()` against `127.0.0.1`, `localhost`, `::1`, and `.local` suffixes.
+- **Location:** Line 175 (`let extension = path.rsplit('.').next().unwrap_or("")`)
+- **Description:** The extension is extracted by splitting the path on `.` and taking the last component. This fails for:
+  - URLs with query strings: `/video.mp4?token=abc` → extension is `mp4?token=abc` (not `mp4`)
+  - URLs with fragments: `/video.mp4#t=5` → extension is `mp4#t=5`
+  - Paths ending with `.`: `/video.` → extension is empty (correct, but edge case)
+  - Paths with no extension: `/path/to/video` → extension is `video` (not empty)
+- **Impact:** URLs with query strings or fragments may be misclassified as `WebPage` instead of `DirectMedia` or `HlsManifest`.
+- **Recommendation:** Strip the query string and fragment before extracting the extension. Use `url.path()` (which already excludes query/fragment) — the code does use `url.path()`, but the `rsplit` approach still includes the full path. Better: use `Path::new(url.path()).extension()` from `std::path`.
 
-#### BUG-003: No validation that `v4l2h264dec` is available before pipeline construction
-- **Severity:** Medium
-- **Location:** Throughout `new()` (element creation via `ElementFactory::make`)
-- **Description:** The pipeline creates `v4l2h264dec`, `v4l2convert`, `kmssink`, etc. via `ElementFactory::make`. If any element is missing (e.g., GStreamer bad plugins not installed, or running on a non-Pi with `hw` feature forced), the `make()` call returns an error. However, the error is generic ("Failed to create element X") without guidance on which package to install.
-- **Impact:** On a misconfigured system, the user sees a confusing error with no hint about the missing GStreamer plugin.
-- **Recommendation:** Check element availability at startup (in `ensure_gst_init()` or a separate `check_elements()` function) and return a clear error listing the required GStreamer packages (`gstreamer1.0-plugins-bad`, `gstreamer1.0-plugins-base`, etc.).
-
-#### BUG-004: `rebuild_sw()` doesn't preserve playback position
-- **Severity:** Medium
-- **Location:** Lines 2073–2105 (`rebuild_sw`)
-- **Description:** The `rebuild_sw()` method rebuilds the pipeline with software decode (`avdec_h264`) when V4L2 negotiation fails. However, it doesn't query or preserve the current playback position before rebuilding. After the rebuild, playback starts from the beginning (or wherever the buffer pointer lands).
-- **Impact:** A user watching a 30-minute video that triggers a software-decode fallback will have their playback position reset, requiring them to seek back to where they were.
-- **Recommendation:** Query `position_ms()` before rebuilding, then `seek()` to that position after the new pipeline is constructed and playing.
+#### BUG-003: `from_str` defaults to `DirectMedia` for unknown strings
+- **Severity:** Low
+- **Location:** Lines 52–70 (`from_str` fallback)
+- **Description:** When parsing an unknown category string, `from_str` logs a warning and returns `DirectMedia`. This is a silent fallback that could mask data corruption (e.g., if the database has a corrupted category field, it's silently treated as `DirectMedia`).
+- **Impact:** Corrupted category data is silently converted to `DirectMedia`, which may cause wrong resolution behavior.
+- **Recommendation:** Return `Option<UrlCategory>` or implement `std::str::FromStr` with `Err`. The `#[allow(clippy::should_implement_trait)]` suggests this was a conscious choice, but the fallback should be documented more prominently.
 
 ### Design Issues
 
-#### DESIGN-001: 2123-line file is too large for a single module
-- **Severity:** Medium
-- **Location:** Entire file
-- **Description:** The `pipeline.rs` file is 2123 lines, covering pipeline construction, state management, bus message handling, download progress, buffer health, and software fallback. This is too much for one file — it makes navigation difficult and increases the risk of merge conflicts.
-- **Impact:** Maintenance burden; changes to one aspect (e.g., bus handling) risk breaking another (e.g., element construction).
-- **Recommendation:** Split into sub-modules:
-  - `pipeline/builder.rs` — `new()` and element construction
-  - `pipeline/control.rs` — `pause()`, `resume()`, `stop()`, `seek()`
-  - `pipeline/bus.rs` — Bus message handling
-  - `pipeline/health.rs` — `buffer_health()`, `download_progress()`
-  - `pipeline/fallback.rs` — `rebuild_sw()`
-
-#### DESIGN-002: `parsebin` pad-added callback creates decode chain dynamically — no error recovery
-- **Severity:** Medium
-- **Location:** Pad-added callback (throughout `new()`)
-- **Description:** The decode chain (`v4l2h264dec → v4l2convert → kmssink`) is created in a `pad-added` callback on `parsebin`. If the callback fails (e.g., element creation fails, linking fails), the error is difficult to propagate — callbacks can't return `Result`. The pipeline may end up in a half-constructed state.
-- **Impact:** A failure in the pad-added callback leads to a stuck pipeline with no clear error.
-- **Recommendation:** Use a `Mutex<Option<Result<(), PlaybackError>>>` to capture errors from the callback, and check it after the pipeline starts. Or use GStreamer's "no-more-pads" signal to validate that all pads were handled successfully.
-
-#### DESIGN-003: Audio sink `ts-offset=+100ms` is hardcoded
+#### DESIGN-001: `WEB_PAGE_DOMAINS` list requires manual maintenance
 - **Severity:** Low
-- **Location:** The pipeline diagram shows `ts-offset=+100ms` on `alsasink`
-- **Description:** The audio sink has a hardcoded `ts-offset=+100ms` to compensate for audio/video sync drift. This value is likely tuned for a specific hardware configuration and may not be correct for all TVs or audio systems.
-- **Impact:** A/V sync may be off by 100ms on some setups, which is noticeable to users.
-- **Recommendation:** Make `ts-offset` configurable via `bogdan.toml`. Default to 100ms but allow users to adjust if they notice sync issues.
+- **Location:** Lines 90–130 (static domain list)
+- **Description:** The list of known video hosting domains is hardcoded and must be updated manually when new sites are supported. yt-dlp supports 1800+ sites, but only ~25 are listed here. Sites not in the list fall through to Rule 7 (default `WebPage`), which is correct behavior — but the list is redundant for those sites.
+- **Impact:** The list is partially redundant (Rule 7 catches everything anyway) and requires maintenance. However, it does provide faster classification for known domains (avoids the extension checks).
+- **Recommendation:** Consider removing the list entirely and relying on Rule 7 (default to `WebPage`). The performance difference is negligible (string comparison vs. extension check). Or, generate the list from yt-dlp's extractor list automatically.
 
-#### DESIGN-004: HEVC pipeline requires `hevc` feature but shares the same file
+#### DESIGN-002: Voe domain detection via heuristic is called on every classification
 - **Severity:** Low
-- **Location:** Lines 25–30 (HEVC topology) and `#[cfg(feature = "hevc")]` imports
-- **Description:** The HEVC pipeline is conditionally compiled with the `hevc` feature. It shares the same `pipeline.rs` file and many code paths with H.264, using `#[cfg(feature = "hevc")]` blocks. This makes the H.264 code path harder to read (interrupted by feature gates).
-- **Impact:** Code readability is reduced; testing one configuration doesn't test the other.
-- **Recommendation:** Extract HEVC-specific code into a separate `pipeline/hevc.rs` module with a trait that the main pipeline calls. This keeps the H.264 path clean.
+- **Location:** Lines 165–170 (Rule 3b: `is_voe_domain` call)
+- **Description:** For every URL that doesn't match `WEB_PAGE_DOMAINS`, `is_voe_domain()` is called. This is a heuristic function (in `custom.rs`) that checks domain patterns. It runs on every non-known-domain URL, adding a small overhead.
+- **Impact:** Minor performance overhead per classification. Since classification happens once per cast (not per segment), the overhead is negligible.
+- **Recommendation:** Acceptable for v1. If performance becomes a concern, cache the result per domain.
 
-### Security
-
-#### SEC-001: No validation of stream URL before pipeline construction
+#### DESIGN-003: No support for URL shorteners
 - **Severity:** Low
-- **Location:** Line 156 (`url: &str` parameter to `pub async fn new()` at line 155)
-- **Description:** The resolved `url` is passed directly to `StreamSource::start()` without URL validation. While the resolver already validated the URL, the playback layer should defense-in-depth.
-- **Impact:** Low — the resolver validates URLs. But if the resolver is bypassed (e.g., direct URL casting via HTTP API), a malformed URL could reach the pipeline.
-- **Recommendation:** Validate the URL scheme (`http://` or `https://` only) in `new()` before passing to `StreamSource`.
-
-#### SEC-002: Cookies passed directly to GStreamer without sanitization
-- **Severity:** Low
-- **Location:** Line 163 (`cookies: &[String]`) passed to `StreamSource::start()`
-- **Description:** Cookies from the resolver are passed to the playback engine without validation. If a cookie contains special characters (newlines, quotes), it could potentially be injected into HTTP headers.
-- **Impact:** Low — `reqwest` (used by `StreamSource`) handles cookie encoding safely. But defense-in-depth.
-- **Recommendation:** Validate cookie format before passing to the pipeline (same recommendation as resolver review SEC-002).
+- **Location:** Throughout `classify_url`
+- **Description:** URL shorteners (bit.ly, t.co, etc.) redirect to the actual content URL. The classifier sees the shortener URL, classifies it as `WebPage` (Rule 7), and the resolver follows the redirect. This works but adds a round-trip.
+- **Impact:** Shortened URLs require an extra resolution step (follow redirect, then classify again).
+- **Recommendation:** Acceptable for v1. For v2, consider following redirects during classification (but this requires network access, which the classifier explicitly avoids).
 
 ### Missing Tests
 
-#### TEST-001: No unit tests (entire file is `#[cfg(feature = "hw")]`)
-- **Severity:** Medium
-- **Description:** The file has `#![cfg(feature = "hw")]` at the top, so it's not compiled in non-hw builds. There are no tests visible — the test infrastructure likely requires a Pi with GStreamer and V4L2 hardware.
-- **Impact:** The pipeline construction logic is completely untested in CI. Regressions can only be caught by manual Pi testing.
-- **Recommendation:** Add hardware-in-the-loop tests in `tests/hw_pipeline.rs` that run on a Pi CI runner. Test: construct a pipeline for a known H.264 stream, verify state transitions, verify buffer health reporting, verify seek, verify software fallback.
-
-#### TEST-002: No test for the pad-added callback logic
+#### TEST-001: No test for URLs with query strings
 - **Severity:** Low
-- **Description:** The dynamic decode chain construction in the pad-added callback is not tested.
-- **Recommendation:** This is hard to test without real GStreamer hardware. Consider extracting the chain-construction logic into a testable function that takes the codec type and returns the element list.
+- **Description:** There's no test verifying that `https://cdn.example.com/video.mp4?token=abc` is classified as `DirectMedia`. Given BUG-002, this may fail.
+- **Recommendation:** Add a test: `assert_eq!(classify("https://example.com/video.mp4?token=abc"), UrlCategory::DirectMedia)`.
+
+#### TEST-002: No test for `.onion` with direct media extension
+- **Severity:** Low
+- **Description:** There's no test for the BUG-001 scenario: `http://something.onion/video.mp4` should arguably be `DirectMedia` (with Tor) but is currently `Onion`.
+- **Recommendation:** Add a test documenting the current behavior (or fix BUG-001 and test the new behavior).
+
+#### TEST-003: No test for case sensitivity of extensions
+- **Severity:** Low
+- **Description:** The path is lowercased (`let path = url.path().to_lowercase()`) before extension extraction, so `.MP4` should be classified as `DirectMedia`. But there's no explicit test for this.
+- **Recommendation:** Add a test: `assert_eq!(classify("https://example.com/VIDEO.MP4"), UrlCategory::DirectMedia)`.
 
 ## Positive Observations
 
-1. **Excellent pipeline topology documentation** — the ASCII art diagrams for H.264, HEVC, and software fallback paths make the pipeline structure immediately clear.
-2. **`async-handling=true`** — correctly prevents the Ready→Paused deadlock with async sinks (kmssink, alsasink). The comment thoroughly explains why.
-3. **CDN anti-bot bypass via StreamSource** — the architecture uses `reqwest` (HTTP/2 + rustls) to match Chrome's TLS fingerprint, avoiding CDN 403s from TLS fingerprinting. Well-documented.
-4. **Software-decode fallback** — `rebuild_sw()` provides a fallback when V4L2 negotiation fails, ensuring playback continues (at lower quality) rather than failing entirely.
-5. **`kill_on_drop` on download task** — the progressive download task is cancelled when the pipeline is dropped, preventing orphaned downloads.
-6. **Buffer health monitoring** — `buffer_health()` reports low/high levels, enabling the session layer's ABR controller.
-7. **`OnceLock` for GStreamer init** — ensures `gstreamer::init()` is called exactly once, with the error cached for subsequent calls.
-8. **Colorimetry note** — the comment about removing `capssetter` (which caused "not-negotiated" errors) shows good debugging documentation — future developers won't re-add the broken element.
-9. **`parsebin` for dynamic codec detection** — correctly uses `parsebin` rather than a fixed pipeline, handling MP4, MKV, WebM, MPEG-TS without configuration.
-10. **Audio path with resample and volume** — `audioconvert → audioresample → volume → alsasink` is the correct chain for handling diverse audio formats.
+1. **Pure function, no network access** — the classifier is deterministic and testable without mocks.
+2. **47 tests** — excellent test coverage for a pure function, covering all categories and edge cases.
+3. **Clear rule ordering** — the 7 rules are numbered and applied in priority order, making the logic easy to follow.
+4. **Case-insensitive extension matching** — path is lowercased before comparison.
+5. **Voe dynamic detection** — correctly avoids maintaining a static list for Voe's rotating domains, using a heuristic instead.
+6. **`Display` and `serde` impls** — the category can be serialized and displayed, useful for logging and API responses.
+7. **Domain suffix matching** — `host_lower.ends_with(&format!(".{}", domain))` correctly matches subdomains (e.g., `www.youtube.com`).
+8. **Documented design decisions** — the comment about Voe domains ("rotates domains constantly, so a static list is futile") explains why the heuristic is used.
+9. **Magnet scheme check** — correctly identifies `magnet:?xt=...` as `Magnet` category.
+10. **Default to `WebPage`** — unknown URLs default to `WebPage`, which triggers yt-dlp resolution — the safest default for unknown content.
 
 ## Recommendations Summary
 
 | Priority | Finding | Effort |
 |----------|---------|--------|
-| Medium | BUG-003: Validate GStreamer elements at startup with helpful errors | S (1–2 h) |
-| Medium | BUG-004: Preserve playback position across `rebuild_sw()` | M (2–3 h) |
-| Medium | DESIGN-001: Split 2123-line file into sub-modules | L (4–8 h) |
-| Medium | DESIGN-002: Add error recovery for pad-added callback | M (3–4 h) |
-| Medium | TEST-001: Add hardware-in-the-loop pipeline tests | L (4–8 h) |
-| Low | BUG-001: Clarify async-handling comment | S (15 min) |
-| Low | BUG-002: Fix loopback URL detection | S (30 min) |
-| Low | DESIGN-003: Make audio ts-offset configurable | S (30 min) |
-| Low | DESIGN-004: Extract HEVC code to separate module | M (2–3 h) |
-| Low | SEC-001: Validate URL scheme in pipeline new() | S (15 min) |
-| Low | SEC-002: Validate cookie format | S (30 min) |
-| Low | TEST-002: Test pad-added callback logic | M (2–3 h) |
+| Low | BUG-001: Check extension before .onion for direct media | S (30 min) |
+| Low | BUG-002: Use std::path::Path for robust extension extraction | S (30 min) |
+| Low | BUG-003: Make from_str fallible or document the fallback | S (15 min) |
+| Low | DESIGN-001: Consider removing redundant WEB_PAGE_DOMAINS list | S (1 h) |
+| Low | DESIGN-002: Cache Voe detection per domain | S (30 min) |
+| Low | DESIGN-003: Document URL shortener behavior | S (15 min) |
+| Low | TEST-001: Add query string classification test | S (15 min) |
+| Low | TEST-002: Add .onion + direct media test | S (15 min) |
+| Low | TEST-003: Add case-insensitive extension test | S (15 min) |

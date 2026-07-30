@@ -6,6 +6,12 @@
 
 ---
 
+> **Note (2026-07-30):** This plan was the original task breakdown for building boGDan from scaffold to v1.0.0. All tasks herein have been implemented — see [TASKS.md](../TASKS.md) for the sprint-based breakdown showing all 7 sprints complete. This document is retained for historical context and design rationale.
+
+---
+
+
+
 ## How to Read This Plan
 
 Tasks are grouped by **milestone** (v0.1.0 → v1.0.0). Within each milestone, tasks are ordered by **dependency** — a task cannot start until all its dependencies are complete. Tasks that share no dependency can run in parallel (marked with `∥`).
