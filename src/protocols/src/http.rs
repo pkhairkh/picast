@@ -456,7 +456,16 @@ async fn handle_request(
 
         // Seek.
         (Method::POST, "/api/seek") => {
-            let payload = read_body_json_or_error::<SeekRequest>(body).await?;
+            let payload = match read_body_json::<SeekRequest>(body).await {
+                Ok(p) => p,
+                Err(e) => {
+                    let msg = e.to_string();
+                    if msg.contains("body too large") {
+                        return error_response_with_code(StatusCode::PAYLOAD_TOO_LARGE, ErrorCode::BodyTooLarge, &msg);
+                    }
+                    return error_response_with_code(StatusCode::BAD_REQUEST, ErrorCode::BadRequest, &msg);
+                }
+            };
             let position_ms = payload
                 .position_ms
                 .or_else(|| payload.position_seconds.map(|s| (s * 1000.0) as u64))
@@ -472,7 +481,16 @@ async fn handle_request(
 
         // Volume.
         (Method::POST, "/api/volume") => {
-            let payload = read_body_json_or_error::<VolumeRequest>(body).await?;
+            let payload = match read_body_json::<VolumeRequest>(body).await {
+                Ok(p) => p,
+                Err(e) => {
+                    let msg = e.to_string();
+                    if msg.contains("body too large") {
+                        return error_response_with_code(StatusCode::PAYLOAD_TOO_LARGE, ErrorCode::BodyTooLarge, &msg);
+                    }
+                    return error_response_with_code(StatusCode::BAD_REQUEST, ErrorCode::BadRequest, &msg);
+                }
+            };
             let volume = payload.clamped_volume();
             match session.set_volume(volume).await {
                 Ok(()) => json_response(StatusCode::OK, &serde_json::json!({"volume": volume})),
@@ -488,7 +506,16 @@ async fn handle_request(
 
         // Set audio device and sink type.
         (Method::POST, "/api/audio-device") => {
-            let payload = read_body_json_or_error::<AudioDeviceRequest>(body).await?;
+            let payload = match read_body_json::<AudioDeviceRequest>(body).await {
+                Ok(p) => p,
+                Err(e) => {
+                    let msg = e.to_string();
+                    if msg.contains("body too large") {
+                        return error_response_with_code(StatusCode::PAYLOAD_TOO_LARGE, ErrorCode::BodyTooLarge, &msg);
+                    }
+                    return error_response_with_code(StatusCode::BAD_REQUEST, ErrorCode::BadRequest, &msg);
+                }
+            };
             // Set the device first
             match session.set_audio_device(payload.device.clone()).await {
                 Ok(()) => {
@@ -673,31 +700,7 @@ async fn read_body_json<T: serde::de::DeserializeOwned>(body: Incoming) -> Resul
     Ok(serde_json::from_slice(&bytes)?)
 }
 
-/// Read and parse a JSON body, returning an appropriate HTTP error response
-/// (413 for body-too-large, 400 for parse errors) instead of using `?`.
-async fn read_body_json_or_error<T: serde::de::DeserializeOwned>(
-    body: Incoming,
-) -> Result<T, Response<BoxBody>> {
-    match read_body_json::<T>(body).await {
-        Ok(v) => Ok(v),
-        Err(e) => {
-            let msg = e.to_string();
-            if msg.contains("body too large") {
-                Err(error_response_with_code(
-                    StatusCode::PAYLOAD_TOO_LARGE,
-                    ErrorCode::BodyTooLarge,
-                    &msg,
-                ))
-            } else {
-                Err(error_response_with_code(
-                    StatusCode::BAD_REQUEST,
-                    ErrorCode::BadRequest,
-                    &msg,
-                ))
-            }
-        }
-    }
-}
+
 
 /// Validate that a URL is safe for casting.
 ///
