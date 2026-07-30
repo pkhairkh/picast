@@ -1018,9 +1018,27 @@ mod tests {
 
     #[test]
     fn empty_body_rejected() {
-        // Verify the empty body check logic is present
+        // An empty body should fail JSON deserialization (serde_json
+        // returns an "EOF while parsing" error on empty input).
         let empty_bytes: &[u8] = b"";
-        assert!(empty_bytes.is_empty());
+        let result: Result<CastRequest, _> = serde_json::from_slice(empty_bytes);
+        assert!(result.is_err(), "empty body should fail JSON deserialization");
+    }
+
+    #[test]
+    fn volume_clamping() {
+        // Values above 100 should be clamped to 100
+        let req = VolumeRequest { volume: 150 };
+        assert_eq!(req.clamped_volume(), 100);
+        // Value at boundary stays
+        let req = VolumeRequest { volume: 100 };
+        assert_eq!(req.clamped_volume(), 100);
+        // Value below stays
+        let req = VolumeRequest { volume: 0 };
+        assert_eq!(req.clamped_volume(), 0);
+        // u8 max (255) clamps to 100
+        let req = VolumeRequest { volume: 255 };
+        assert_eq!(req.clamped_volume(), 100);
     }
 
     #[test]
