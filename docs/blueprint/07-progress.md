@@ -39,7 +39,7 @@ Conventions:
 | adrs | `docs/blueprint/03-adrs/` | done | agent | 2026-07-30 | 12 blueprint ADRs BP-ADR-001..012 + README index. Branch `docs/blueprint-adrs` |
 | fine_draft | `docs/blueprint/04-fine-draft.md` | done | agent | 2026-07-30 | 13 components, data model, 12-entry threat model, test strategy, 8 open questions. Branch `docs/blueprint-fine-draft` |
 | spec | `docs/blueprint/05-spec.md` | done | agent | 2026-07-30 | 28 requirements R-001..R-028, every problem covered, Given/When/Then acceptance criteria, traceability tables. Branch `docs/blueprint-spec` |
-| tasks | `docs/blueprint/06-tasks.md` | done | agent | 2026-07-30 | 50 tasks T-101..T-608 across 6 milestones, ~90 ideal days, all 8 fine-draft open questions resolved. Branch `docs/blueprint-tasks` |
+| tasks | `docs/blueprint/06-tasks.md` | done | agent | 2026-07-30 | 50 tasks T-101..T-608 across 6 milestones, ~90 ideal days, all 8 fine-draft open questions resolved; R-025 explicitly deferred to v2 per BP-ADR-011. Branch `docs/blueprint-tasks` |
 | progress | `docs/blueprint/07-progress.md` | done | agent | 2026-07-30 | This document. Branch `docs/blueprint-progress` |
 | implementation | (TBD) | not_started | TBD | — | Implementation has not started; M1 is the next milestone |
 
