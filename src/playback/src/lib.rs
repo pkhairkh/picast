@@ -2502,10 +2502,16 @@ impl PlaybackEngine {
     pub async fn stop(&self) -> Result<(), PlaybackError> {
         let mut guard = self.gst_pipeline.lock().await;
         if let Some(ref mut pipeline) = *guard {
-            pipeline.stop()?;
+            // Capture the result — we must clear state regardless of
+            // whether the pipeline teardown succeeded. If we propagate
+            // the error with ? before clearing state, the engine is
+            // left in an inconsistent state (pipeline still held,
+            // is_playing still true, no Stopped event sent).
+            let result = pipeline.stop();
             *guard = None;
             self.is_playing.store(false, Ordering::Relaxed);
             let _ = self.event_tx.send(PlaybackEvent::Stopped);
+            result?;
         }
         Ok(())
     }
