@@ -59,7 +59,7 @@ The V3D compute shader engine implements GPU-based SAND128→NV12 format convers
 
 #### DESIGN-001: Entire module is `#![cfg(feature = "hw")]` — not available for testing
 - **Severity:** Medium
-- **Location:** Line 1 (`#![cfg(feature = "hw")]`)
+- **Location:** Line 84 (`#![cfg(feature = "hw")]` — the file starts with 83 lines of doc comments before the cfg attribute)
 - **Description:** The entire module is behind the `hw` feature gate, meaning it's not compiled in non-hw builds. The `SandParams` struct and its calculations are pure math with no hardware dependencies, but they're still gated.
 - **Impact:** Pure logic (SandParams) can't be tested in CI without the `hw` feature.
 - **Recommendation:** Move `SandParams` and its tests out of the `hw` gate. Only gate the EGL/GL/DRM code. This allows the math to be tested on any platform.
