@@ -7,7 +7,7 @@ need to get started.
 
 | Tool | Minimum Version | Notes |
 |---|---|---|
-| Rust | 1.70+ | Install via [rustup](https://rustup.rs) |
+| Rust | 1.88+ | Install via [rustup](https://rustup.rs) |
 | `cross` | latest | For cross-compilation to Raspberry Pi (`cargo install cross`) |
 | `cargo-deny` | latest | For dependency auditing (`cargo install cargo-deny`) |
 | `cargo-audit` | latest | For vulnerability scanning (`cargo install cargo-audit`) |
