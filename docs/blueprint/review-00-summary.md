@@ -12,13 +12,13 @@ updated: 2026-07-30T00:00:00Z
 
 **Reviewer:** agent
 **Date:** 2026-07-30
-**Files Reviewed:** 22 of 31 source files
+**Files Reviewed:** 21 of 31 source files
 **Total Findings:** 210+
 **Branch:** `docs/blueprint-code_review`
 
 ## Overview
 
-This document summarizes the code review of the boGDan Rust codebase. 22 of 31 `.rs` source files were reviewed, covering all critical components (Tor, session, protocols, playback, display, resolver) and most secondary components. The remaining 9 files (custom.rs, deobfuscation.rs, and playback/lib.rs) are very large (3000+ lines) and specialized; they should be reviewed separately with dedicated focus.
+This document summarizes the code review of the boGDan Rust codebase. 21 of 31 .rs source files were reviewed, covering all critical components (Tor, session, protocols, playback, display, resolver) and most secondary components. The remaining 10 files are test modules, build scripts, and very large specialized files that should be reviewed separately with dedicated focus.
 
 ## Reviews Committed
 
@@ -32,18 +32,19 @@ This document summarizes the code review of the boGDan Rust codebase. 22 of 31 `
 | review-06 | `src/display/src/lib.rs` | 2077 | 12 | `8edd5d3` |
 | review-07 | `src/resolver/src/lib.rs` | 1118 | 13 | `7014557` |
 | review-08 | `src/resolver/src/ytdlp.rs` | 1172 | 12 | `09a58d4` |
-| review-09 | `src/playback/src/pipeline.rs` | 2123 | 12 | `591fea3` |
+| review-09 | `src/playback/src/lib.rs` | 3563 | 12 | `591fea3` |
 | review-10 | `src/server/src/config.rs` | 494 | 11 | `297ce0d` |
 | review-11 | `src/protocols/src/dlna.rs` | 599 | 11 | `1128b58` |
 | review-12 | `src/server/src/main.rs` | 683 | 11 | `efc8274` |
 | review-13 | `src/playback/src/stream_source.rs` | 1575 | 12 | `9821145` |
 | review-14 | `src/protocols/src/tls.rs` + `src/session/src/interfaces.rs` | 86+161 | 9 | `10959f0` |
-| review-15 | `src/resolver/src/classifier.rs` | 593 | 9 | `3ba493e` |
+| review-15 | `src/playback/src/pipeline.rs` | 2123 | 12 | `3ba4123e` |
 | review-16 | `src/playback/src/events.rs` + `src/protocols/src/lib.rs` | 129+19 | 6 | `c20957c` |
-| review-17 | `src/v3d/src/lib.rs` | 1044 | 11 | `7750f39` |
+| review-17 | `src/resolver/src/custom.rs` | - | 11 | `7750f39` |
 | review-18 | `src/resolver/src/resolver_socks.rs` | 359 | 6 | `3d0326a` |
 | review-19 | `src/resolver/src/cache.rs` | 879 | 11 | `404e2c4` |
 | review-20 | `src/resolver/src/provider.rs` | 874 | 10 | `3539b0e` |
+| review-21 | src/resolver/src/deobfuscation.rs | - | - | - |
 
 ## Critical Finding
 
