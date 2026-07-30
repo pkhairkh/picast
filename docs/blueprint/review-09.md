@@ -108,7 +108,7 @@ The GStreamer pipeline module constructs and manages the media playback pipeline
 
 #### SEC-001: No validation of stream URL before pipeline construction
 - **Severity:** Low
-- **Location:** Line 157 (`url` parameter to `new()`)
+- **Location:** Line 156 (`url: &str` parameter to `pub async fn new()` at line 155)
 - **Description:** The resolved `url` is passed directly to `StreamSource::start()` without URL validation. While the resolver already validated the URL, the playback layer should defense-in-depth.
 - **Impact:** Low — the resolver validates URLs. But if the resolver is bypassed (e.g., direct URL casting via HTTP API), a malformed URL could reach the pipeline.
 - **Recommendation:** Validate the URL scheme (`http://` or `https://` only) in `new()` before passing to `StreamSource`.
