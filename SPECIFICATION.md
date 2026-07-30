@@ -2,7 +2,7 @@
 
 > **Companion document:** boGDan Architecture Paper  
 > **Status:** ratified  
-> **Last updated:** 2025-03-04  
+> **Last updated:** 2026-07-30  
 > **Audience:** implementers, integrators, security reviewers
 
 This specification defines the concrete API contracts, configuration formats, and operational parameters that govern boGDan v1. Every normative requirement uses RFC 2119 keywords (MUST, SHALL, SHOULD, MAY). Informative commentary appears in blockquotes.

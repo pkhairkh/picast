@@ -2,7 +2,7 @@
 
 **Version:** 0.1.0-alpha
 **Audience:** End users installing and operating boGDan on a Raspberry Pi 4B+
-**Last updated:** 2026-05-10
+**Last updated:** 2026-07-30
 
 ---
 
