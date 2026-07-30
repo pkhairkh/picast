@@ -351,6 +351,36 @@ impl Resolver {
                         None
                     };
 
+                    // ── YouTube custom resolver (fast path, avoids yt-dlp Python startup) ──
+                    // YouTube is the highest-volume source; resolve it in-tree
+                    // to meet the 10-second resolution budget (see BP-ADR-006, T-107).
+                    if custom::is_youtube_domain(host) {
+                        tracing::info!(
+                            url = url,
+                            resolver = "youtube",
+                            "using YouTube custom resolver (in-tree, fast path)"
+                        );
+                        match custom::resolve_youtube(url, socks5_proxy.as_deref()).await {
+                            Ok(mut result) => {
+                                result.category = UrlCategory::WebPage;
+                                result.used_tor = socks5_proxy.is_some();
+                                {
+                                    let cache = self.cache.lock().await;
+                                    cache.insert(url, result.clone());
+                                }
+                                return Ok(result);
+                            },
+                            Err(yt_err) => {
+                                tracing::debug!(
+                                    url = url,
+                                    error = %yt_err,
+                                    "YouTube custom resolver failed — falling back to provider registry / yt-dlp"
+                                );
+                                // Fall through to provider registry and yt-dlp fallback
+                            },
+                        }
+                    }
+
                     // ── Provider registry lookup ──────────────────────
                     if let Some((provider_id, config)) = self.providers.find_provider_for_host(host)
                     {
