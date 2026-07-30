@@ -132,6 +132,16 @@ These are intentionally left open for the implementation phase to resolve (they 
 
 Most recent first. Append new entries to the top.
 
+### 2026-07-30 — Quality review: R-025 coverage gap fixed
+
+- **Phase:** tasks (quality review)
+- **By:** agent
+- **Change:** `docs/blueprint/06-tasks.md` updated on `docs/blueprint-tasks` branch (commit `fff52aa`). Added a "Deferred Requirements" section explicitly acknowledging that [[R-025]] (multi-room sync, deferred to v2 per [[BP-ADR-011]]) is intentionally not tasked in v1. The tasks doc previously traced to 27 of 28 requirements; the gap is now documented rather than silent.
+- **Status:** green. All 28 requirements now accounted for (27 tasked in v1, 1 explicitly deferred to v2).
+- **Next:** continue quality review of remaining blueprint docs; poll for new implementation tasks.
+
+
+
 ### 2026-07-30 — Blueprint pipeline complete
 
 - **Phase:** progress (this doc)
