@@ -1018,7 +1018,7 @@ impl PlaybackEngine {
         // complete cleanup (release DRM master, free planes). Without
         // this pause, the new pipeline's kmssink may fail to acquire
         // DRM master or set planes, causing "Permission denied" errors.
-        tokio::time::sleep(std::time::Duration::from_millis(200)).await;
+        tokio::time::sleep(std::time::Duration::from_millis(DRM_MASTER_SETTLE_MS)).await;
 
         // Reset SW fallback flag for the new playback attempt.
         self.sw_fallback_active.store(false, Ordering::Relaxed);
@@ -1138,6 +1138,12 @@ impl PlaybackEngine {
         /// after a brief glitch, but is short enough that the user doesn't
         /// sit through minutes of a frozen screen.
         const STALL_TIMEOUT_SECS: u64 = 30;
+
+/// Milliseconds to wait after stopping a pipeline before constructing a new one.
+/// This gives the kernel's vc4 DRM driver time to complete cleanup (release DRM
+/// master, free planes) before the new pipeline's kmssink tries to acquire them.
+/// Without this wait, the new pipeline may get "Permission denied" errors.
+const DRM_MASTER_SETTLE_MS: u64 = 200;
 
         // Weak reference to the pipeline element for the bus watch to
         // trigger the Paused→Playing auto-transition.
@@ -2103,7 +2109,7 @@ impl PlaybackEngine {
         }
 
         // Brief pause for DRM/KMS cleanup.
-        tokio::time::sleep(std::time::Duration::from_millis(200)).await;
+        tokio::time::sleep(std::time::Duration::from_millis(DRM_MASTER_SETTLE_MS)).await;
 
         let mut noaudio_config = self.config.clone();
         noaudio_config.audio_enabled = false;
