@@ -157,7 +157,7 @@ impl DlnaRenderer {
             .arg(&self.friendly_name)
             .arg("--port")
             .arg("49152")
-            .stdout(std::process::Stdio::null())
+            .stdout(std::process::Stdio::piped())
             .stderr(std::process::Stdio::piped())
             .spawn()
             .map_err(|e| {
