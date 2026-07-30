@@ -2,12 +2,11 @@
 
 **From scaffolding to a shippable Raspberry Pi 4B+ media casting appliance.**
 
-> **Current state (as of 2026-05):** 7 Rust crates contain well-structured type
-> definitions, error enums, and trait interfaces, but every method body is a stub
-> returning errors or defaults. The browser extension has functional JS but no
-> icons or content scripts. There are zero tests, zero CI/CD pipelines, and no
-> cross-compilation setup. The documentation (7,000+ lines) is the most mature
-> artifact in the project.
+> **Current state (as of 2026-07):** All 7 Rust crates are implemented with
+> full production code. The browser extension is functional. 7 development
+> sprints are complete (see TASKS.md). 14 code reviews are in docs/blueprint/.
+> CI/CD pipelines run on every push. The appliance is deployable on Raspberry Pi
+> 4B+ via deploy.sh.
 >
 > **Target state:** A boGDan binary that boots on a Raspberry Pi 4B+, connects
 > to Tor, accepts a URL from the browser extension, resolves it via yt-dlp,

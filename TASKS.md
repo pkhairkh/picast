@@ -6,7 +6,7 @@ explicit acceptance criteria, and estimated effort.**
 
 **Status legend:** `[ ]` not started · `[~]` in progress · `[x]` done
 
-**Last verified:** 2026-05-10 — `cargo check --workspace` · `cargo test --workspace` (632 tests) · `cargo clippy --workspace -- -D warnings`
+**Last verified:** 2026-07-30 — `cargo check --workspace` · `cargo test --workspace` (632 tests) · `cargo clippy --workspace -- -D warnings`
 
 ---
 
