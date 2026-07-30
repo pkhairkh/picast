@@ -326,8 +326,11 @@ async fn handle_connect(
         let _ = cw.shutdown().await;
     });
 
-    let _ = client_to_remote.await;
-    let _ = remote_to_client.await;
+    // Use tokio::join! to wait for both directions concurrently.
+    // Sequential await would wait for client_to_remote to finish before
+    // starting to poll remote_to_client, which could delay shutdown
+    // if the remote closes first.
+    let _ = tokio::join!(client_to_remote, remote_to_client);
 
     Ok(())
 }
