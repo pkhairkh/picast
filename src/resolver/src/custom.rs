@@ -3371,7 +3371,7 @@ fn extract_player_response(html: &str) -> Option<String> {
     // The JSON starts with '{' and we need to find the matching '}'.
     // We can't just find the next ';' because the JSON may contain
     // string values with ';' inside them.
-    if html.as_bytes().get(json_start) != Some(b'{') {
+    if html.as_bytes().get(json_start) != Some(&b'{') {
         return None;
     }
 
