@@ -77,14 +77,14 @@ The yt-dlp integration module spawns `yt-dlp` as a subprocess to resolve web pag
 
 #### BUG-002: Only the first line of stderr is included in the error
 - **Severity:** Low
-- **Location:** Line 287 (`stderr.lines().next().unwrap_or("unknown error")`)
+- **Location:** Line 280 (`let error_msg = stderr.lines().next().unwrap_or("unknown error");`)
 - **Description:** When yt-dlp exits non-zero, only the first line of stderr is captured for the error message. yt-dlp's error messages often span multiple lines, with the most useful diagnostic on the second or third line.
 - **Impact:** Error messages are less helpful than they could be, making debugging harder.
 - **Recommendation:** Include the full stderr (or the last 3–5 lines) in the error message. Truncate to a reasonable length (e.g., 500 chars) to avoid log bloat.
 
 #### BUG-003: No retry on yt-dlp timeout
 - **Severity:** Low
-- **Location:** Lines 268–273 (timeout handling)
+- **Location:** Lines 263–267 (`tokio::time::timeout(Duration::from_secs(YTDLP_TIMEOUT_SECS), cmd.output())` with `ResolveError::Network` on timeout)
 - **Description:** If yt-dlp times out after 30 seconds, the error is returned immediately without retry. Tor circuit congestion can cause yt-dlp to be slow on the first attempt but succeed on a retry with a fresh circuit.
 - **Impact:** Transient Tor congestion causes resolution failure when a retry might succeed.
 - **Recommendation:** Retry once with a fresh isolation username (appending a counter) to force a new Tor circuit. The session layer's CDN retry logic handles playback failures, but resolution failures are not retried.
@@ -100,14 +100,14 @@ The yt-dlp integration module spawns `yt-dlp` as a subprocess to resolve web pag
 
 #### DESIGN-001: 30-second timeout may be too short for slow Tor circuits
 - **Severity:** Medium
-- **Location:** Line 35 (`YTDLP_TIMEOUT_SECS: u64 = 30`)
+- **Location:** Line 32 (`const YTDLP_TIMEOUT_SECS: u64 = 30;`)
 - **Description:** The yt-dlp timeout is 30 seconds. Through Tor, yt-dlp must: connect through the SOCKS proxy, resolve DNS through Tor, fetch the page, follow redirects, and extract media URLs. On a slow circuit, this can take 20–25 seconds just for the page fetch, leaving little time for extraction.
 - **Impact:** Legitimate resolutions that take 31–40 seconds on slow circuits are killed and reported as failures.
 - **Recommendation:** Increase the timeout to 45 or 60 seconds. Alternatively, make it configurable via `bogdan.toml`. The architecture doc (§8.2) notes Tor bandwidth varies, and the spec (R-014) allows 10 seconds for YouTube resolution — but that's the target, not the timeout.
 
 #### DESIGN-002: `--no-warnings` suppresses useful diagnostic output
 - **Severity:** Low
-- **Location:** Line 231 (`--no-warnings`)
+- **Location:** Line 241 (`.arg("--no-warnings")`)
 - **Description:** The `--no-warnings` flag suppresses yt-dlp's warning messages. While this keeps stderr clean, warnings often contain useful diagnostics (e.g., "format not available, falling back to...") that would help debug resolution issues.
 - **Impact:** Debugging resolution failures is harder because warnings are hidden.
 - **Recommendation:** Remove `--no-warnings` and instead filter the stderr at the application level (log warnings at `debug` level, errors at `warn` level).
@@ -123,14 +123,14 @@ The yt-dlp integration module spawns `yt-dlp` as a subprocess to resolve web pag
 
 #### SEC-001: URL passed directly to yt-dlp command line without sanitization
 - **Severity:** Low
-- **Location:** Line 255 (`cmd.arg(url)`)
+- **Location:** Line 261 (`cmd.arg(url);`)
 - **Description:** The URL is passed directly as a command-line argument to yt-dlp. While `tokio::process::Command` handles argument escaping correctly (no shell injection), a URL containing shell metacharacters or very long strings could cause issues in yt-dlp's own argument parser.
 - **Impact:** Low — `Command::arg` is safe from shell injection. But yt-dlp may behave unexpectedly with malformed URLs.
 - **Recommendation:** Validate the URL format before passing it to yt-dlp (already done by `Url::parse` in the caller). Add a length check (see resolver review SEC-001).
 
 #### SEC-002: Temp directory created in system default location
 - **Severity:** Low
-- **Location:** Line 222 (`tempfile::tempdir()`)
+- **Location:** Line 233 (`let temp_dir = tempfile::tempdir().map_err(...)`)
 - **Description:** `tempfile::tempdir()` creates a directory in the system's default temp location (`/tmp` on Linux). On a multi-user system, another user could potentially read the subtitle files before they're deleted.
 - **Impact:** Low on the appliance model (single `bogdan` user), but subtitle files may contain sensitive content (user's viewing choices).
 - **Recommendation:** Create the temp directory in the boGDan runtime directory (`/var/lib/bogdan/tmp/` or similar) with restrictive permissions (`0o700`).
