@@ -42,7 +42,7 @@ The server entry point initializes tracing, loads configuration, wires up all su
 
 #### BUG-002: Resolver cache path hardcoded to `/var/lib/bogdan/resolve-cache.db`
 - **Severity:** Low
-- **Location:** Line 340 (`cache_path` hardcoded)
+- **Location:** Line 345 (`let cache_path = std::path::Path::new("/var/lib/bogdan/resolve-cache.db");`)
 - **Description:** The resolver cache path is hardcoded to `/var/lib/bogdan/resolve-cache.db`. The config module has a `db_path` for the session database, but there's no config option for the resolver cache path. If `/var/lib/bogdan/` doesn't exist or isn't writable, the persistent cache fails silently (the resolver falls back to in-memory cache).
 - **Impact:** On a misconfigured system (missing `/var/lib/bogdan/`), the cache doesn't persist across restarts, causing re-resolution of recently-cast URLs.
 - **Recommendation:** Add a `resolver_cache_path` field to `ServerConfig` (or a new `ResolverConfig`), defaulting to `/var/lib/bogdan/resolve-cache.db`. Log an error if the directory doesn't exist or isn't writable.
@@ -56,7 +56,7 @@ The server entry point initializes tracing, loads configuration, wires up all su
 
 #### BUG-004: `expect()` on SIGTERM handler installation can panic at startup
 - **Severity:** Low
-- **Location:** Line 258 (`expect("failed to install SIGTERM handler")`)
+- **Location:** Line 261 (`.expect("failed to install SIGTERM handler")`)
 - **Description:** The SIGTERM handler installation uses `.expect()` which panics on failure. While SIGTERM handler installation rarely fails, a panic at this point would exit the process without cleanup.
 - **Impact:** Low — `signal::unix::signal` only fails on invalid signal kinds or resource exhaustion. But panicking is not graceful.
 - **Recommendation:** Use `?` instead of `expect()` and return the error from `main()`. Or use `match` with a clear error message.
@@ -86,7 +86,7 @@ The server entry point initializes tracing, loads configuration, wires up all su
 
 #### DESIGN-004: No version reporting in logs or API
 - **Severity:** Low
-- **Location:** Line 23 (`VERSION` constant)
+- **Location:** Line 30 (`const VERSION: &str = env!("CARGO_PKG_VERSION");`)
 - **Description:** The `VERSION` constant is defined from `CARGO_PKG_VERSION` but is never logged at startup or exposed via the `/api/health` endpoint. Debugging issues without knowing the version is harder.
 - **Impact:** Support requests can't easily identify the running version.
 - **Recommendation:** Log the version at startup: `info!(version = VERSION, "boGDan starting")`. Add a `version` field to the `HealthResponse` in the HTTP API.
