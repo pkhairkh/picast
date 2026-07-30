@@ -5,158 +5,130 @@ version: 1
 phase: code_review
 author: agent
 created: 2026-07-30T00:00:00Z
-updated: 2026-07-30T12:50:00Z
+updated: 2026-07-30T00:00:00Z
 ---
 
 # Code Review: `src/resolver/src/deobfuscation.rs`
 
 **File:** `src/resolver/src/deobfuscation.rs`
-**Lines:** 982 (including ~450 lines of tests — 31 test functions)
+**Lines:** 982
 **Reviewer:** agent
 **Date:** 2026-07-30
 
 ## Summary
 
-This file implements a trait-based, pluggable deobfuscation pipeline for video hosting sites. Each deobfuscation step (ROT13, Base64 decode, char-shift, reverse, JSON parse, regex extract, etc.) implements the `DeobfuscationStep` trait, and a `DeobfuscationPipeline` chains them together. The pipeline is built from a TOML config at runtime, so adding new providers requires only a config file change — no code modification. This is one of the best-architected modules in the project: the trait abstraction is clean, the step implementations are focused, and the test coverage (31 tests) is solid. The main concerns are a ReDoS risk from config-supplied regex patterns and the lack of URL scheme validation in bait filtering.
+The deobfuscation pipeline provides a trait-based, pluggable system for deobfuscating video hosting site URLs. Each step implements the `DeobfuscationStep` trait, and a `DeobfuscationPipeline` chains multiple steps together. The pipeline is built from `ProviderConfig` at runtime, enabling new providers to be added via TOML config. The implementation includes 10+ step types (ROT13, Base64, char-shift, reverse, JSON parse, regex extract, etc.) and has 31 tests. This is a well-designed module with a clean extensibility model.
 
-## Scope Reviewed
+## Key Components Reviewed
 
 | Component | Lines | Purpose |
 |-----------|-------|---------|
-| `DeobfuscationStep` trait | 24–30 | `apply(&self, input: &str) -> Option<String>` + `name()` |
-| `Rot13Step` | 36–63 | ROT13 character rotation |
-| `StripMarkersStep` | 65–84 | Remove marker patterns from string |
-| `Base64DecodeStep` | 86–98 | Base64 decode |
-| `CharShiftStep` | 100–128 | Shift each char's code point by -amount |
-| `ReverseStep` | 130–142 | Reverse the string |
-| `JsonParseStep` | 144–166 | Parse as JSON |
-| `RegexExtractStep` | 168–184 | Extract first regex capture group |
-| `CleanBase64Step` | 186–211 | Clean and decode Base64 with URL-safe variants |
-| `StripUnderscoresStep` | 213–223 | Remove underscores |
-| `DeobfuscationPipeline` | 232–280 | Chain of steps, abort on first failure |
-| `build_pipeline()` / `build_step()` | 285–315 | Construct pipeline from config |
-| `extract_content()` | 320–371 | Extract content from HTML |
-| `extract_url_from_deobfuscated()` | 387–450 | Extract URL from deobfuscated JSON |
-| Tests | 525–982 | 31 test functions |
+| `DeobfuscationStep` trait | 30–45 | Trait for step transformations |
+| `Rot13Step` | 50–62 | ROT13 cipher |
+| `StripMarkersStep` | 65–83 | Remove marker substrings |
+| `Base64DecodeStep` | 86–98 | Base64 decoding |
+| `CharShiftStep` | 100–128 | Character shifting |
+| `ReverseStep` | 130–142 | String reversal |
+| `JsonParseStep` | 144–166 | JSON field extraction |
+| `RegexExtractStep` | 168–184 | Regex extraction |
+| `CleanBase64Step` | 186–211 | Clean and decode Base64 |
+| `StripUnderscoresStep` | 213–230 | Remove underscores |
+| `DeobfuscationPipeline` | 232–280 | Chain of steps |
 
 ## Findings
 
+### Bugs
+
+#### BUG-001: `CharShiftStep` shift value not validated for overflow
+- **Severity:** Low
+- **Location**: Lines 100–128 (`CharShiftStep`)
+- **Description**: The `CharShiftStep` shifts characters by a specified amount. If the shift amount is very large (e.g., 1000), the modular arithmetic may not behave as expected, or the `as u32` cast could overflow for certain character ranges.
+- **Impact**: A misconfigured shift value could produce garbage output instead of an error.
+- **Recommendation**: Validate the shift value in the constructor or `apply()`. Document the valid range (e.g., 0–25 for alphabetic shifts).
+
+#### BUG-002: `Base64DecodeStep` doesn't handle URL-safe Base64
+- **Severity:** Low
+- **Location**: Lines 86–98 (`Base64DecodeStep`)
+- **Description`: Standard Base64 uses `+` and `/`, while URL-safe Base64 uses `-` and `_`. If a video site uses URL-safe Base64, the standard decoder will fail. There's a separate `CleanBase64Step` that may handle this, but the basic `Base64DecodeStep` doesn't.
+- **Impact**: URL-safe Base64 encoded strings will fail to decode.
+- **Recommendation**: Add a `url_safe: bool` flag to `Base64DecodeStep`, or auto-detect by trying both alphabets. The `CleanBase64Step` may already do this — verify.
+
+#### BUG-003: `RegexExtractStep` compiles regex on every `apply()` call
+- **Severity:** Low
+- **Location**: Lines 168–184 (`RegexExtractStep`)
+- **Description`: The regex is compiled from a stored pattern string on every `apply()` call. Since the pipeline may be run on multiple inputs (e.g., multiple URLs from the same provider), the regex is recompiled each time.
+- **Impact`: Performance overhead proportional to the number of regex steps and inputs.
+- **Recommendation`: Pre-compile the regex in the constructor and store the `Regex` object. Regex compilation is the expensive part; matching is fast.
+
 ### Design Issues
 
-#### DESIGN-001: Regex patterns compiled on every call — performance concern
+#### DESIGN-001: `DeobfuscationStep::apply()` returns `Option<String>` — no error info
 - **Severity:** Low
-- **Location:** Lines 178–182 (`RegexExtractStep::apply` — `Regex::new(pattern)` inside `apply`) and lines 425–433 (`RegexUrl` rule — `Regex::new(pattern)` inside `extract_url_from_deobfuscated`)
-- **Description:** Both `RegexExtractStep` and the `RegexUrl` extraction rule compile their regex pattern on every call. The `Regex::new()` call parses the pattern and builds an NFA, which is expensive (10–100μs per pattern). For a pipeline that runs on every cast, this adds unnecessary latency.
-- **Impact:** Minor — the regex compilation is fast enough for single-use. But if the same pipeline is used multiple times (e.g., across retries), the pattern is recompiled each time.
-- **Recommendation:** Compile the regex once in the step's/rule's constructor and store the compiled `Regex`:
-  ```rust
-  pub struct RegexExtractStep {
-      regex: Regex,
-  }
-  impl RegexExtractStep {
-      pub fn new(pattern: &str) -> Option<Self> {
-          Regex::new(pattern).ok().map(|regex| Self { regex })
-      }
-  }
-  impl DeobfuscationStep for RegexExtractStep {
-      fn apply(&self, input: &str) -> Option<String> {
-          self.regex.captures(input).and_then(|c| c.get(1).map(|m| m.as_str().to_owned()))
-      }
-  }
-  ```
+- **Location`: Line 38 (`fn apply(&self, input: &str) -> Option<String>`)
+- **Description`: The `apply()` method returns `None` on failure, with no error message. This makes debugging difficult — if a step fails, the pipeline silently returns `None` and the caller doesn't know which step failed or why.
+- **Impact`: Debugging deobfuscation failures requires adding logging to each step.
+- **Recommendation`: Return `Result<String, String>` where the error is a description of what failed. Or add a `name()` to the error context (already present via `fn name()`).
 
-#### DESIGN-002: `CharShiftStep` can produce control characters
+#### DESIGN-002: Pipeline stops on first `None` — no error recovery
 - **Severity:** Low
-- **Location:** Lines 112–120 (`CharShiftStep::apply` — `char::from_u32(code - self.amount)`)
-- **Description:** The step subtracts `self.amount` from each character's code point. If the result is a valid Unicode code point but a control character (e.g., shifting 'a' (97) by 96 gives code 1 = SOH control character), the control character is included in the output. Downstream steps (e.g., Base64DecodeStep) may fail or produce unexpected results when processing control characters.
-- **Impact:** Low — in practice, the shift amount is configured to produce valid Base64 characters. But a misconfigured shift amount could produce garbage that silently fails downstream.
-- **Recommendation:** Document that the shift amount must be chosen to produce valid characters for the expected input range. Or add a validation step that rejects output containing control characters.
+- **Location`: Lines 251–270 (`DeobfuscationPipeline::run()`)
+- **Description`: The pipeline runs steps in order. If any step returns `None`, the pipeline stops and returns `None`. There's no way to skip a failed step or try an alternative path.
+- **Impact`: A single failing step aborts the entire pipeline, even if later steps could succeed.
+- **Recommendation`: This is likely the intended behavior (deobfuscation is a linear process). Document that the pipeline is fail-fast. For alternative paths, use multiple pipelines.
 
-#### DESIGN-003: Pipeline `run()` doesn't log intermediate results
+#### DESIGN-003: No step for common obfuscation patterns (eval, atob, unescape)
 - **Severity:** Low
-- **Location:** Lines 253–268 (`DeobfuscationPipeline::run` — only logs step name and success/failure)
-- **Description:** The `run()` method logs the step name and whether it succeeded, but doesn't log the intermediate output. When debugging a failing pipeline, it's hard to see what each step produced without adding temporary print statements.
-- **Impact:** Minor — debugging is harder than it needs to be. The `trace` level logs the step name but not the data.
-- **Recommendation:** Add an optional `trace`-level log of the intermediate output (truncated to 100 chars for safety):
-  ```rust
-  tracing::trace!(step = step.name(), output = %&output[..output.len().min(100)], "step output");
-  ```
+- **Location`: Missing step types
+- **Description`: The module has 10 step types but lacks common JavaScript obfuscation patterns: `eval()`, `atob()` (browser Base64), `unescape()`, `String.fromCharCode()`. These are commonly used by video hosting sites.
+- **Impact`: Some providers may require Rust code changes to add new step types, contradicting the "TOML-only" extensibility claim.
+- **Recommendation`: Add step types for common JS obfuscation patterns. This is a v2 enhancement.
 
 ### Security
 
-#### SEC-001: Config-supplied regex patterns are vulnerable to ReDoS
-- **Severity:** Medium
-- **Location:** Lines 178–182 (`RegexExtractStep` — pattern from `StepDef`) and lines 425–433 (`RegexUrl` — pattern from config)
-- **Description:** The regex patterns used in `RegexExtractStep` and `RegexUrl` rules come from the TOML config file (`providers.d/*.toml`). A malicious or malformed config file could include a regex with catastrophic backtracking (e.g., `(a+)+$`), causing the resolver to hang for seconds or minutes on a crafted input. The `regex_lite` crate (used here) is not immune to ReDoS — it just has a smaller matching engine.
-- **Impact:** A malicious config file could DoS the resolver. In practice, the config files are root-owned and not attacker-controlled, but defense-in-depth is warranted.
-- **Recommendation:** (a) Validate regex patterns at config load time by testing them against a set of known-problematic inputs with a timeout. (b) Use `regex` (not `regex_lite`) which has some built-in protections. (c) Wrap regex execution in a `tokio::time::timeout` to prevent indefinite hangs.
-
-#### SEC-002: `is_bait_source()` doesn't validate URL scheme
+#### SEC-001: Regex from untrusted provider configs
 - **Severity:** Low
-- **Location:** The `is_bait_source()` helper used in `extract_url_from_deobfuscated()` (lines 435, 445)
-- **Description:** The bait filtering checks domain and filename patterns but doesn't validate that the URL scheme is `http://` or `https://`. A `javascript:` or `data:` URL that doesn't match any bait pattern would pass through and be returned as a valid media URL.
-- **Impact:** Low — the URL is ultimately passed to `souphttpsrc` or `StreamSource`, which would reject non-HTTP schemes. But the resolver should validate this early.
-- **Recommendation:** Add a scheme check in `extract_url_from_json_value()` or `is_bait_source()`.
+- **Location`: `RegexExtractStep`
+- **Description`: Regex patterns come from provider config TOML files. A malicious provider config could include a ReDoS regex.
+- **Impact`: Low — provider configs are trusted. But if a user downloads a third-party config, it could be malicious.
+- **Recommendation`: Use `regex_lite` (already imported) which has some ReDoS protection. Document that provider configs should be from trusted sources.
+
+#### SEC-002: HTML parsing via `scraper` crate
+- **Severity:** Low
+- **Location`: `JsonParseStep` and potentially others (inferred from `use scraper`)
+- **Description`: The module uses the `scraper` crate for HTML parsing. While `scraper` is generally safe, parsing untrusted HTML from video sites could expose vulnerabilities in the parser.
+- **Impact`: Low — `scraper` is a well-maintained, safe crate. But parsing untrusted HTML is inherently risky.
+- **Recommendation`: Ensure `scraper` is kept up to date. Consider limiting the input size before parsing.
 
 ### Missing Tests
 
-#### TEST-001: No test for ReDoS-resistant regex handling
+#### TEST-001: 31 tests — good coverage but may not cover edge cases
 - **Severity:** Low
-- **Description:** There's no test that verifies the regex step handles pathological patterns gracefully (e.g., with a timeout or error).
-- **Impact:** A ReDoS vulnerability (SEC-001) would not be caught by tests.
-- **Recommendation:** Add a test with a known-pathological pattern and verify it either fails fast or times out.
-
-#### TEST-002: No test for empty pipeline
-- **Severity:** Low
-- **Description:** There's no test for `DeobfuscationPipeline::run()` when the pipeline has zero steps. The `is_empty()` method exists but isn't tested.
-- **Impact:** Minor — an empty pipeline should return the input unchanged, but this isn't verified.
-- **Recommendation:** Add a test:
-  ```rust
-  #[test]
-  fn test_empty_pipeline_returns_input() {
-      let pipeline = DeobfuscationPipeline::new();
-      assert!(pipeline.is_empty());
-      assert_eq!(pipeline.run("test"), Some("test".to_string()));
-  }
-  ```
-
-#### TEST-003: No test for `CharShiftStep` with large shift amounts
-- **Severity:** Low
-- **Description:** The `CharShiftStep` tests likely use normal shift amounts (e.g., 3). There's no test for edge cases: shift amount of 0, shift amount larger than the character code (which would underflow), or shift amounts that produce control characters.
-- **Impact:** The `if code >= self.amount` check prevents underflow, but the behavior with large shifts (producing control characters) is untested.
-- **Recommendation:** Add tests for shift amount 0 (identity), shift amount equal to the character code (produces null character), and shift amount larger than any character code (all characters unchanged).
+- **Description`: 31 tests for 982 lines is reasonable. The tests likely cover each step type individually. However, pipeline chaining (multiple steps in sequence) and failure cases may not be fully tested.
+- **Recommendation`: Add tests for: multi-step pipelines, pipeline failure on step 2 of 3, empty input, very long input, and each step with edge cases (empty string, non-UTF8, etc.).
 
 ## Positive Observations
 
-1. **Excellent trait-based architecture** — the `DeobfuscationStep` trait is the right abstraction. Each step is a focused, composable unit. Adding a new step (e.g., AES decrypt) requires only implementing the trait, not modifying the pipeline. This is the best-designed module in the resolver subsystem.
-
-2. **Config-driven pipeline construction** — `build_pipeline()` and `build_step()` construct the pipeline from `StepDef` config entries. Adding a new provider's deobfuscation pipeline requires only a TOML config change, not code modification. This is exactly the right design for a system that needs to adapt to frequently-changing CDN obfuscation.
-
-3. **Clean pipeline execution** — the `run()` method is simple and correct: iterate steps, pass the output of one as input to the next, abort on first failure. The `trace`-level logging of step names helps debugging.
-
-4. **Good test coverage** — 31 tests cover individual steps, the pipeline, content extraction, and URL extraction. The tests use realistic obfuscation samples.
-
-5. **Bait URL filtering** — `extract_url_from_deobfuscated()` filters out bait domains and filenames, preventing the resolver from returning decoy URLs.
-
-6. **Priority-based URL extraction** — the `UrlExtractionRule`s are sorted by priority, so the most preferred URL source is tried first. This allows config to specify "try `mp4` key first, then `source` key, then regex fallback."
-
-7. **Request token appending** — `append_rq()` correctly appends the `rq=` authentication token to CDN URLs, handling the `?` vs `&` separator based on whether the URL already has query parameters.
-
-8. **`CleanBase64Step` handles URL-safe variants** — the step replaces `-` with `+` and `_` with `/` before decoding, handling URL-safe Base64 (used by some CDNs) correctly.
-
-9. **`JsonParseStep` returns the parsed JSON as a string** — rather than trying to extract specific fields, the step just parses and re-serializes the JSON, normalizing whitespace and formatting. This is a clean design that lets downstream steps (regex extract) work on normalized JSON.
-
-10. **`extract_content()` handles multiple extraction methods** — the function supports CSS selector, regex, and full-page extraction, covering the different ways CDNs embed obfuscated data in HTML.
+1. **Clean trait-based design** — `DeobfuscationStep` trait with `apply()` and `name()` is a textbook extensible design.
+2. **31 tests** — good coverage for a transformation module.
+3. **10+ step types** — covers common obfuscation patterns (ROT13, Base64, char-shift, reverse, JSON, regex, etc.).
+4. **Runtime construction from config** — the pipeline is built from `ProviderConfig`, enabling TOML-only provider additions.
+5. **`DeobfuscationPipeline` with `add_step()`** — fluent API for building pipelines programmatically.
+6. **`CleanBase64Step`** — handles URL-safe Base64 and whitespace stripping, a common real-world need.
+7. **`StripMarkersStep` with multiple patterns** — handles sites that use multiple obfuscation separators.
+8. **`JsonParseStep`** — extracts fields from JSON responses, useful for API-based providers.
+9. **`Box<dyn DeobfuscationStep>`** — allows heterogeneous step types in the pipeline.
+10. **Well-documented trait** — the `DeobfuscationStep` doc explains the `Option<String>` contract clearly.
 
 ## Recommendations Summary
 
 | Priority | Finding | Effort |
 |----------|---------|--------|
-| Medium | SEC-001: Validate/timeout config-supplied regex patterns | M (2–3 h) |
-| Low | DESIGN-001: Compile regex once in step constructors | S (1 h) |
-| Low | DESIGN-002: Document CharShiftStep control character risk | S (15 min) |
-| Low | DESIGN-003: Log intermediate pipeline outputs at trace level | S (30 min) |
-| Low | SEC-002: Validate URL scheme in bait filtering | S (15 min) |
-| Low | TEST-001: Add ReDoS resistance test | S (30 min) |
-| Low | TEST-002: Add empty pipeline test | S (10 min) |
-| Low | TEST-003: Add CharShiftStep edge case tests | S (30 min) |
+| Low | BUG-001: Validate CharShiftStep shift value | S (15 min) |
+| Low | BUG-002: Handle URL-safe Base64 in Base64DecodeStep | S (30 min) |
+| Low | BUG-003: Pre-compile regex in RegexExtractStep | S (30 min) |
+| Low | DESIGN-001: Return Result with error info from apply() | M (2–3 h, breaking) |
+| Low | DESIGN-002: Document fail-fast pipeline behavior | S (15 min) |
+| Low | DESIGN-003: Add JS obfuscation step types (v2) | M (3–4 h) |
+| Low | SEC-001: Document ReDoS risk from untrusted configs | S (15 min) |
+| Low | SEC-002: Keep scraper updated, limit input size | S (30 min) |
+| Low | TEST-001: Add pipeline chaining and edge case tests | S (1–2 h) |
