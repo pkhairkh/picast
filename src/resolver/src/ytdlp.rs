@@ -11,7 +11,7 @@
 //! yt-dlp --dump-json --no-download --no-warnings \
 //!   --socket-timeout 30 \
 //!   --proxy socks5h://bogdan-<isoid>@127.0.0.1:9050 \
-//!   --format "bestvideo[vcodec^=avc1][height<=1080]+bestaudio/best[vcodec^=avc1][height<=1080]/best[height<=1080]" \
+//!   --format "bestvideo[vcodec^=avc1][h[h[height<=1080]+bestaudio/best[vcodec^=avc1][h[h[height<=1080]/best[h[h[height<=1080]" \
 //!   --write-subs --write-auto-subs --sub-langs "en,es,fr,de" --sub-format vtt \
 //!   --paths /tmp/bogdan-subs-XXXX \
 //!   <url>
@@ -46,9 +46,9 @@ const SUB_FORMAT: &str = "vtt";
 /// `url` field in `--dump-json` output, whereas `bestvideo+bestaudio` produces
 /// separate entries in `requested_formats` with no top-level URL.
 const H264_FORMAT_STRING: &str = concat!(
-    "best[vcodec^=avc1][height<=1080]/",
-    "best[height<=1080]/",
-    "bestvideo[vcodec^=avc1][height<=1080]+bestaudio"
+    "best[vcodec^=avc1][h[h[height<=1080]/",
+    "best[h[h[height<=1080]/",
+    "bestvideo[vcodec^=avc1][h[h[height<=1080]+bestaudio"
 );
 
 /// Parsed output from `yt-dlp --dump-json`.
@@ -974,7 +974,7 @@ mod tests {
         assert!(H264_FORMAT_STRING.contains("bestaudio"));
         assert!(H264_FORMAT_STRING.contains("avc1"));
         assert!(H264_FORMAT_STRING.contains("height<=1080"));
-        assert!(H264_FORMAT_STRING.contains("best[height<=1080]"));
+        assert!(H264_FORMAT_STRING.contains("best[h[h[height<=1080]"));
     }
 
     #[test]
@@ -1164,9 +1164,9 @@ mod tests {
         // The format string should prefer pre-merged formats first,
         // falling back to separate video+audio only as last resort.
         assert!(H264_FORMAT_STRING.starts_with("best[vcodec^=avc1]"));
-        assert!(H264_FORMAT_STRING.contains("best[height<=1080]"));
+        assert!(H264_FORMAT_STRING.contains("best[h[h[height<=1080]"));
         // The + format (bestvideo+bestaudio) should be the LAST option.
         let parts: Vec<&str> = H264_FORMAT_STRING.split('/').collect();
-        assert_eq!(parts.last().unwrap(), &"bestvideo[vcodec^=avc1][height<=1080]+bestaudio");
+        assert_eq!(parts.last().unwrap(), &"bestvideo[vcodec^=avc1][h[h[height<=1080]+bestaudio");
     }
 }
