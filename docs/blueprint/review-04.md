@@ -5,7 +5,7 @@ version: 1
 phase: code_review
 author: agent
 created: 2026-07-30T00:00:00Z
-updated: 2026-07-30T11:30:00Z
+updated: 2026-07-30T11:55:00Z
 ---
 
 # Code Review: `src/session/src/lib.rs`
@@ -96,12 +96,12 @@ The session manager is the central coordinator of boGDan. It owns the SQLite-bac
 - **Impact:** The state machine invariant (`can_transition_to`) can be violated by direct field mutation. Bugs from invalid states are possible.
 - **Recommendation:** Make the fields private and provide methods for state transitions (`session.set_state(PlayerState::Playing)?`). For tests, provide a `MediaSession::new_for_testing()` builder that can set arbitrary state.
 
-#### DESIGN-004: No session history or cleanup of old sessions
+#### DESIGN-004: Session cleanup exists but could be improved
 - **Severity:** Low
-- **Location:** Throughout (no cleanup method found)
-- **Description:** Sessions are inserted into SQLite but never deleted. Over time, the database will grow with old session records. There's no `delete_session`, `cleanup_old_sessions`, or TTL mechanism.
-- **Impact:** On an always-on appliance, the SQLite database will grow indefinitely. After months of use, it could consume significant SD card space and slow down queries.
-- **Recommendation:** Add a `cleanup_old_sessions(older_than: Duration)` method and call it on startup or periodically. Keep only the last N sessions or sessions from the last 7 days.
+- **Location:** `cleanup_stale_sessions` at line 1318, `recover_crashed_sessions` at line 1339, `delete_session` at line 1231
+- **Description:** The session layer DOES have cleanup mechanisms: `cleanup_stale_sessions()` deletes sessions older than 24 hours (called on startup), `recover_crashed_sessions()` resets non-idle sessions to Idle on startup, and `delete_session()` is called by `stop()` to remove the active session. However, the 24-hour TTL is hardcoded, there's no index on `updated_at` to speed up the cleanup query, and there's no `list_sessions()` method for an admin UI to view session history before it's deleted.
+- **Impact:** Minor — the database is bounded by the 24h cleanup, so it won't grow indefinitely. But the hardcoded TTL can't be tuned, and there's no observability into session history.
+- **Recommendation:** (a) Add a `CREATE INDEX IF NOT EXISTS idx_sessions_updated_at ON sessions(updated_at)` to speed up the cleanup query. (b) Make the 24-hour TTL configurable via `bogdan.toml`. (c) Add a `list_sessions(limit: u32)` method for a future admin/debug dashboard. (d) Consider a `clear_history()` method for a "clear viewing history" button in the web UI.
 
 ### Security
 
@@ -121,17 +121,17 @@ The session manager is the central coordinator of boGDan. It owns the SQLite-bac
 
 ### Missing Tests
 
-#### TEST-001: No tests for state transition validation
-- **Severity:** Medium
-- **Description:** The `PlayerState::can_transition_to` method defines the valid state transitions, but there are no tests verifying that invalid transitions are rejected. For example, there's no test that `Idle → Playing` fails, or that `Error → Playing` fails.
-- **Impact:** A bug in the transition table (e.g., accidentally allowing `Idle → Playing`) would not be caught.
-- **Recommendation:** Add exhaustive tests for all 7×7 = 49 transition combinations, verifying which are valid and which are rejected.
+#### TEST-001: State transition tests exist but lack a full 7×7 matrix
+- **Severity:** Low
+- **Description:** The file DOES have state transition tests — 19 tests covering valid transitions (`test_idle_can_resolve`, `test_buffering_can_play`, `test_playing_can_pause`, etc.) and invalid transitions (`test_idle_cannot_play`, `test_idle_cannot_seek`, `test_playing_cannot_resolve`, `test_seeking_to_paused_invalid`, `test_error_to_playing_invalid`, `test_transition_failure`, `test_try_transition_invalid`). However, these are individual case-by-case tests rather than an exhaustive 7×7 = 49 combination matrix.
+- **Impact:** Low — the existing tests cover all the important transitions. A full matrix test would be more about documentation than catching bugs.
+- **Recommendation:** Add a single parametric test that iterates over all 49 (from, to) pairs and asserts the result matches `can_transition_to`. This serves as a living document of the transition table.
 
-#### TEST-002: No tests for `load()` success/failure paths
+#### TEST-002: `load()` has unit tests but the CDN retry path is untested
 - **Severity:** Medium
-- **Description:** The `load()` method is the most complex method in the file (250+ lines) and has no unit tests. It's only exercised through integration tests.
-- **Impact:** Regressions in the CDN retry logic, state transitions, or error cleanup would not be caught at the unit level.
-- **Recommendation:** Add unit tests with mock subsystems (mock resolver, mock playback, mock display, mock tor) that verify: successful load, resolution failure, playback failure, CDN retry success, CDN retry exhaustion, and `AlreadyActive` rejection.
+- **Description:** The file DOES have 7 `load()` unit tests with mock subsystems: `test_load_creates_session_and_resolves`, `test_load_already_active_returns_conflict`, `test_load_without_subsystems_uses_url_directly`, `test_load_acquires_display`, `test_load_emits_buffering_event`, `test_load_broadcasts_events`, `test_resolved_event_includes_title`. These cover the happy path, conflict rejection, and display acquisition. However, the CDN 403 retry loop within `load()` (lines 795–925) — the most complex code path — has no test coverage. There's no test that verifies retry behavior when `play()` returns a CDN error, no test for `is_cdn_retryable_error`, and no test for the `re_resolve` path.
+- **Impact:** A regression in the CDN retry logic (wrong retry count, wrong isolation username after re-resolve, infinite loop) would not be caught by CI.
+- **Recommendation:** Add a `MockPlayback` variant that fails the first N `play()` calls with a "CDN IP mismatch" error and succeeds on the Nth. Verify: `resolver.invalidate_cache()` is called, `re_resolve()` produces a new URL, the retry count matches `max_retries` (2), and after exhaustion the session transitions to `Error` with `active_session_id` cleared.
 
 #### TEST-003: No tests for CDN retry logic specifically
 - **Severity:** Medium
@@ -139,11 +139,11 @@ The session manager is the central coordinator of boGDan. It owns the SQLite-bac
 - **Impact:** A change that breaks the IP-binding invariant (e.g., using a different isolation username after re-resolve) would cause CDN 403 loops and not be caught by tests.
 - **Recommendation:** Extract the retry logic (per DESIGN-001) and test it with a mock playback engine that returns `CdnForbidden` on the first call and succeeds on the second. Verify the same isolation username is used for both calls.
 
-#### TEST-004: No tests for concurrent session access
+#### TEST-004: Concurrent access tests exist but could be more adversarial
 - **Severity:** Low
-- **Description:** The `SessionManager` is designed for concurrent access (wrapped in `Arc`, shared across protocol handlers), but there are no tests for concurrent `load()`, `stop()`, `pause()` calls.
-- **Impact:** Race conditions (e.g., two concurrent `load()` calls) would not be caught.
-- **Recommendation:** Add tests using `tokio::spawn` to call multiple session methods concurrently and verify the state remains consistent.
+- **Description:** The file DOES have 4 concurrent access tests: `test_concurrent_load_rejected` (verifies `AlreadyActive` on concurrent load), `test_concurrent_pause_and_resume` (verifies at least one succeeds), `test_concurrent_set_volume_safe` (10 concurrent volume sets), and `test_concurrent_status_reads` (20 concurrent readers). These cover the basic concurrency invariants. However, there's no test for concurrent `stop()` + `load()` (the most dangerous race — a new session starting before the old one fully tears down), and no test for concurrent `seek()` + `stop()`.
+- **Impact:** Low — the existing tests cover the common cases. The missing edge cases are unlikely but could expose subtle state-machine bugs.
+- **Recommendation:** Add a test that spawns `stop()` and `load()` concurrently and verifies the system never ends up in a state where `active_session_id` is `None` but a pipeline is still running, or vice versa.
 
 ## Positive Observations
 
@@ -163,15 +163,14 @@ The session manager is the central coordinator of boGDan. It owns the SQLite-bac
 | Medium | BUG-001: Remove hardcoded 300ms sleep, rely on display retry | S (1 h) |
 | Medium | BUG-002: Audit Mutex usage near .await points | M (2–4 h) |
 | Medium | DESIGN-001: Extract CDN retry logic into testable method | M (3–4 h) |
-| Medium | TEST-001: Add state transition validation tests | S (2 h) |
-| Medium | TEST-002: Add load() unit tests with mocks | L (4–8 h) |
-| Medium | TEST-003: Add CDN retry logic tests | M (3–4 h) |
+| Medium | TEST-002/003: Add CDN retry logic tests (load() happy path is tested, retry path is not) | M (3–4 h) |
 | Low | BUG-003: Use typed errors instead of string matching for CDN | M (2 h) |
 | Low | BUG-004: Document the reserved-slot race window | S (30 min) |
 | Low | BUG-005: Log discarded transition errors | S (30 min) |
 | Low | DESIGN-002: Increase broadcast capacity or implement resync | M (2 h) |
 | Low | DESIGN-003: Encapsulate MediaSession fields | M (3–4 h) |
-| Low | DESIGN-004: Add session cleanup/TTL | S (1–2 h) |
+| Low | DESIGN-004: Add index on updated_at, make TTL configurable | S (1 h) |
 | Low | SEC-001: Validate SQLite database path | S (30 min) |
 | Low | SEC-002: Document plaintext URL storage or encrypt | S (1 h) |
-| Low | TEST-004: Add concurrent access tests | M (2–3 h) |
+| Low | TEST-001: Add full 7×7 state transition matrix test | S (1 h) |
+| Low | TEST-004: Add adversarial concurrent stop()+load() test | S (1–2 h) |
