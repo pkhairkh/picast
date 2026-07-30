@@ -77,9 +77,9 @@ Conventions:
 
 ### Immediate (this week)
 
-1. **Merge blueprint branches to `main`** in dependency order: `docs/blueprint-rough-draft` → `docs/blueprint-adrs` → `docs/blueprint-fine-draft` → `docs/blueprint-spec` → `docs/blueprint-tasks` → `docs/blueprint-progress`. Each is a docs-only PR with no source-code impact.
-2. **Open 6 GitHub PRs** (one per branch) so reviewers can sign off per phase. Suggested reviewers: project maintainer (all phases), ENG-RUST (fine_draft, spec, tasks), ENG-TOR (rough_draft, adrs, spec for Tor-related requirements), ENG-PI (fine_draft for hardware, tasks for milestone estimates).
-3. **Update `docs/AGENT.md`** to reference the blueprint pipeline so new contributors and AI agents find the canonical docs.
+1. **Merge blueprint branches to `main`** in dependency order: `docs/blueprint-problem-catalog` → `docs/blueprint-rough-draft` → `docs/blueprint-adrs` → `docs/blueprint-fine-draft` → `docs/blueprint-spec` → `docs/blueprint-tasks` → `docs/blueprint-progress`. Each is a docs-only PR with no source-code impact.
+2. **Open 7 GitHub PRs** (one per branch) so reviewers can sign off per phase. Suggested reviewers: project maintainer (all phases), ENG-RUST (fine_draft, spec, tasks), ENG-TOR (rough_draft, adrs, spec for Tor-related requirements), ENG-PI (fine_draft for hardware, tasks for milestone estimates).
+3. **Update `AGENT.md`** to reference the blueprint pipeline so new contributors and AI agents find the canonical docs.
 
 ### Short-term (next 2 weeks)
 
