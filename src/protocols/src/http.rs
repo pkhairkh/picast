@@ -214,11 +214,13 @@ impl HttpApiServer {
                     let rate_limiter = self.rate_limiter.clone();
 
                     tokio::spawn(async move {
+                        let remote_addr = remote;
                         let service = service_fn(move |req| {
                             let session = session.clone();
                             let rate_limiter = rate_limiter.clone();
+                            let remote_addr = remote_addr;
                             async move {
-                                match handle_request(req, &session, &rate_limiter).await {
+                                match handle_request(req, &session, &rate_limiter, remote_addr).await {
                                     Ok(resp) => Ok(resp),
                                     Err(e) => {
                                         tracing::warn!(error = %e, "request handler error");
@@ -279,7 +281,7 @@ impl HttpApiServer {
 }
 
 /// Extract the client IP from the request's remote address or headers.
-fn extract_client_ip(parts: &hyper::http::request::Parts) -> String {
+fn extract_client_ip(parts: &hyper::http::request::Parts, remote_addr: std::net::SocketAddr) -> String {
     // Try X-Forwarded-For first (if behind a reverse proxy).
     if let Some(xff) = parts.headers.get("x-forwarded-for") {
         if let Ok(val) = xff.to_str() {
@@ -289,10 +291,10 @@ fn extract_client_ip(parts: &hyper::http::request::Parts) -> String {
             }
         }
     }
-    // Fall back to a placeholder — in practice, the remote IP is
-    // available from the TCP accept but not from the HTTP request
-    // parts. For a LAN-only device this is acceptable.
-    "unknown".to_owned()
+    // Fall back to the TCP remote address. On a LAN-only device without
+    // a reverse proxy, this gives per-IP rate limiting rather than a
+    // single global "unknown" bucket.
+    remote_addr.ip().to_string()
 }
 
 /// Route and handle an incoming HTTP request.
@@ -300,6 +302,7 @@ async fn handle_request(
     req: Request<Incoming>,
     session: &Arc<SessionManager>,
     rate_limiter: &Arc<Mutex<RateLimiter>>,
+    remote_addr: std::net::SocketAddr,
 ) -> Result<Response<BoxBody>> {
     let (parts, body) = req.into_parts();
 
@@ -311,7 +314,7 @@ async fn handle_request(
     // Rate limiting — skip for health endpoint.
     let path = parts.uri.path();
     if path != "/api/health" {
-        let client_ip = extract_client_ip(&parts);
+        let client_ip = extract_client_ip(&parts, remote_addr);
         let mut limiter = rate_limiter.lock().await;
         if !limiter.check(&client_ip) {
             tracing::warn!(ip = %client_ip, "rate limit exceeded");
