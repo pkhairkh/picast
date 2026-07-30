@@ -42,7 +42,7 @@ The WebSocket server provides a bidirectional event stream for real-time UIs (br
 
 #### BUG-001: `MAX_CONNECTIONS` constant (50) contradicts doc comment (32)
 - **Severity:** Low
-- **Location:** Lines 53 and 66–67
+- **Location:** Line 54 (`const MAX_CONNECTIONS: usize = 50;`) and lines 66–67 (`enum ClientCommand { Cast { ... }`)
 - **Description:** The module-level doc comment says "A maximum of 32 concurrent WebSocket clients are allowed." The constant `MAX_CONNECTIONS` is set to `50`. The `WebSocketServer` struct doc comment says "Connection limit: `MAX_CONNECTIONS` (default 50) concurrent clients."
 - **Impact:** Documentation inconsistency; the actual limit is 50, not 32 as the module doc states.
 - **Recommendation:** Update the module doc comment to say 50, or change `MAX_CONNECTIONS` to 32 if 32 was the intended limit.
@@ -56,21 +56,21 @@ The WebSocket server provides a bidirectional event stream for real-time UIs (br
 
 #### BUG-003: `ClientCommand::Ping` has a dead arm in `handle_command`
 - **Severity:** Low
-- **Location:** Lines 471–475 (`handle_command`)
+- **Location:** Line 461 (`ClientCommand::Ping => { ... }` arm in `handle_command`, which starts at line 430)
 - **Description:** The `ClientCommand::Ping` variant is handled in `handle_client` (line 339) before `handle_command` is called, so the `Ping` arm in `handle_command` is never reached. The code acknowledges this with a comment, but the arm exists with a no-op body.
 - **Impact:** Dead code; no functional impact, but confusing to readers.
 - **Recommendation:** Either remove the `Ping` arm from `handle_command` (and let the match be exhaustive via `#[allow(unreachable_patterns)]` or by restructuring), or document more clearly why it must exist for exhaustiveness.
 
 #### BUG-004: No timeout on idle connections
 - **Severity:** Medium
-- **Location:** `handle_client` function (lines 316–430)
+- **Location:** `handle_client` function (lines 306–430 — `async fn handle_client` at line 306)
 - **Description:** The server sends WS-level pings every 30 seconds but does not enforce a timeout if the client never responds to pings. A client that connects, sends nothing, and ignores pings will hold its connection permit indefinitely. The doc comment says "Clients that don't respond within 10 seconds are disconnected" but there is no code implementing this.
 - **Impact:** A malicious or buggy client can hold a connection slot forever, eventually exhausting the 50-connection limit. The documented 10-second pong timeout is not implemented.
 - **Recommendation:** Track the last pong receipt time per connection. If no pong is received within `2 × WS_PING_INTERVAL_SECS` (60 seconds), close the connection. Use `tokio::time::timeout` around the `ws.next()` future.
 
 #### BUG-005: `broadcast::error::RecvError::Lagged` does not send a recovery event to the client
 - **Severity:** Low
-- **Location:** Lines 383–385 (Lagged handling)
+- **Location:** Lines 408–409 (`Err(broadcast::error::RecvError::Lagged(count)) => { ... }`)
 - **Description:** When the broadcast channel lags (client is slow), the server logs a warning but does not inform the client that events were dropped. The client may have a stale view of the state with no indication.
 - **Impact:** Clients with slow connections may miss state transitions silently.
 - **Recommendation:** After a Lagged error, query the session manager for the current state and send a `MEDIA_STATUS` event to resynchronize the client. This matches the spec's note (OD-002 in the fine draft) about "events_dropped: true in first replayed event."
@@ -79,7 +79,7 @@ The WebSocket server provides a bidirectional event stream for real-time UIs (br
 
 #### SEC-001: No URL validation for `javascript:` scheme
 - **Severity:** Low
-- **Location:** Lines 443–453 (`handle_command`, `Cast` arm)
+- **Location:** Lines 432–453 (`handle_command` `Cast` arm — `ClientCommand::Cast { url } => {` at line 432, `session.load(&url)` at line 443)
 - **Description:** The URL validation in `handle_command` rejects `file://`, `data:`, and unknown schemes, but does not explicitly reject `javascript:`. The `url::Url::parse` function parses `javascript:alert(1)` as a valid URL with scheme `javascript`, which would fall through to the `scheme =>` catch-all arm and be rejected. This is functionally correct but less explicit than the http.rs implementation.
 - **Impact:** No actual vulnerability (the catch-all rejects it), but the intent is less clear.
 - **Recommendation:** Add an explicit `javascript` arm for consistency with `http.rs` and clarity of intent.
@@ -93,7 +93,7 @@ The WebSocket server provides a bidirectional event stream for real-time UIs (br
 
 #### SEC-003: Binary message parsing accepts arbitrary UTF-8
 - **Severity:** Low
-- **Location:** Lines 366–375 (Binary message handling)
+- **Location:** Lines 360–375 (`Some(Ok(Message::Binary(data))) => { ... }` at line 360)
 - **Description:** Binary messages are parsed as UTF-8 JSON. This is a convenience for clients that send binary frames, but it expands the attack surface — a binary flood could consume CPU on UTF-8 validation and JSON parsing.
 - **Impact:** Minimal, given the 1 MB message size limit and 50-connection cap.
 - **Recommendation:** Acceptable for v1. Consider rejecting binary messages in v2 unless a use case emerges.
@@ -102,7 +102,7 @@ The WebSocket server provides a bidirectional event stream for real-time UIs (br
 
 #### DESIGN-001: URL validation duplicated between http.rs and ws.rs
 - **Severity:** Medium
-- **Location:** `http.rs` `is_safe_cast_url()` (lines 710–725) vs `ws.rs` `handle_command` (lines 443–453)
+- **Location:** `http.rs` `is_safe_cast_url()` (lines 710–725) vs `ws.rs` `handle_command` `Cast` arm (lines 432–453)
 - **Description:** Both files validate cast URLs, but with different implementations. `http.rs` has a dedicated `is_safe_cast_url()` function with explicit `javascript` handling and clear error messages. `ws.rs` has inline validation with a catch-all. They could diverge over time.
 - **Impact:** Inconsistent URL validation; a URL accepted via one protocol could be rejected via the other, or vice versa.
 - **Recommendation:** Extract `is_safe_cast_url()` into a shared module (e.g., `src/protocols/src/validation.rs` or `src/session/src/lib.rs`) and use it from both handlers.
@@ -123,7 +123,7 @@ The WebSocket server provides a bidirectional event stream for real-time UIs (br
 
 #### DESIGN-004: `SessionEvent::Created/Resolving/Resolved` all map to `ResolveProgress { percent: 0 }`
 - **Severity:** Low
-- **Location:** Lines 535–538 (`map_session_event`)
+- **Location:** Lines 535–538 (inside `map_session_event`, which starts at line 476 — the `ServerEvent::MediaStatus` arm)
 - **Description:** Three different session lifecycle events (`Created`, `Resolving`, `Resolved`) all map to the same `ResolveProgress { percent: 0 }` event. The client cannot distinguish between "resolution starting" and "resolution complete."
 - **Impact:** Clients can't show accurate resolution progress; they only know resolution is "in progress" with 0%.
 - **Recommendation:** Map `Created` → `ResolveProgress { percent: 0 }`, `Resolving` → `ResolveProgress { percent: 10 }` (or similar), `Resolved` → `ResolveProgress { percent: 100 }`. Or add a `state` field to `ResolveProgress` to distinguish phases.
