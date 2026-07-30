@@ -24,7 +24,7 @@ Conventions:
 
 **As of:** 2026-07-30
 
-**Blueprint pipeline:** 6 of 7 phases complete. Only `implementation` remains, which is the v1 build itself.
+**Blueprint pipeline:** 7 of 7 phases complete (problem_catalog → rough_draft → adrs → fine_draft → spec → tasks → progress). **Implementation** (the v1 build itself) has not started.
 
 **Implementation:** 0 of 6 milestones started. The blueprint is ready to hand off to implementation.
 
