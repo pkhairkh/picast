@@ -46,7 +46,7 @@ The stream source provides progressive download for GStreamer's `appsrc` element
 
 #### BUG-002: Browser User-Agent is hardcoded and may not match the resolver's UA
 - **Severity:** Low
-- **Location:** Line 71 (`BROWSER_UA` constant)
+- **Location:** Line 67 (`const BROWSER_UA: &str = "Mozilla/5.0 ...";`)
 - **Description:** The `BROWSER_UA` is hardcoded as a Chrome 131 string. The comment says "Must match the resolver's UA" but there's no mechanism to ensure they match. If the resolver's UA is updated but this one isn't (or vice versa), the CDN will see different UAs for resolution and download, which could trigger anti-bot detection.
 - **Impact:** CDN anti-bot systems may flag the mismatch between resolver UA and download UA, returning 403.
 - **Recommendation:** Move the `BROWSER_UA` constant to a shared module (e.g., `src/playback/src/lib.rs` or a `constants` crate) and import it in both the resolver and the stream source. Add a test that verifies both use the same constant.
@@ -87,7 +87,7 @@ The stream source provides progressive download for GStreamer's `appsrc` element
 
 #### DESIGN-003: Flow control relies on channel capacity — no explicit backpressure signal
 - **Severity:** Low
-- **Location**: Lines 285–290 (`CHANNEL_CAPACITY = 128`)
+- **Location:** Line 73 (`const CHANNEL_CAPACITY: usize = 128;`)
 - **Description:** Flow control is implemented via the bounded channel's natural backpressure: when the channel is full, `data_tx.send()` awaits. The comment mentions "need-data" and "enough-data" signals from appsrc, but the actual implementation uses channel capacity, not appsrc signals.
 - **Impact:** The buffer size (128 chunks × ~256 KB = ~32 MB) is fixed. For high-bitrate streams, this may be too small; for low-bitrate streams, it wastes memory.
 - **Recommendation:** Make the channel capacity configurable. Consider using appsrc's `need-data`/`enough-data` signals for more precise flow control, as the comment suggests.
@@ -110,7 +110,7 @@ The stream source provides progressive download for GStreamer's `appsrc` element
 
 #### SEC-002: `cookie_store(true)` on reqwest client may retain cookies across sessions
 - **Severity:** Low
-- **Location**: Line 246 and 267 (`.cookie_store(true)`)
+- **Location:** Lines 239 and 261 (`.cookie_store(true)` — two separate reqwest client builders)
 - **Description:** The reqwest client is built with `.cookie_store(true)`, which enables an in-memory cookie jar. Cookies from one download (e.g., a Set-Cookie from the CDN) will be sent on subsequent requests through the same client. If the client is reused across sessions, cookies from a previous session could leak.
 - **Impact:** Low — the client is created per `StreamSource` instance, which is per-session. But if the client is ever reused, cookies could cross-contaminate.
 - **Recommendation:** Verify that each `StreamSource` creates a fresh reqwest client (which it does in `start()`). Document that the cookie jar is per-session. For v2, consider explicitly clearing the cookie jar after download completes.
