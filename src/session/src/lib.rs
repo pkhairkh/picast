@@ -61,7 +61,7 @@ fn is_cdn_retryable_error(error: &(dyn std::error::Error + Send + Sync)) -> bool
     let msg = error.to_string();
     msg.contains("CDN IP mismatch")
         || msg.contains("re-resolve needed")
-        || msg.contains("Forbidden")
+        || msg.contains("403")
 }
 
 // ── Errors ───────────────────────────────────────────────────────────
