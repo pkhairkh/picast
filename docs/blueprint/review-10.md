@@ -55,7 +55,7 @@ The configuration module loads application settings from a TOML file and/or envi
 
 #### BUG-003: No validation that TLS cert and key paths exist when TLS is enabled
 - **Severity:** Low
-- **Location:** Lines 85–90 (`tls_enabled()` method)
+- **Location:** Line 91 (`pub fn tls_enabled(&self) -> bool`)
 - **Description:** `tls_enabled()` returns `true` if both `tls_cert_path` and `tls_key_path` are non-empty, but doesn't check that the files exist. The server will fail at startup with a file-not-found error rather than a clear "TLS cert file not found" message.
 - **Impact:** Confusing error message on misconfiguration.
 - **Recommendation:** Add a `validate_tls_files(&self) -> Result<()>` method that checks file existence and readability when `tls_enabled()` is true. Call it in `load()` or at server startup.
@@ -71,7 +71,7 @@ The configuration module loads application settings from a TOML file and/or envi
 
 #### DESIGN-002: `DisplayConfig.drm_device` defaults to empty string (auto-detect) but auto-detect logic is elsewhere
 - **Severity:** Low
-- **Location**: Lines 138–145 (`DisplayConfig`)
+- **Location:** Line 134 (`pub struct DisplayConfig`)
 - **Description:** When `drm_device` is empty, the display manager auto-detects the DRM device. However, the auto-detect logic lives in `src/display/src/lib.rs`, not in the config module. This means the config module doesn't know what the actual device will be.
 - **Impact:** Minor — the separation of concerns is correct. But the config documentation should note that empty means "auto-detect" and point to where the auto-detect logic lives.
 - **Recommendation:** Add a doc comment on `drm_device`: "When empty, the display manager auto-detects the first available DRM device (typically `/dev/dri/card0`). See `src/display/src/lib.rs` for the detection logic."
@@ -85,7 +85,7 @@ The configuration module loads application settings from a TOML file and/or envi
 
 #### DESIGN-004: `PlaybackConfig` only has `audio_device` — no video settings
 - **Severity:** Low
-- **Location**: Lines 148–155 (`PlaybackConfig`)
+- **Location:** Line 142 (`pub struct PlaybackConfig`)
 - **Description:** `PlaybackConfig` only contains `audio_device`. Video-related settings (max resolution, hardware decode enable/disable, buffer size) are not configurable. They're hardcoded in the pipeline.
 - **Impact:** Users can't tune video playback without recompiling. The `maxResolution` from the browser extension isn't respected (see ytdlp.rs review DESIGN-003).
 - **Recommendation:** Add video settings: `max_resolution`, `enable_hw_decode`, `buffer_size_bytes`. These should flow from the config (or the cast request) to the pipeline.
@@ -101,7 +101,7 @@ The configuration module loads application settings from a TOML file and/or envi
 
 #### SEC-002: Default `http_addr` is `0.0.0.0:8585` — binds to all interfaces
 - **Severity:** Low (acceptable for LAN appliance)
-- **Location**: Line 187 (`default_http_addr`)
+- **Location:** Line 182 (`fn default_http_addr() -> String`)
 - **Description:** The default HTTP address is `0.0.0.0:8585`, which binds to all network interfaces. On a LAN, this is the intended behavior (the appliance should be reachable). But if the Pi is on a public network, the API is exposed.
 - **Impact:** Acceptable for the appliance model — the iptables rules restrict access to LAN. But worth documenting.
 - **Recommendation:** Document in the config example that `0.0.0.0` binds to all interfaces and that iptables rules (in `config/iptables.rules`) restrict access to the LAN. For users on public networks, suggest binding to a specific interface.
