@@ -804,10 +804,17 @@ impl TorManager {
 
     /// Parse a `"host:port"` string, falling back to `127.0.0.1:9050`.
     fn parse_addr(addr: &str) -> (String, u16) {
-        let parts: Vec<&str> = addr.split(':').collect();
-        if parts.len() == 2 {
-            let host = parts[0].to_owned();
-            let port = parts[1].parse::<u16>().unwrap_or(9050);
+        // Use rsplit_once(':') to split on the LAST colon only.
+        // This correctly handles IPv6 addresses like [::1]:9050 or
+        // ::1:9050, which contain multiple colons.
+        if let Some((host, port_str)) = addr.rsplit_once(':') {
+            let port = port_str.parse::<u16>().unwrap_or(9050);
+            // Strip IPv6 brackets if present: [::1] -> ::1
+            let host = host
+                .strip_prefix('[')
+                .and_then(|h| h.strip_suffix(']'))
+                .unwrap_or(host)
+                .to_owned();
             (host, port)
         } else {
             ("127.0.0.1".to_owned(), 9050)
