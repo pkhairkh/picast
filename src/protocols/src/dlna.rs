@@ -151,6 +151,20 @@ impl DlnaRenderer {
             "starting gmediarender subprocess"
         );
 
+        // Validate the binary exists before spawning to give a clear error
+        // message instead of a confusing spawn error.
+        if self.binary_path.contains('/') {
+            // Absolute or relative path — check file exists
+            if !std::path::Path::new(&self.binary_path).exists() {
+                return Err(format!(
+                    "gmediarender binary not found at: {} (set via with_binary_path)",
+                    self.binary_path
+                ));
+            }
+        }
+        // If no '/', it's a PATH lookup — Command::new will handle it,
+        // but the error message will be less clear if not found.
+
         let mut child = Command::new(&self.binary_path)
             .env("GSTREAMER_PIPELINE", pipeline)
             .arg("--friendly-name")
