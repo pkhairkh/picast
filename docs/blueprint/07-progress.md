@@ -132,6 +132,14 @@ These are intentionally left open for the implementation phase to resolve (they 
 
 Most recent first. Append new entries to the top.
 
+### 2026-07-30 — Tasks doc: Deferred Requirements section added (post-pipeline follow-up)
+
+- **Phase:** tasks (post-pipeline follow-up)
+- **By:** stronghold-agent (orchestrator-applied, commit `fff52aa`)
+- **Change:** `docs/blueprint/06-tasks.md` gained a "Deferred Requirements" section explicitly recording the [[R-025]] coverage gap (multi-room sync deferred to v2). Previously the tasks doc's M1..M6 milestones did not trace to [[R-025]]; the gap is now explicit rather than silent. The new section names a future `[[T-701]]` in a future M7 milestone as the v2 placeholder for [[R-025]].
+- **Status:** green. The coverage gap is now explicit.
+- **Next:** fast-forward `docs/blueprint-progress` branch to include `fff52aa` (done in this commit); continue polling for new orchestrator tasks. No implementation work has started.
+
 ### 2026-07-30 — Quality review: R-025 coverage gap fixed
 
 - **Phase:** tasks (quality review)
