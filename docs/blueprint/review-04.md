@@ -5,7 +5,7 @@ version: 1
 phase: code_review
 author: agent
 created: 2026-07-30T00:00:00Z
-updated: 2026-07-30T00:00:00Z
+updated: 2026-07-30T11:30:00Z
 ---
 
 # Code Review: `src/session/src/lib.rs`
@@ -40,7 +40,7 @@ The session manager is the central coordinator of boGDan. It owns the SQLite-bac
 
 #### BUG-001: 300ms `tokio::time::sleep` hardcoded in `load()` for DRM master race
 - **Severity:** Medium
-- **Location:** Line 770 (`load()` method)
+- **Location:** `load()` method at line 688 (`pub async fn load`); the referenced code is at line 770 (inside the method)
 - **Description:** After resolution and before `display.acquire()`, there is a hardcoded `tokio::time::sleep(Duration::from_millis(300))` to work around a race condition where gmediarender hasn't released DRM master yet. The comment acknowledges this is a "conservative safety net" and that the display manager "already retries internally with exponential backoff."
 - **Impact:** A 300ms delay is added to every cast, even when gmediarender isn't running or has already released DRM master. If the race window is longer than 300ms (e.g., on a slow Pi or under load), the workaround fails. If it's shorter, the delay is wasted time.
 - **Recommendation:** Remove the hardcoded sleep and rely on the display manager's internal retry with exponential backoff. If the retry is insufficient, increase its budget or add jitter. Hardcoded sleeps are a code smell that masks a synchronization problem.
@@ -54,7 +54,7 @@ The session manager is the central coordinator of boGDan. It owns the SQLite-bac
 
 #### BUG-003: `is_cdn_retryable_error` matches on "Forbidden" string — too broad
 - **Severity:** Low
-- **Location:** Lines 50–58 (`is_cdn_retryable_error`)
+- **Location:** Line 60 (`fn is_cdn_retryable_error`) — the doc comments are at lines 50–58
 - **Description:** The function checks if the error message contains "Forbidden" to detect CDN 403 errors. However, "Forbidden" could appear in non-CDN error messages (e.g., a local file permission error "Permission denied (os error 13)" wouldn't match, but a custom error "Forbidden action" from another subsystem would).
 - **Impact:** A non-CDN "Forbidden" error would trigger unnecessary re-resolution and retry, wasting 5–15 seconds.
 - **Recommendation:** Use a typed error enum instead of string matching. Have the playback engine return a `PlaybackError::CdnForbidden` variant that the session layer matches on explicitly.
@@ -84,7 +84,7 @@ The session manager is the central coordinator of boGDan. It owns the SQLite-bac
 
 #### DESIGN-002: `broadcast::Sender` has a fixed capacity that could drop events
 - **Severity:** Low
-- **Location:** Line 330 (event_tx initialization, not shown but inferred from `broadcast::Sender` usage)
+- **Location:** Line 321 (`event_tx: broadcast::Sender<SessionEvent>` field in `SessionManager` struct) and line 365 (`let (event_tx, _) = broadcast::channel(128);` in `SessionManager::new`)
 - **Description:** The `broadcast` channel has a capacity (default 256 in tokio). If a slow client (e.g., a WebSocket client on a bad connection) doesn't drain the channel fast enough, events are dropped and the client receives a `Lagged` error. The WS handler (ws.rs) catches this and logs a warning but doesn't resync.
 - **Impact:** Clients with slow connections may miss state transitions. The spec (OD-002) mentions "events_dropped: true in first replayed event" but this isn't implemented.
 - **Recommendation:** Increase the channel capacity for the broadcast (e.g., 1024), or implement the resync mechanism where after a `Lagged` error, the handler queries `current_status()` and sends a fresh `MEDIA_STATUS` event.
@@ -107,7 +107,7 @@ The session manager is the central coordinator of boGDan. It owns the SQLite-bac
 
 #### SEC-001: SQLite database path not validated
 - **Severity:** Low
-- **Location:** Line 355 (`SessionManager::new`, `rusqlite::Connection::open(db_path)`)
+- **Location:** Lines 341–342 (`pub fn new(db_path: &str)` at line 341, `rusqlite::Connection::open(db_path)?` at line 342, inside `SessionManager::new`)
 - **Description:** The `db_path` is passed directly to `rusqlite::Connection::open()` without validation. If the path is attacker-controlled (e.g., from a config file with a path traversal like `../../etc/passwd`), SQLite would attempt to open/create that file.
 - **Impact:** Low — the config file is root-owned and not attacker-controlled in the appliance model. But defense-in-depth.
 - **Recommendation:** Validate that `db_path` is within the allowed runtime directory (`/var/lib/bogdan/` or similar). Reject paths with `..` components.
