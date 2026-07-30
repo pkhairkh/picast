@@ -331,7 +331,9 @@ async fn handle_request(
 
         // ALSA playback devices.
         (Method::GET, "/api/audio-devices") => {
-            let devices = list_alsa_devices();
+            let devices = tokio::task::spawn_blocking(list_alsa_devices)
+                .await
+                .map_err(|e| anyhow::anyhow!("audio device listing task failed: {}", e))?;
             json_response(StatusCode::OK, &devices)
         },
 
