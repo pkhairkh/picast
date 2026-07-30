@@ -44,7 +44,7 @@ The resolution cache stores resolved URL results in a SQLite database with WAL m
 
 #### BUG-002: `expect()` in constructor panics on database errors
 - **Severity:** Medium
-- **Location**: Lines 75, 81, 96 (`expect("failed to open cache database")`, `expect("failed to set WAL mode")`, `expect("failed to create cache table")`)
+- **Location:** Lines 65, 66, 71, 95 (`expect("failed to open cache database")` at line 65, `expect("failed to create in-memory database")` at line 66, `expect("failed to set WAL mode")` at line 71, `expect("failed to create cache table")` at line 95)
 - **Description**: The constructor uses `expect()` for database opening, WAL mode setting, and table creation. If any fails (e.g., disk full, permissions issue, corrupt database), the constructor panics, crashing the server.
 - **Impact**: A misconfigured or corrupt cache database crashes the appliance at startup.
 - **Recommendation**: Return `Result<Self, ResolveError>` from the constructor instead of panicking. Let the caller decide whether to fall back to an in-memory cache or exit.
@@ -81,7 +81,7 @@ The resolution cache stores resolved URL results in a SQLite database with WAL m
 
 #### DESIGN-003: Schema migration is manual and fragile
 - **Severity:** Low
-- **Location**: Lines 108–130 (schema migration for `audio_url` column)
+- **Location:** Lines 97–107 (schema migration for `audio_url` column — `ALTER TABLE` at line 104, error handling at lines 105-107)
 - **Description**: The constructor manually checks for the `audio_url` column and adds it if missing. This is a manual migration approach that's fragile — each schema change requires a new migration block, and the migrations must be applied in order.
 - **Impact**: Adding new columns requires careful migration code. Missing a migration leaves the column absent, causing runtime errors.
 - **Recommendation**: Use a proper migration framework (e.g., `refinery` or `rusqlite_migration`) that tracks schema versions and applies migrations in order. Or use `PRAGMA user_version` to track the schema version.
@@ -97,7 +97,7 @@ The resolution cache stores resolved URL results in a SQLite database with WAL m
 
 #### SEC-002: No validation of cache database path
 - **Severity:** Low
-- **Location**: Line 75 (`Connection::open(p)`)
+- **Location:** Line 65 (`Connection::open(p).expect("failed to open cache database")`)
 - **Description**: The cache database path is not validated. If the path is attacker-controlled, SQLite could create a database at an arbitrary location.
 - **Impact**: Low — the path comes from the config, which is root-owned. But defense-in-depth.
 - **Recommendation**: Validate that the path is within `/var/lib/bogdan/` or the configured runtime directory.
