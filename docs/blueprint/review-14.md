@@ -8,157 +8,138 @@ created: 2026-07-30T00:00:00Z
 updated: 2026-07-30T00:00:00Z
 ---
 
-# Code Review: `src/playback/src/pipeline.rs`
+# Code Review: `src/protocols/src/tls.rs` and `src/session/src/interfaces.rs`
 
-**File:** `src/playback/src/pipeline.rs`
-**Lines:** 2123
+**Files:** `src/protocols/src/tls.rs` (86 lines) + `src/session/src/interfaces.rs` (161 lines)
 **Reviewer:** agent
 **Date:** 2026-07-30
 
 ## Summary
 
-The GStreamer pipeline module constructs and manages the media playback pipeline for H.264 (and HEVC fallback) video with V4L2 hardware decode and direct DRM/KMS output on Raspberry Pi 4B+. This is the core decode path — the zero-copy DMA-BUF pipeline from network to HDMI that defines boGDan's value proposition. The file is behind `#![cfg(feature = "hw")]` and is only compiled on Pi hardware. The implementation is sophisticated: it handles dynamic codec detection via `parsebin`, DMA-BUF export, ISP format conversion, audio/video synchronization, and software-decode fallback. The documentation of the pipeline topology (including ASCII art diagrams) is excellent. However, there are several issues.
+Two small but architecturally important files: `tls.rs` handles TLS certificate/key loading for HTTPS/WSS, and `interfaces.rs` defines the trait contracts that all subsystems (resolver, playback, display, Tor) must implement. Both are clean and well-documented. This review covers both files together since they're both small and low-risk.
 
-## Key Components Reviewed
+---
 
-| Component | Lines | Purpose |
-|-----------|-------|---------|
-| `GstPipeline` struct | 89–130 | Main pipeline with elements, bus watch, download state |
-| `new()` | 155–400 | Pipeline construction: source, queue2, parsebin, decode chain |
-| `preroll()` | 1758–1880 | Async state change to Paused |
-| `start_playing()` | 1880–1900 | State change to Playing |
-| `pause()/resume()/stop()` | 1902–1955 | Playback control |
-| `seek()` | 1994–2003 | Position seek |
-| `set_volume()` | 2004–2011 | Volume control |
-| `buffer_health()` | 2028–2046 | Buffer level query |
-| `rebuild_sw()` | 2073–2105 | Software-decode fallback rebuild |
-| `Drop` impl | 2105+ | Pipeline cleanup |
+## Part 1: `src/protocols/src/tls.rs` (86 lines)
 
-## Findings
+### Summary
 
-### Bugs
+Loads PEM certificate and key files and creates a `tokio-rustls` `TlsAcceptor` shared by the HTTP and WebSocket servers. Supports PKCS#1 (RSA) and PKCS#8 (any algorithm) private keys.
 
-#### BUG-001: `async-handling=true` comment says kmssink is "initially unconnected" but pipeline still links it at construction
-- **Severity:** Low
-- **Location:** Lines 170–190 (async-handling comment) vs the construction logic
-- **Description:** The comment explains that `async-handling=true` is needed because "kmssink's sink pad is initially unconnected (the video decode chain is created dynamically in parsebin's pad-added callback)." However, kmssink is added to the pipeline at construction time — its sink pad exists but isn't linked until `pad-added` fires. The async-handling prevents the Ready→Paused transition from blocking on kmssink's preroll.
-- **Impact:** The comment is accurate about the behavior but slightly misleading about the cause. The issue isn't that kmssink is "unconnected" — it's that it hasn't received its first buffer yet (preroll). This is a documentation clarity issue, not a bug.
-- **Recommendation:** Reword the comment to say "kmssink can't preroll until it receives its first buffer, which only flows after parsebin's pad-added callback links the decode chain."
+### Findings
 
-#### BUG-002: Loopback URL detection misses `https://` and non-standard ports
-- **Severity:** Low
-- **Location:** Lines 218–221 (`is_loopback_url` check)
-- **Description:** The loopback detection checks `http://127.0.0.1:`, `http://localhost:`, and `http://[::1]:`. It misses:
-  - `https://127.0.0.1:` (HTTPS loopback)
-  - `http://127.0.0.1` without a port (no colon)
-  - `http://bogdan.local:` (mDNS hostname that resolves to loopback)
-- **Impact:** A loopback URL with HTTPS or no port would be routed through `StreamSource` (Tor) instead of `souphttpsrc` directly, adding unnecessary overhead.
-- **Recommendation:** Use `url::Url::parse` to properly parse the URL and check `host_str()` against `127.0.0.1`, `localhost`, `::1`, and `.local` suffixes.
-
-#### BUG-003: No validation that `v4l2h264dec` is available before pipeline construction
+#### SEC-001: No certificate expiration check
 - **Severity:** Medium
-- **Location:** Throughout `new()` (element creation via `ElementFactory::make`)
-- **Description:** The pipeline creates `v4l2h264dec`, `v4l2convert`, `kmssink`, etc. via `ElementFactory::make`. If any element is missing (e.g., GStreamer bad plugins not installed, or running on a non-Pi with `hw` feature forced), the `make()` call returns an error. However, the error is generic ("Failed to create element X") without guidance on which package to install.
-- **Impact:** On a misconfigured system, the user sees a confusing error with no hint about the missing GStreamer plugin.
-- **Recommendation:** Check element availability at startup (in `ensure_gst_init()` or a separate `check_elements()` function) and return a clear error listing the required GStreamer packages (`gstreamer1.0-plugins-bad`, `gstreamer1.0-plugins-base`, etc.).
+- **Location:** `load_tls_acceptor()` (lines 18–40)
+- **Description:** The function loads the certificate but doesn't check whether it has expired. A user with an expired certificate will get TLS handshake failures at runtime with no clear indication that the cert expired.
+- **Impact:** Confusing runtime errors; the server starts successfully but all HTTPS connections fail.
+- **Recommendation:** After loading, check the certificate's `not_after` date. If expired, log an error and return `Err`. If expiring within 30 days, log a warning.
 
-#### BUG-004: `rebuild_sw()` doesn't preserve playback position
-- **Severity:** Medium
-- **Location:** Lines 2073–2105 (`rebuild_sw`)
-- **Description:** The `rebuild_sw()` method rebuilds the pipeline with software decode (`avdec_h264`) when V4L2 negotiation fails. However, it doesn't query or preserve the current playback position before rebuilding. After the rebuild, playback starts from the beginning (or wherever the buffer pointer lands).
-- **Impact:** A user watching a 30-minute video that triggers a software-decode fallback will have their playback position reset, requiring them to seek back to where they were.
-- **Recommendation:** Query `position_ms()` before rebuilding, then `seek()` to that position after the new pipeline is constructed and playing.
-
-### Design Issues
-
-#### DESIGN-001: 2123-line file is too large for a single module
-- **Severity:** Medium
-- **Location:** Entire file
-- **Description:** The `pipeline.rs` file is 2123 lines, covering pipeline construction, state management, bus message handling, download progress, buffer health, and software fallback. This is too much for one file — it makes navigation difficult and increases the risk of merge conflicts.
-- **Impact:** Maintenance burden; changes to one aspect (e.g., bus handling) risk breaking another (e.g., element construction).
-- **Recommendation:** Split into sub-modules:
-  - `pipeline/builder.rs` — `new()` and element construction
-  - `pipeline/control.rs` — `pause()`, `resume()`, `stop()`, `seek()`
-  - `pipeline/bus.rs` — Bus message handling
-  - `pipeline/health.rs` — `buffer_health()`, `download_progress()`
-  - `pipeline/fallback.rs` — `rebuild_sw()`
-
-#### DESIGN-002: `parsebin` pad-added callback creates decode chain dynamically — no error recovery
-- **Severity:** Medium
-- **Location:** Pad-added callback (throughout `new()`)
-- **Description:** The decode chain (`v4l2h264dec → v4l2convert → kmssink`) is created in a `pad-added` callback on `parsebin`. If the callback fails (e.g., element creation fails, linking fails), the error is difficult to propagate — callbacks can't return `Result`. The pipeline may end up in a half-constructed state.
-- **Impact:** A failure in the pad-added callback leads to a stuck pipeline with no clear error.
-- **Recommendation:** Use a `Mutex<Option<Result<(), PlaybackError>>>` to capture errors from the callback, and check it after the pipeline starts. Or use GStreamer's "no-more-pads" signal to validate that all pads were handled successfully.
-
-#### DESIGN-003: Audio sink `ts-offset=+100ms` is hardcoded
+#### SEC-002: No certificate chain validation
 - **Severity:** Low
-- **Location:** The pipeline diagram shows `ts-offset=+100ms` on `alsasink`
-- **Description:** The audio sink has a hardcoded `ts-offset=+100ms` to compensate for audio/video sync drift. This value is likely tuned for a specific hardware configuration and may not be correct for all TVs or audio systems.
-- **Impact:** A/V sync may be off by 100ms on some setups, which is noticeable to users.
-- **Recommendation:** Make `ts-offset` configurable via `bogdan.toml`. Default to 100ms but allow users to adjust if they notice sync issues.
+- **Location:** `load_certs()` (lines 49–62)
+- **Description:** The function loads all certificates from the PEM file but doesn't validate that they form a proper chain (leaf → intermediate → root). If the file only contains the leaf certificate without intermediates, clients may fail to verify the chain.
+- **Impact:** TLS connections from some clients (especially browsers) may fail with "unable to get local issuer certificate."
+- **Recommendation:** Log the number of certificates loaded. If only one cert is found, log a warning suggesting the user include intermediate certificates.
 
-#### DESIGN-004: HEVC pipeline requires `hevc` feature but shares the same file
+#### BUG-001: Key file re-opened unnecessarily for PKCS#1 fallback
 - **Severity:** Low
-- **Location:** Lines 25–30 (HEVC topology) and `#[cfg(feature = "hevc")]` imports
-- **Description:** The HEVC pipeline is conditionally compiled with the `hevc` feature. It shares the same `pipeline.rs` file and many code paths with H.264, using `#[cfg(feature = "hevc")]` blocks. This makes the H.264 code path harder to read (interrupted by feature gates).
-- **Impact:** Code readability is reduced; testing one configuration doesn't test the other.
-- **Recommendation:** Extract HEVC-specific code into a separate `pipeline/hevc.rs` module with a trait that the main pipeline calls. This keeps the H.264 path clean.
+- **Location:** `load_key()` lines 80–84 (re-opening the file)
+- **Description:** After trying PKCS#8 keys, the function re-opens the file to try PKCS#1. This is because `rustls_pemfile` consumes the `BufReader`. The re-open is correct but wasteful — the file is read from disk twice.
+- **Impact:** Minor performance overhead (one extra file read at startup).
+- **Recommendation:** Read the file contents into a `Vec<u8>` once, then create `Cursor`/`BufReader` from the bytes for each parse attempt. This avoids the second disk read.
 
-### Security
-
-#### SEC-001: No validation of stream URL before pipeline construction
+#### DESIGN-001: No ECDSA key support
 - **Severity:** Low
-- **Location:** Line 156 (`url: &str` parameter to `pub async fn new()` at line 155)
-- **Description:** The resolved `url` is passed directly to `StreamSource::start()` without URL validation. While the resolver already validated the URL, the playback layer should defense-in-depth.
-- **Impact:** Low — the resolver validates URLs. But if the resolver is bypassed (e.g., direct URL casting via HTTP API), a malformed URL could reach the pipeline.
-- **Recommendation:** Validate the URL scheme (`http://` or `https://` only) in `new()` before passing to `StreamSource`.
+- **Location:** `load_key()` (lines 73–90)
+- **Description:** The function tries PKCS#8 and PKCS#1 (RSA) but doesn't explicitly handle ECDSA keys. PKCS#8 can contain ECDSA keys, so they should work via the PKCS#8 path, but the function name `rsa_private_keys` for the fallback is misleading.
+- **Impact:** ECDSA keys in PKCS#1 format (uncommon) won't be loaded. ECDSA in PKCS#8 (common) should work.
+- **Recommendation:** The PKCS#8 path handles ECDSA. Document that ECDSA keys must be in PKCS#8 format. The PKCS#1 fallback is RSA-only by design.
 
-#### SEC-002: Cookies passed directly to GStreamer without sanitization
+### Positive Observations (tls.rs)
+
+1. **Returns `None` for empty paths** — cleanly disables TLS when paths aren't configured.
+2. **`with_no_client_auth()`** — correct for a server that doesn't require client certificates.
+3. **PKCS#8 first, PKCS#1 fallback** — correct priority (modern keys are PKCS#8).
+4. **Clear error messages** — `with_context` provides actionable file path information.
+5. **Empty cert check** — bails with "no certificates found" if the PEM file has no certs.
+
+---
+
+## Part 2: `src/session/src/interfaces.rs` (161 lines)
+
+### Summary
+
+Defines four trait interfaces (`ResolverTrait`, `PlaybackTrait`, `DisplayTrait`, `TorTrait`) that subsystems must implement. The session manager depends on these traits, not concrete types, enabling mocking and dependency inversion. All traits require `Send + Sync` for thread safety.
+
+### Findings
+
+#### DESIGN-001: `PlaybackTrait::play()` has too many parameters
 - **Severity:** Low
-- **Location:** Line 163 (`cookies: &[String]`) passed to `StreamSource::start()`
-- **Description:** Cookies from the resolver are passed to the playback engine without validation. If a cookie contains special characters (newlines, quotes), it could potentially be injected into HTTP headers.
-- **Impact:** Low — `reqwest` (used by `StreamSource`) handles cookie encoding safely. But defense-in-depth.
-- **Recommendation:** Validate cookie format before passing to the pipeline (same recommendation as resolver review SEC-002).
+- **Location:** `PlaybackTrait::play()` (lines 85–95)
+- **Description:** The `play()` method takes 5 parameters: `url`, `source_url`, `socks_addr`, `isolation_username`, `cookies`. This is a "long parameter list" code smell. Adding a new parameter (e.g., `max_resolution`) requires updating all implementations and callers.
+- **Impact:** Maintenance burden; high risk of breaking changes.
+- **Recommendation:** Introduce a `PlayRequest` struct:
+  ```rust
+  pub struct PlayRequest {
+      pub url: String,
+      pub source_url: String,
+      pub socks_addr: String,
+      pub isolation_username: String,
+      pub cookies: Vec<String>,
+  }
+  ```
+  Then `play(&self, req: PlayRequest)`. New fields can be added to the struct without changing the trait signature.
 
-### Missing Tests
-
-#### TEST-001: No unit tests (entire file is `#[cfg(feature = "hw")]`)
-- **Severity:** Medium
-- **Description:** The file has `#![cfg(feature = "hw")]` at the top, so it's not compiled in non-hw builds. There are no tests visible — the test infrastructure likely requires a Pi with GStreamer and V4L2 hardware.
-- **Impact:** The pipeline construction logic is completely untested in CI. Regressions can only be caught by manual Pi testing.
-- **Recommendation:** Add hardware-in-the-loop tests in `tests/hw_pipeline.rs` that run on a Pi CI runner. Test: construct a pipeline for a known H.264 stream, verify state transitions, verify buffer health reporting, verify seek, verify software fallback.
-
-#### TEST-002: No test for the pad-added callback logic
+#### DESIGN-002: Error type is `Box<dyn std::error::Error + Send + Sync>`
 - **Severity:** Low
-- **Description:** The dynamic decode chain construction in the pad-added callback is not tested.
-- **Recommendation:** This is hard to test without real GStreamer hardware. Consider extracting the chain-construction logic into a testable function that takes the codec type and returns the element list.
+- **Location:** All trait methods
+- **Description:** All trait methods return `Result<T, Box<dyn std::error::Error + Send + Sync>>`. This is the standard Rust pattern for trait objects, but it loses type information — callers can't match on specific error variants without downcasting.
+- **Impact:** Error handling in the session layer requires string matching (see session review BUG-003: `is_cdn_retryable_error` matches on "Forbidden" string).
+- **Recommendation:** For v2, consider an associated type `type Error: std::error::Error + Send + Sync` on each trait, allowing implementations to return typed errors. This is a breaking change but improves error handling significantly.
 
-## Positive Observations
+#### DESIGN-003: `PlaybackTrait` doesn't include a `state()` method
+- **Severity:** Low
+- **Location:** `PlaybackTrait` (lines 80–130)
+- **Description:** The trait has `pause()`, `resume()`, `stop()`, `seek()`, `set_volume()`, `position_ms()`, `duration_ms()`, but no `state()` method to query the current pipeline state (Playing, Paused, Buffering, etc.). The session layer tracks state separately, which can diverge from the actual pipeline state.
+- **Impact:** The session layer's state may not match the actual GStreamer pipeline state, especially if the pipeline changes state internally (e.g., buffering → playing).
+- **Recommendation:** Add `async fn state(&self) -> Result<PipelineState, ...>` to `PlaybackTrait`. Use it to synchronize the session state with the actual pipeline state.
 
-1. **Excellent pipeline topology documentation** — the ASCII art diagrams for H.264, HEVC, and software fallback paths make the pipeline structure immediately clear.
-2. **`async-handling=true`** — correctly prevents the Ready→Paused deadlock with async sinks (kmssink, alsasink). The comment thoroughly explains why.
-3. **CDN anti-bot bypass via StreamSource** — the architecture uses `reqwest` (HTTP/2 + rustls) to match Chrome's TLS fingerprint, avoiding CDN 403s from TLS fingerprinting. Well-documented.
-4. **Software-decode fallback** — `rebuild_sw()` provides a fallback when V4L2 negotiation fails, ensuring playback continues (at lower quality) rather than failing entirely.
-5. **`kill_on_drop` on download task** — the progressive download task is cancelled when the pipeline is dropped, preventing orphaned downloads.
-6. **Buffer health monitoring** — `buffer_health()` reports low/high levels, enabling the session layer's ABR controller.
-7. **`OnceLock` for GStreamer init** — ensures `gstreamer::init()` is called exactly once, with the error cached for subsequent calls.
-8. **Colorimetry note** — the comment about removing `capssetter` (which caused "not-negotiated" errors) shows good debugging documentation — future developers won't re-add the broken element.
-9. **`parsebin` for dynamic codec detection** — correctly uses `parsebin` rather than a fixed pipeline, handling MP4, MKV, WebM, MPEG-TS without configuration.
-10. **Audio path with resample and volume** — `audioconvert → audioresample → volume → alsasink` is the correct chain for handling diverse audio formats.
+#### DESIGN-004: `ResolveInfo` doesn't include codec/dimension info
+- **Severity:** Low
+- **Location:** `ResolveInfo` struct (lines 23–36)
+- **Description:** `ResolveInfo` has `direct_url`, `title`, `duration_ms`, `cookies`, `used_tor` — but not `vcodec`, `acodec`, `width`, `height`. The `ResolveResult` in the resolver crate has these fields, but they're lost when converting to `ResolveInfo` for the session layer.
+- **Impact:** The playback engine can't use codec info for pipeline construction decisions (e.g., choosing H.264 vs HEVC decode path) from the trait interface. It has to re-probe via `parsebin`.
+- **Recommendation:** Add optional codec/dimension fields to `ResolveInfo`, or have the playback engine probe them via `parsebin` (which it already does). If `parsebin` handles it, the fields are redundant — document that.
+
+#### BUG-001: `set_volume` takes `f64` but HTTP API uses `u8`
+- **Severity:** Low
+- **Location:** `PlaybackTrait::set_volume(volume: f64)` (line 108) vs HTTP API's `VolumeRequest.volume: u8`
+- **Description:** The trait uses `f64` (0.0–1.0) for volume, but the HTTP API uses `u8` (0–100). The session layer converts between them. This is a minor impedance mismatch but works correctly.
+- **Impact:** No functional issue. Just a style inconsistency.
+- **Recommendation:** Document the expected range in the trait doc comment: "Volume as a float from 0.0 (mute) to 1.0 (max)."
+
+### Positive Observations (interfaces.rs)
+
+1. **Clear design rationale** — the module doc explains *why* trait objects are used (mocking, swappability, dependency inversion).
+2. **`Send + Sync` requirement** — all traits require thread safety, allowing `Arc<dyn Trait>` sharing across tokio tasks.
+3. **`async_trait`** — correctly uses the `async-trait` crate for async methods in trait objects.
+4. **`invalidate_cache` on `ResolverTrait`** — explicitly supports cache invalidation for CDN 403 retry.
+5. **`used_tor` flag in `ResolveInfo`** — lets the playback engine decide whether to use Tor or direct connection, matching the resolver's Tor usage.
+6. **`source_url` in `play()`** — correctly passes the original page URL for the Referer header (CDNs like Voe require it).
+7. **Audio device/sink methods** — `set_audio_device` and `set_audio_sink` allow runtime audio configuration without restarting.
+8. **Well-documented methods** — each method has a doc comment explaining its purpose and parameters.
 
 ## Recommendations Summary
 
-| Priority | Finding | Effort |
-|----------|---------|--------|
-| Medium | BUG-003: Validate GStreamer elements at startup with helpful errors | S (1–2 h) |
-| Medium | BUG-004: Preserve playback position across `rebuild_sw()` | M (2–3 h) |
-| Medium | DESIGN-001: Split 2123-line file into sub-modules | L (4–8 h) |
-| Medium | DESIGN-002: Add error recovery for pad-added callback | M (3–4 h) |
-| Medium | TEST-001: Add hardware-in-the-loop pipeline tests | L (4–8 h) |
-| Low | BUG-001: Clarify async-handling comment | S (15 min) |
-| Low | BUG-002: Fix loopback URL detection | S (30 min) |
-| Low | DESIGN-003: Make audio ts-offset configurable | S (30 min) |
-| Low | DESIGN-004: Extract HEVC code to separate module | M (2–3 h) |
-| Low | SEC-001: Validate URL scheme in pipeline new() | S (15 min) |
-| Low | SEC-002: Validate cookie format | S (30 min) |
-| Low | TEST-002: Test pad-added callback logic | M (2–3 h) |
+| File | Priority | Finding | Effort |
+|------|----------|---------|--------|
+| tls.rs | Medium | SEC-001: Check certificate expiration | S (1 h) |
+| tls.rs | Low | SEC-002: Validate cert chain, warn on single cert | S (30 min) |
+| tls.rs | Low | BUG-001: Read file once, use Cursor for parsing | S (30 min) |
+| tls.rs | Low | DESIGN-001: Document ECDSA PKCS#8 requirement | S (15 min) |
+| interfaces.rs | Low | DESIGN-001: Use PlayRequest struct for play() params | M (2–3 h) |
+| interfaces.rs | Low | DESIGN-002: Consider associated error type (v2) | L (4–8 h, breaking) |
+| interfaces.rs | Low | DESIGN-003: Add state() method to PlaybackTrait | S (1–2 h) |
+| interfaces.rs | Low | DESIGN-004: Add codec fields to ResolveInfo or document | S (1 h) |
+| interfaces.rs | Low | BUG-001: Document volume f64 range in trait | S (5 min) |
