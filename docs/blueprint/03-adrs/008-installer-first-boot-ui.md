@@ -1,3 +1,15 @@
+---
+doc: adr
+project: picast
+version: 1
+phase: adrs
+author: agent
+created: 2026-07-30T00:00:00Z
+updated: 2026-07-30T00:00:00Z
+adr: BP-ADR-008
+problem: "[[P-008]]"
+title: "One-command installer plus first-boot web UI at bogdan.local"
+---
 # BP-ADR-008: One-command installer plus first-boot web UI at bogdan.local
 
 | Field        | Value          |

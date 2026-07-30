@@ -1,3 +1,15 @@
+---
+doc: adr
+project: picast
+version: 1
+phase: adrs
+author: agent
+created: 2026-07-30T00:00:00Z
+updated: 2026-07-30T00:00:00Z
+adr: BP-ADR-011
+problem: "[[P-011]]"
+title: "Multi-room sync deferred to v2; leader-follower sketch recorded"
+---
 # BP-ADR-011: Multi-room sync deferred to v2; leader-follower sketch recorded
 
 | Field        | Value          |

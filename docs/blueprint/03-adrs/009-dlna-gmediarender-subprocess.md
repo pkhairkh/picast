@@ -1,3 +1,15 @@
+---
+doc: adr
+project: picast
+version: 1
+phase: adrs
+author: agent
+created: 2026-07-30T00:00:00Z
+updated: 2026-07-30T00:00:00Z
+adr: BP-ADR-009
+problem: "[[P-009]]"
+title: "DLNA MediaRenderer via gmediarender subprocess"
+---
 # BP-ADR-009: DLNA MediaRenderer via gmediarender subprocess
 
 | Field        | Value          |

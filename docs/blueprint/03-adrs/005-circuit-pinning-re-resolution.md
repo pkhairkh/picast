@@ -1,3 +1,15 @@
+---
+doc: adr
+project: picast
+version: 1
+phase: adrs
+author: agent
+created: 2026-07-30T00:00:00Z
+updated: 2026-07-30T00:00:00Z
+adr: BP-ADR-005
+problem: "[[P-005]]"
+title: "Per-site circuit pinning with health-monitored re-resolution"
+---
 # BP-ADR-005: Per-site circuit pinning with health-monitored re-resolution
 
 | Field        | Value          |

@@ -1,3 +1,15 @@
+---
+doc: adr
+project: picast
+version: 1
+phase: adrs
+author: agent
+created: 2026-07-30T00:00:00Z
+updated: 2026-07-30T00:00:00Z
+adr: BP-ADR-004
+problem: "[[P-004]]"
+title: "boGCast unified protocol layer with three facades"
+---
 # BP-ADR-004: boGCast unified protocol layer with three facades
 
 | Field        | Value          |

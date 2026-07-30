@@ -1,3 +1,15 @@
+---
+doc: adr
+project: picast
+version: 1
+phase: adrs
+author: agent
+created: 2026-07-30T00:00:00Z
+updated: 2026-07-30T00:00:00Z
+adr: BP-ADR-003
+problem: "[[P-003]]"
+title: "V4L2 stateful H.264 decoder in zero-copy DMA-BUF pipeline"
+---
 # BP-ADR-003: V4L2 stateful H.264 decoder in zero-copy DMA-BUF pipeline
 
 | Field        | Value          |

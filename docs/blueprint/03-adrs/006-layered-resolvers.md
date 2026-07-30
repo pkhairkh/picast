@@ -1,3 +1,15 @@
+---
+doc: adr
+project: picast
+version: 1
+phase: adrs
+author: agent
+created: 2026-07-30T00:00:00Z
+updated: 2026-07-30T00:00:00Z
+adr: BP-ADR-006
+problem: "[[P-006]]"
+title: "Layered resolvers — in-tree fast paths plus yt-dlp long-tail"
+---
 # BP-ADR-006: Layered resolvers — in-tree fast paths plus yt-dlp long-tail
 
 | Field        | Value          |

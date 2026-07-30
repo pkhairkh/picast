@@ -1,3 +1,15 @@
+---
+doc: adr
+project: picast
+version: 1
+phase: adrs
+author: agent
+created: 2026-07-30T00:00:00Z
+updated: 2026-07-30T00:00:00Z
+adr: BP-ADR-012
+problem: "[[P-012]]"
+title: "Keyboard-first accessible web UI with CI-enforced a11y checks"
+---
 # BP-ADR-012: Keyboard-first accessible web UI with CI-enforced a11y checks
 
 | Field        | Value          |

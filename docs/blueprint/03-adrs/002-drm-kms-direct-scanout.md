@@ -1,3 +1,15 @@
+---
+doc: adr
+project: picast
+version: 1
+phase: adrs
+author: agent
+created: 2026-07-30T00:00:00Z
+updated: 2026-07-30T00:00:00Z
+adr: BP-ADR-002
+problem: "[[P-002]]"
+title: "DRM/KMS direct scanout, no display server"
+---
 # BP-ADR-002: DRM/KMS direct scanout, no display server
 
 | Field        | Value          |
