@@ -157,6 +157,18 @@ Total critical path: ~54 ideal days. With parallelism, the full v1 ships in ~90 
 | [[T-007]] (fine-draft) Thermal supervisor / resolver contract | [[T-504]] (this doc) | Typed `ResolveError::NoLowerVariant` |
 | [[T-008]] (fine-draft) Browser extension MV3 storage | [[T-404]] (this doc) | `chrome.storage.local` |
 
+## Deferred Requirements
+
+The following requirement from `05-spec.md` is intentionally not tasked in v1. It is recorded here so the coverage gap is explicit rather than silent.
+
+| Requirement | Problem | Reason | Deferred to |
+|-------------|---------|--------|-------------|
+| [[R-025]] | [[P-011]] | Multi-room sync is a nice-to-have; v1 focuses on the must-have and should-have problems. The leader-follower sketch is recorded in [[BP-ADR-011]]. | v2 (future M7 milestone) |
+
+When v2 multi-room work begins, a new task (e.g., `[[T-701]]` in a future M7 milestone) will trace to [[R-025]]. Until then, each appliance plays independently — this is documented as a known limitation in the user guide.
+
+
+
 ## Roles Summary
 
 | Role | Headcount (ideal) | Milestones |
