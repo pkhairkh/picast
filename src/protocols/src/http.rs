@@ -489,6 +489,17 @@ async fn handle_request(
         // Set audio device and sink type.
         (Method::POST, "/api/audio-device") => {
             let payload = read_body_json::<AudioDeviceRequest>(body).await?;
+            // Validate sink_type against a whitelist
+            match payload.sink_type.as_str() {
+                "alsasink" | "pulsesink" => {},
+                other => {
+                    return error_response_with_code(
+                        StatusCode::BAD_REQUEST,
+                        ErrorCode::BadRequest,
+                        &format!("invalid sink_type '{}': must be 'alsasink' or 'pulsesink'", other),
+                    );
+                }
+            }
             // Set the device first
             match session.set_audio_device(payload.device.clone()).await {
                 Ok(()) => {
