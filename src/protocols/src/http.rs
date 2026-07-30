@@ -44,6 +44,18 @@ type BoxBody = Full<bytes::Bytes>;
 #[derive(Debug, Deserialize)]
 struct CastRequest {
     url: String,
+    /// Optional display title for OSD and status. If provided, the
+    /// session manager uses it for the on-screen display.
+    #[serde(default)]
+    title: Option<String>,
+    /// Optional resume position in milliseconds. If provided, playback
+    /// starts from this position instead of the beginning.
+    #[serde(default, rename = "resumePosition")]
+    resume_position: Option<u64>,
+    /// Optional Tor mode override. Currently unused (all traffic goes
+    /// through Tor), but accepted for forward compatibility.
+    #[serde(default, rename = "torMode")]
+    tor_mode: Option<String>,
 }
 
 #[derive(Debug, Deserialize)]
