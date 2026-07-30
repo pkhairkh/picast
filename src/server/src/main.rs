@@ -245,7 +245,7 @@ async fn main() -> Result<()> {
 
     // ── 2. Logging ────────────────────────────────────────────────────
     init_tracing(&config.logging.level);
-    info!("boGDan starting …");
+    info!(version = %VERSION, "boGDan starting");
     info!(
         http_addr = %config.server.http_addr,
         ws_addr = %config.server.ws_addr,
@@ -258,7 +258,7 @@ async fn main() -> Result<()> {
     // ── 3. Shutdown signal ────────────────────────────────────────────
     let (shutdown_tx, _) = broadcast::channel::<()>(1);
     let mut sigterm = signal::unix::signal(signal::unix::SignalKind::terminate())
-        .expect("failed to install SIGTERM handler");
+        .map_err(|e| anyhow::anyhow!("failed to install SIGTERM handler: {}", e))?;
     let shutdown_signal = async {
         tokio::select! {
             _ = signal::ctrl_c() => info!("received SIGINT"),
