@@ -5,198 +5,370 @@ version: 1
 phase: code_review
 author: agent
 created: 2026-07-30T00:00:00Z
-updated: 2026-07-30T11:00:00Z
+updated: 2026-07-30T00:00:00Z
 ---
 
-# Code Review: `src/tor/src/lib.rs`
+# Code Review: `src/session/src/lib.rs`
 
-**File:** `src/tor/src/lib.rs`
-**Lines:** 1334
+**File:** `src/session/src/lib.rs`
+**Lines:** 2928 (including ~1450 lines of tests, so ~1480 lines of production code)
 **Reviewer:** agent
 **Date:** 2026-07-30
 
 ## Summary
 
-The Tor manager handles the Tor daemon lifecycle (start, monitor, restart, shut down), provides the SOCKS5 proxy configuration to other subsystems, computes per-hostname stream-isolation identifiers for `IsolateSOCKSAuth`, and exposes control-port operations (`NEWNYM`, circuit-status queries). This is the security-critical core of boGDan's privacy guarantee. The implementation is generally strong — correct use of `socks5h://`, SHA-256 hostname hashing for circuit isolation, cookie-based control-port auth, and graceful SIGTERM shutdown. However, there are several security concerns, bugs, and design issues that should be addressed.
+The session layer is the central coordinator of the boGDan media appliance. It owns the SQLite-backed `MediaSession` store, enforces a single-session-at-a-time invariant, drives the resolver → playback → display → Tor subsystems through trait objects, and exposes both a broadcast event stream (for WebSocket) and a watch channel (for HTTP polling). The state machine is well-defined and exhaustively tested. Crash recovery and stale-session cleanup on startup are thoughtful production touches. However, there are several consistency bugs in the command methods, a data-integrity bug in volume handling, lock-handling patterns that could deadlock under load, and meaningful gaps in the test suite around the CDN retry logic that is the file's most complex code path.
 
-## Key Components Reviewed
+## Scope Reviewed
 
-| Component | Lines | Purpose |
-|-----------|-------|---------|
-| `stream_isolation_id()` | 30–36 | SHA-256 hostname → `bogdan-<16hex>` username |
-| `SocksProxy` | 80–120 | Proxy config + `proxy_url_for()` builder |
-| `CircuitHealth` | 125–145 | Circuit count + latency metrics |
-| `TorManager` | 150–500 | Daemon lifecycle: `ensure_running`, `start_monitor`, `shutdown` |
-| `proxied_reqwest_client()` | 460–490 | Build `reqwest::Client` with per-host SOCKS5h isolation |
-| `socks5_handshake()` | 500–610 | Manual SOCKS5 handshake for health check |
-| `health_check()` | 615–665 | TCP + SOCKS5 + HTTP health validation |
-| `new_circuit()` | 670–740 | Control-port `SIGNAL NEWNYM` |
-| `query_circuit_health()` | 920–1050 | Control-port `GETINFO circuit-status` parser |
-| `Drop` impl | 1060–1090 | Best-effort synchronous kill |
+| Concern | Implementation | Notes |
+|---------|----------------|-------|
+| State machine | `PlayerState` enum + `can_transition_to` / `transition` | 7 states, explicit transition table |
+| Persistence | SQLite via `rusqlite::Connection` wrapped in `std::sync::Mutex` | WAL journal mode; single-row-per-session schema |
+| Concurrency | `std::sync::Mutex` for `db` and `active_session_id`; `tokio::sync::{broadcast, watch}` for events | No async locks — all locks are short-lived |
+| Event distribution | `broadcast::Sender<SessionEvent>` (128-slot ring) + `watch::Sender<Option<MediaSession>>` | Dual-channel design serves streaming and polling clients |
+| Subsystem wiring | `Option<Arc<dyn {Resolver,Playback,Display,Tor}Trait>>` | Traits defined in `interfaces.rs`; mockable |
+| CDN 403 retry | Inline loop in `load()` with `is_cdn_retryable_error` + `re_resolve` | Max 2 retries; cache invalidation between attempts |
+| Crash recovery | `recover_crashed_sessions()` runs on `new()` | Resets non-idle/non-error sessions to Idle |
+| Stale cleanup | `cleanup_stale_sessions()` runs on `new()` | Deletes rows older than 24h |
 
 ## Findings
 
-### Security
-
-#### SEC-001: `proxy_url_for()` omits password, but `proxied_reqwest_client()` uses empty password
-- **Severity:** Medium
-- **Location:** Line 115 (`pub fn proxy_url_for`) vs line 462 (`pub fn proxied_reqwest_client`)
-- **Description:** `proxy_url_for()` builds `socks5h://bogdan-<hash>@127.0.0.1:9050/` (no password). `proxied_reqwest_client()` builds `socks5h://bogdan-<hash>:@127.0.0.1:9050` (empty password). Tor's `IsolateSOCKSAuth` uses only the username for isolation, so both work — but the inconsistency could confuse developers and might break a future reqwest version that requires a non-empty password when a username is present.
-- **Impact:** No current vulnerability, but inconsistent URL construction between the two methods.
-- **Recommendation:** Standardize on one format. The spec (§6.2 of SPECIFICATION.md) documents the password as always `x` (a placeholder). Use `:x@` consistently, or omit both username and password when not needed. Align with the spec.
-
-#### SEC-002: Control port cookie path hardcoded to `/run/tor/control.authcookie`
-- **Severity:** Low
-- **Location:** Line 97 (`pub fn new` for `TorManager`) — the cookie path is hardcoded inside this constructor
-- **Description:** The default cookie path is `/run/tor/control.authcookie`. On Debian/Raspberry Pi OS, the Tor cookie is typically at `/var/run/tor/control.authcookie` or `/run/tor/control.authcookie`. The `with_cookie_path()` builder exists for override, but the default may not work on all distributions.
-- **Impact:** On systems where the cookie is elsewhere, `new_circuit()` and `query_circuit_health()` will fail silently (the monitor task catches the error and continues with default health).
-- **Recommendation:** Try multiple candidate paths (`/run/tor/control.authcookie`, `/var/run/tor/control.authcookie`) in `query_circuit_health` if the primary path fails. Or read the cookie path from `torrc` at startup.
-
-#### SEC-003: `socks5_handshake()` connects to `check.tor-project.org` on every health check
-- **Severity:** Medium
-- **Location:** `socks5_handshake` function at line 502; the CONNECT to `check.tor-project.org:443` is at lines 570–580 (inside the function)
-- **Description:** Every `socks5_handshake()` call (invoked by `health_check()`) opens a Tor circuit to `check.tor-project.org:443`. This creates a recognizable traffic pattern: the Tor exit relay sees a connection to `check.tor-project.org` every time boGDan does a health check. An adversary observing the exit could fingerprint boGDan appliances.
-- **Impact:** Reduces privacy by creating a predictable traffic fingerprint. Also, `check.tor-project.org` may rate-limit or block frequent checks.
-- **Recommendation:** Use a less identifiable target for the CONNECT test (e.g., a random low-traffic HTTPS site, or just test the SOCKS5 handshake without a CONNECT). Alternatively, rely on the control-port circuit-status query alone for health, which doesn't generate external traffic.
-
-#### SEC-004: Tor stdout/stderr are discarded (`Stdio::null()`)
-- **Severity:** Low
-- **Location:** Lines 269–270 and 408–409 (`.stdout(Stdio::null()).stderr(Stdio::null())` in the two Tor spawn paths)
-- **Description:** When spawning Tor, both stdout and stderr are set to `Stdio::null()`. If Tor fails to bootstrap (e.g., port conflict, corrupt state, missing dependencies), the error message is lost. The only feedback is "SOCKS proxy timeout."
-- **Impact:** Debugging Tor startup failures is difficult; the actual error is not logged.
-- **Recommendation:** Pipe stderr to the tracing subsystem (at debug or trace level) so Tor's bootstrap log is available for debugging. At minimum, capture stderr to a log file in the runtime directory.
-
-#### SEC-005: No validation that the spawned Tor is actually the expected binary
-- **Severity:** Low
-- **Location:** Line 856 (`fn which_tor()`) — the function spans lines 856–890
-- **Description:** `which_tor()` searches for `tor`, `/usr/bin/tor`, `/usr/local/bin/tor`, and falls back to `which tor`. It does not verify the binary's integrity (e.g., package signature, hash). If `PATH` is compromised and a malicious `tor` is found first, boGDan would spawn it.
-- **Impact:** Low on a properly configured Pi (Tor is installed via apt and `/usr/bin/tor` is root-owned), but worth noting for defense-in-depth.
-- **Recommendation:** Prefer `/usr/bin/tor` over `tor` from `PATH` (the current order does this correctly for the first two candidates, but the `which` fallback could pick up a malicious binary). Document that the appliance should not have a writable `PATH` entry before `/usr/bin`.
-
 ### Bugs
 
-#### BUG-001: `parse_addr` splits on `:` which breaks IPv6 addresses
-- **Severity:** Low
-- **Location:** Line 806 (`fn parse_addr(addr: &str) -> (String, u16)`)
-- **Description:** `parse_addr` splits on `:` and expects exactly 2 parts. An IPv6 address like `[::1]:9050` would split into more than 2 parts, falling through to the default `127.0.0.1:9050`.
-- **Impact:** IPv6 SOCKS addresses are not supported. On a LAN-only Pi using IPv4, this is unlikely to matter, but it's a latent bug.
-- **Recommendation:** Use `std::net::ToSocketAddrs` or `hyper::Uri` parsing instead of manual splitting. Or at minimum, handle the `[ipv6]:port` format explicitly.
-
-#### BUG-002: `health_check()` TCP connect then immediate drop is racy
-- **Severity:** Low
-- **Location:** Line 625 (`pub async fn health_check`) — the TCP connect-and-drop is in the first few lines of the function
-- **Description:** `health_check()` opens a TCP connection to the SOCKS port, measures the connect time, then `drop(stream)`s it immediately. This creates a connect-then-disconnect pattern that some firewalls flag as suspicious. It also doesn't verify the port is actually a SOCKS proxy (that's step 2, `socks5_handshake`).
-- **Impact:** Minimal — step 2 does the real check. But the redundant TCP connect adds latency to the health check.
-- **Recommendation:** Remove step 1 (the bare TCP connect) and rely on `socks5_handshake()` which already does a TCP connect as its first operation.
-
-#### BUG-003: `Drop` impl uses `try_lock` which may fail silently
+#### BUG-001: Volume corruption window — `load_session` clamps to 255, not 100
 - **Severity:** Medium
-- **Location:** Line 1025 (`impl Drop for TorManager`) — the `try_lock` is in the `drop` method spanning lines 1025–1062
-- **Description:** The `Drop` implementation uses `self.child.try_lock()` to attempt synchronous cleanup. If the lock is held (e.g., the monitor task is mid-restart), the `Err` branch logs a warning and the Tor process is orphaned. The warning says "Use shutdown() for clean termination" but `shutdown()` is async and can't be called from `drop`.
-- **Impact:** If `TorManager` is dropped without calling `shutdown()` first (e.g., due to a panic), and the monitor task holds the lock, the Tor child process is orphaned and continues running.
-- **Recommendation:** Use `std::sync::Mutex` instead of `tokio::sync::Mutex` for the `child` field (it doesn't need to be held across `.await` points in most cases), or use `parking_lot::Mutex` which has a non-poisoning `try_lock`. Alternatively, track the PID separately so `Drop` can kill by PID without needing the lock.
+- **Location:** Lines 547–557 (`load_session` — `volume_u8` computation, specifically the `if !(0..=255).contains(&volume)` check at line 551)
+- **Description:** When loading a session from SQLite, the volume is read as `i32` and clamped into the `0..=255` range before being cast to `u8`. The code path:
+  ```rust
+  let volume_u8 = if !(0..=255).contains(&volume) {
+      tracing::warn!(volume = volume, "corrupt volume in DB — clamping to 100");
+      100u8
+  } else {
+      volume as u8
+  };
+  ```
+  A stored value of, say, `200` (which is in `0..=255` but invalid as a volume — the public API only accepts 0–100 via `set_volume`'s `.min(100)` clamp) will be loaded as `200u8` without correction. The warning message even says "clamping to 100" but the code does not actually clamp — it falls through to the `else` branch and returns the raw value.
+- **Impact:** A volume value that was somehow corrupted in the DB (or written by a future code path that doesn't clamp) will be loaded as-is and used as the playback volume, which can exceed 100%. The warning message is misleading — it claims to clamp but doesn't.
+- **Recommendation:** Either clamp to `0..=100` (matching the public API contract) and update the warning to match the actual range, or introduce a `Volume` newtype that enforces 0–100 at the type level. Suggested fix:
+  ```rust
+  let volume_u8 = if volume < 0 || volume > 100 {
+      tracing::warn!(volume = volume, "corrupt volume in DB — clamping to 100");
+      100u8
+  } else {
+      volume as u8
+  };
+  ```
 
-#### BUG-004: `query_circuit_health` counts `CLOSED` circuits as `failed`
-- **Severity:** Low
-- **Location:** Line 995 (`"CLOSED" => { ... }` arm in the circuit state parser, inside `query_circuit_health` which starts at line 900)
-- **Description:** The parser maps `CLOSED` circuits to `failed_circuits`. A `CLOSED` circuit is not necessarily failed — it could have been closed normally after `MaxCircuitDirtiness` expired. Counting all closed circuits as failed inflates the failure count and could trigger false health warnings.
-- **Impact:** `is_healthy` may report `false` (because `built == 0` after all circuits have normally closed) even though Tor is functioning correctly.
-- **Recommendation:** Distinguish `CLOSED` from `FAILED`. Track `closed_circuits` separately, or only count `FAILED` as failures. The `is_healthy` check should be `built > 0 || open > 0` (Tor has at least some circuits).
+#### BUG-002: `pause()` / `resume()` leave the playback subsystem in a divergent state if the DB transition fails
+- **Severity:** Medium
+- **Location:** `pause()` lines 946–962 (subsystem call at line 952, `try_transition` at line 956), `resume()` lines 971–987 (subsystem call at line 977, `try_transition` at line 981)
+- **Description:** Both methods follow the pattern: (1) call `playback.pause()/resume().await` first, (2) then call `try_transition()` to update the DB state. The comment says "only update DB state on success" — but it only checks the *subsystem's* success, not the DB transition's. If `try_transition` fails (e.g. because another concurrent operation already moved the state, or the session was concurrently stopped and the row deleted), the playback engine is already paused/resumed but the DB still reflects the old state. Subsequent `current_status()` calls return stale state.
+- **Impact:** The DB and the playback engine disagree about the current state. A subsequent `stop()` will skip calling `playback.stop()` because the DB state doesn't match `Playing|Paused|Buffering|Seeking`, leaving the pipeline running while the session is deleted.
+- **Recommendation:** Either (a) make the transition atomic by checking the current state before calling the subsystem and using a compare-and-swap pattern, or (b) on `try_transition` failure, roll back the subsystem call (e.g. call `playback.resume()` if `pause()` succeeded but the transition failed). Option (a) is cleaner:
+  ```rust
+  pub async fn pause(&self) -> Result<(), SessionError> {
+      let id = self.active_session_id()?;
+      let session = self.load_session(id)?;
+      if session.state != PlayerState::Playing {
+          return Err(SessionError::InvalidTransition {
+              from: session.state,
+              to: PlayerState::Paused,
+          });
+      }
+      if let Some(ref playback) = self.playback {
+          playback.pause().await.map_err(|e| SessionError::PlaybackError(e.to_string()))?;
+      }
+      // Transition should now succeed because we hold no lock between
+      // the check and the call — but if it still fails (concurrent stop),
+      // attempt to roll back the subsystem call.
+      if let Err(e) = self.try_transition(id, PlayerState::Paused) {
+          if let Some(ref playback) = self.playback {
+              let _ = playback.resume().await; // best-effort rollback
+          }
+          return Err(e);
+      }
+      // ... refresh + broadcast
+      Ok(())
+  }
+  ```
 
-#### BUG-005: `is_healthy` in `query_circuit_health` doesn't consider latency
+#### BUG-003: `stop()` ignores `playback.stop()` errors but transitions to Idle anyway
+- **Severity:** Medium
+- **Location:** Line 1013 (`stop()` — `let _ = playback.stop().await;` inside the `if matches!(session.state, ...)` block at lines 1006–1014)
+- **Description:** When stopping, the code calls `playback.stop().await` and discards the result with `let _ =`. If the playback engine fails to stop (e.g. GStreamer pipeline teardown hangs or errors), the DB is still transitioned to Idle and the session is deleted. The pipeline may continue running in the background, holding DRM master and consuming CPU.
+- **Impact:** A failed pipeline teardown leaves a zombie pipeline running with no DB record. The next `load()` will try to acquire DRM master and fail because the zombie still holds it.
+- **Recommendation:** Log the error at minimum, and consider retrying or forcing the teardown. At the very least:
+  ```rust
+  if let Some(ref playback) = self.playback {
+      if let Err(e) = playback.stop().await {
+          tracing::error!(error = %e, "playback.stop() failed during stop — pipeline may be orphaned");
+      }
+  }
+  ```
+  For a v1.1 hardening, consider adding a `force_stop()` method to `PlaybackTrait` that destroys the pipeline without waiting for graceful teardown.
+
+#### BUG-004: `seek()` from `Paused` emits spurious `Playing` → `Paused` events
 - **Severity:** Low
-- **Location:** Line 1021 (`is_healthy: built > 0` in the return value of `query_circuit_health`, which starts at line 900)
-- **Description:** `query_circuit_health` returns `CircuitHealth { is_healthy: built > 0, ... }` — it only checks if any circuits are built. The `health_check()` method (lines 655–660) computes `is_healthy` using both connect time and latency. The two paths produce different `is_healthy` values for the same state.
-- **Impact:** `last_circuit_health()` (from the monitor) and `health_check()` (on-demand) may disagree on health status.
-- **Recommendation:** Unify the health criteria. Either both should use `built > 0`, or both should use latency + circuit count. Document which is authoritative.
+- **Location:** Lines 1078–1082 (`seek()` — `if return_state == PlayerState::Paused` branch)
+- **Description:** When seeking from Paused, the code does:
+  ```rust
+  if return_state == PlayerState::Paused {
+      self.try_transition(id, PlayerState::Playing)?;  // emits Playing event
+      self.try_transition(id, PlayerState::Paused)?;   // emits Paused event
+  }
+  ```
+  This generates a `Playing` event followed immediately by a `Paused` event, even though the user only sought. Subscribers (WebSocket clients, DLNA renderers) will briefly see "Playing" and then "Paused", which can cause UI flicker or trigger unwanted side effects (e.g. a DLNA controller showing "now playing" then immediately "paused").
+- **Impact:** UI flicker on clients; potential side effects in DLNA controllers that react to state transitions.
+- **Recommendation:** Either (a) add a `Seeking → Paused` transition to the state machine (currently `Seeking` can only go to `Playing|Error|Idle`), or (b) skip the broadcast for the intermediate `Playing` state. Option (a) is cleaner:
+  ```rust
+  // In can_transition_to:
+  PlayerState::Seeking => {
+      matches!(target, PlayerState::Playing | PlayerState::Paused | PlayerState::Error | PlayerState::Idle)
+  }
+  ```
+  Then `seek()` becomes:
+  ```rust
+  self.try_transition(id, return_state)?;
+  ```
+
+#### BUG-005: `load()` always sleeps 300ms before acquiring the display
+- **Severity:** Low
+- **Location:** Line 786 (`load()` — `tokio::time::sleep(Duration::from_millis(300))`)
+- **Description:** A fixed 300ms sleep is inserted unconditionally before `display.acquire()` to give the kernel time to release DRM master after gmediarender exits. The comment acknowledges this is a "conservative safety net". The sleep runs on every `load()`, including first-boot (no gmediarender ever ran) and any load where DLNA isn't in use.
+- **Impact:** Adds 300ms of latency to every cast operation. On a device already on the edge of the 10s resolution budget, this is meaningful.
+- **Recommendation:** Make the sleep conditional on whether gmediarender was recently active. Track a `last_gmediarender_exit` timestamp (set by the DLNA sync when it stops gmediarender) and only sleep if that timestamp is within the last few seconds. Alternatively, rely on the display manager's internal retry loop (the comment says it already has exponential backoff) and remove the sleep entirely.
+
+#### BUG-006: `recover_crashed_sessions` does not clear `active_session_id` (but doesn't need to)
+- **Severity:** Low (informational)
+- **Location:** Lines 1339–1380 (`recover_crashed_sessions`)
+- **Description:** On startup, this method resets all non-idle/non-error sessions in the DB to Idle. However, `active_session_id` is an in-memory field initialized to `None` in `new()`, so there's no risk of it pointing to a stale session. The recovery is correct, but the relationship between the in-memory state and the DB state is implicit — a future change that persists `active_session_id` across restarts would silently break this invariant.
+- **Impact:** None today. Future maintenance hazard.
+- **Recommendation:** Add a comment in `recover_crashed_sessions` explicitly noting that `active_session_id` is in-memory only and is intentionally reset to `None` on startup. If `active_session_id` is ever persisted, this method must be updated to clear it.
+
+#### BUG-007: `try_transition` holds the DB lock across the broadcast
+- **Severity:** Low
+- **Location:** Lines 415–465 (`try_transition` — `let _ = self.event_tx.send(event);` at line 462 while the `db` guard from line 422 is still in scope)
+- **Description:** The `db` Mutex guard is held until the end of `try_transition`, including across the `event_tx.send()` call. While `broadcast::Sender::send` is non-blocking (it returns `Err` if there are no receivers or the ring is full, but doesn't wait), holding the lock during the call is unnecessary and adds contention.
+- **Impact:** Minor contention under high event rates. With 50 WebSocket clients and per-second position updates, the DB lock is held slightly longer than necessary.
+- **Recommendation:** Drop the DB guard before broadcasting:
+  ```rust
+  {
+      let db = self.db.lock()...;
+      // ... read, validate, update ...
+  } // db guard dropped here
+  let event = match target { ... };
+  let _ = self.event_tx.send(event);
+  Ok(target)
+  ```
+
+### Concurrency
+
+#### CONC-001: `load()` check-and-set is atomic, but the subsequent `insert_session` can fail and leave a stale reservation
+- **Severity:** Low
+- **Location:** Lines 689–740 (`load()` — reservation at lines 691–701, `insert_session` at line 712, cleanup at lines 716–722)
+- **Description:** The code atomically checks `active_session_id.is_none()` and sets it to a new UUID inside a single Mutex guard. If the subsequent `insert_session(&session)` fails (e.g. disk full, DB locked), the code clears the reservation. However, between the reservation and the cleanup, another concurrent `load()` call will see `Some(id)` and return `AlreadyActive` — even though the first load is about to fail and clear the slot.
+- **Impact:** A transient DB error can cause a brief window where new loads are rejected even though no session is actually active. The window is tiny (only as long as the DB insert takes to fail), but on a slow Pi SD card this could be tens of milliseconds.
+- **Recommendation:** Acceptable for v1. Document the behavior. For v2, consider a `tokio::sync::Mutex` around the entire load path (check + insert + resolve + play) so that concurrent loads serialize cleanly.
+
+#### CONC-002: `current_status()` acquires the DB lock on every poll
+- **Severity:** Low
+- **Location:** Lines 586–596 (`current_status` → `load_session` → `db.lock()`)
+- **Description:** `current_status()` is called by HTTP `/api/status` on every poll, by WebSocket's `map_session_event` on every event, and by the background position-update task. Each call acquires the DB Mutex, runs a `SELECT`, and releases. With 50 WS clients and per-second position updates, this is 50+ DB lock acquisitions per second.
+- **Impact:** Minor contention. SQLite with WAL mode handles concurrent reads well, but the `std::sync::Mutex` serializes all access (including writes).
+- **Recommendation:** For v1, acceptable. For v2, consider caching the latest `MediaSession` in an `ArcSwap<Option<MediaSession>>` updated by `broadcast_state_update()`, so reads don't need to touch the DB at all.
+
+#### CONC-003: `active_session_id` uses `Arc<Mutex<Option<Uuid>>>` but the Arc is never cloned
+- **Severity:** Low (informational)
+- **Location:** Line 319 (`active_session_id: Arc<Mutex<Option<Uuid>>>`)
+- **Description:** The field is wrapped in `Arc`, but a search of the codebase shows no `self.active_session_id.clone()` calls — the `Arc` is unnecessary. The `SessionManager` itself is always wrapped in `Arc` by callers, so the inner `Arc` adds a redundant allocation and indirection.
+- **Impact:** Negligible runtime cost; minor confusion for readers.
+- **Recommendation:** Remove the `Arc`: `active_session_id: Mutex<Option<Uuid>>`. (The `db` field already follows this pattern.)
+
+### Security
+
+#### SEC-001: No URL length validation in `load()`
+- **Severity:** Low
+- **Location:** Line 688 (`load()` — `pub async fn load(&self, url: &str)`)
+- **Description:** `load()` accepts an arbitrary `&str` URL and stores it in SQLite without length validation. A malicious client could send a multi-megabyte URL that bloats the DB row and the in-memory `MediaSession`. The HTTP layer (`http.rs`) has a 1KB body size limit (`MAX_BODY_SIZE`), which indirectly caps the URL length, but the session layer doesn't enforce its own limit.
+- **Impact:** Minimal in v1 (the HTTP body limit protects the session layer). If a future caller bypasses the HTTP layer (e.g. a DLNA handler that constructs URLs differently), the session layer is exposed.
+- **Recommendation:** Add a URL length check at the top of `load()`:
+  ```rust
+  const MAX_URL_LEN: usize = 8192;
+  if url.len() > MAX_URL_LEN {
+      return Err(SessionError::Subsystem(format!(
+          "URL too long: {} bytes (max {})", url.len(), MAX_URL_LEN
+      )));
+  }
+  ```
+
+#### SEC-002: SQL injection surface is zero (positive observation)
+- **Severity:** Informational
+- **Location:** All DB queries
+- **Description:** Every SQL query uses parameterized statements (`rusqlite::params![...]` with `?N` placeholders). No string concatenation is used to build queries. This is correct and should be maintained.
+- **Impact:** No SQL injection risk.
+- **Recommendation:** None. Add a `#[cfg(test)]` test that attempts a SQL-injection payload in a URL (e.g. `' OR 1=1 --`) and verifies it's stored as a literal string, to guard against future regressions.
 
 ### Design Issues
 
-#### DESIGN-001: `NEWNYM` rotates all circuits, not per-site
-- **Severity:** Medium
-- **Location:** Line 679 (`pub async fn new_circuit`) — `SIGNAL NEWNYM` sent at line 721; the function spans lines 679–740
-- **Description:** The `new_circuit()` method sends `SIGNAL NEWNYM` to the Tor control port, which rotates *all* circuits. This contradicts the per-site isolation design (ADR-010, BP-ADR-005) where each site has its own circuit. If a user casts a YouTube video and the circuit degrades, calling `new_circuit()` would also rotate the Vimeo circuit, disrupting any concurrent or future Vimeo playback.
-- **Impact:** `NEWNYM` is a blunt instrument that breaks the per-site isolation model. The spec (BP-ADR-005) recommends re-resolution with a session-counter suffix on the SOCKS username to force a new circuit for a specific site only.
-- **Recommendation:** Deprecate `new_circuit()` (or mark it "use only for debugging"). The per-site circuit rotation should be done by appending a counter to the SOCKS username (e.g., `bogdan-<hash>-2`) which forces Tor to build a new circuit for that site without affecting others.
-
-#### DESIGN-002: `start_monitor` spawns a task with no handle for cancellation beyond `Notify`
+#### DESIGN-001: `try_transition` doesn't broadcast a `Seeking` event
 - **Severity:** Low
-- **Location:** Line 334 (`pub fn start_monitor`) — the function spans lines 334–400
-- **Description:** `start_monitor()` spawns a background task that runs until `monitor_shutdown.notified()` fires. The `Notify` is triggered in `shutdown()`. However, if `shutdown()` is not called (e.g., the process is killed), the task continues running. There's no `JoinHandle` to await the task's completion.
-- **Impact:** On ungraceful shutdown, the monitor task may briefly continue running and attempt to restart Tor.
-- **Recommendation:** Return a `JoinHandle` from `start_monitor()` so callers can await task completion. Or use a `CancellationToken` from `tokio_util` which is more ergonomic than `Notify` for this pattern.
+- **Location:** Line 463 (`try_transition` — `_ => return Ok(target)` arm)
+- **Description:** The match in `try_transition` broadcasts events for `Resolving`, `Playing`, `Paused`, `Idle`, `Error`, and `Buffering`, but the `Seeking` arm is `_ => return Ok(target)` (no broadcast). The `seek()` method compensates by broadcasting `SessionEvent::Seeking` separately before calling `try_transition`. This means `Seeking` is the only state transition that requires the caller to manually broadcast.
+- **Impact:** Inconsistency — callers must remember to broadcast Seeking separately. If a future code path transitions to Seeking without broadcasting, subscribers won't see the event.
+- **Recommendation:** Add a `PlayerState::Seeking` arm to the match in `try_transition` that broadcasts `SessionEvent::Seeking { id, position_ms: 0 }` (or include the position in the transition call). Then remove the manual broadcast from `seek()`.
 
-#### DESIGN-003: `socks5_handshake` uses `b"bogcast-health"` as the SOCKS5 username
+#### DESIGN-002: `recover_crashed_sessions` doesn't broadcast `Stopped` events
 - **Severity:** Low
-- **Location:** Line 539 (`let username = b"bogcast-health";` in `socks5_handshake`)
-- **Description:** The SOCKS5 handshake for health checks uses username `bogcast-health"`. This creates a separate Tor circuit (via `IsolateSOCKSAuth`) just for health checks. While this is intentional (don't pollute site circuits), it means every health check builds a new circuit, adding 5–15 seconds of latency.
-- **Impact:** Health checks are slow and create extra Tor circuits.
-- **Recommendation:** Use the `No Auth` method (0x00) for health checks instead of `Username/Password` (0x02). The greeting already offers both methods; just prefer No Auth if the server selects it. This avoids creating an isolation circuit for health checks.
+- **Location:** Lines 1339–1380 (`recover_crashed_sessions`)
+- **Description:** When sessions are recovered from `Playing`/`Buffering`/etc. to `Idle` on startup, no `SessionEvent::Stopped` is broadcast. This is correct for the startup case (no subscribers exist yet — `subscribe()` hasn't been called), but if `recover_crashed_sessions` is ever called at runtime (e.g. by a health check), subscribers won't be notified.
+- **Impact:** None today. Future maintenance hazard.
+- **Recommendation:** Add a comment noting that this method is startup-only and must not be called at runtime without broadcasting events. Or, broadcast `Stopped` events unconditionally — the startup case has no subscribers, so the broadcast is a no-op.
 
-#### DESIGN-004: Duplicate test coverage
+#### DESIGN-003: `MediaSession::new()` always sets `volume: 100`
 - **Severity:** Low
-- **Location:** Lines 1063–1334 (`#[cfg(test)]` at line 1063, `mod tests` at line 1064)
-- **Description:** The test module has both a "new tests" section and a "Legacy tests (preserved)" section that test the same things (e.g., `test_socks_proxy_default` and `socks_proxy_default` both test `SocksProxy::default()`). This is harmless but inflates the test count without adding coverage.
-- **Impact:** Maintenance burden; changes require updating two tests for the same logic.
-- **Recommendation:** Remove the legacy tests or merge them with the new tests.
+- **Location:** Lines 291–313 (`MediaSession::new` — `volume: 100` at line 303)
+- **Description:** Every new session starts at volume 100. If a user casts at volume 50, stops, and casts again, the volume resets to 100. This may be surprising — most media players persist the last-used volume.
+- **Impact:** Minor UX surprise. Acceptable for v1 (documented behavior).
+- **Recommendation:** For v2, consider persisting the last-used volume in a separate settings table and loading it in `MediaSession::new()`. For v1, document in the user guide that volume resets to 100 on each new cast.
+
+#### DESIGN-004: `cleanup_stale_sessions` SQL truncates to seconds
+- **Severity:** Low
+- **Location:** Lines 1318–1330 (`cleanup_stale_sessions` — `strftime('%Y-%m-%dT%H:%M:%S+00:00', 'now', '-24 hours')` at line 1325)
+- **Description:** The `strftime` format string truncates to whole seconds. Sessions updated in the last second before the 24-hour cutoff will be deleted even though they're technically younger than 24 hours. The `updated_at` column stores RFC3339 with microseconds (`to_rfc3339()`), so the comparison is microsecond-precision on the left side but second-precision on the right.
+- **Impact:** Negligible — at most 1 second of error in the cleanup window. Sessions are only deleted if they're 24h old, so a 1-second error is immaterial.
+- **Recommendation:** For correctness, use `strftime('%Y-%m-%dT%H:%M:%f+00:00', 'now', '-24 hours')` (millisecond precision) or compare against a stored `DateTime<Utc>` in Rust rather than in SQL. Low priority.
+
+#### DESIGN-005: No DB indexes on `updated_at` or `state`
+- **Severity:** Low
+- **Location:** `CREATE TABLE sessions` (lines 351–365)
+- **Description:** The `sessions` table has no indexes other than the primary key on `id`. The `cleanup_stale_sessions` query filters on `updated_at`, and `recover_crashed_sessions` filters on `state`. Both queries are currently fast because the table is small (single-session-at-a-time means at most a few rows), but if the cleanup window is ever extended or if multiple sessions accumulate, these queries will degrade.
+- **Impact:** None today (table size is bounded by the 24h cleanup). Future-proofing concern.
+- **Recommendation:** Add indexes:
+  ```sql
+  CREATE INDEX IF NOT EXISTS idx_sessions_updated_at ON sessions(updated_at);
+  CREATE INDEX IF NOT EXISTS idx_sessions_state ON sessions(state);
+  ```
+  Low priority — only worth doing if the table is expected to grow beyond a few hundred rows.
+
+#### DESIGN-006: No method to list all sessions (history)
+- **Severity:** Low
+- **Location:** Public API surface
+- **Description:** `SessionManager` exposes `load_session(id)`, `current_status()`, and `status(id)`, but no `list_sessions()` method. There's no way to build an admin UI showing session history without direct DB access.
+- **Impact:** Limits future admin/observability features.
+- **Recommendation:** For v2, add `list_sessions(limit: u32) -> Result<Vec<MediaSession>, SessionError>` that returns the most recent N sessions. Useful for a debug dashboard.
+
+#### DESIGN-007: `SessionEvent::Buffering { percent: u8 }` always sends 0 from `try_transition`
+- **Severity:** Low
+- **Location:** Line 462 (`try_transition` — `PlayerState::Buffering => SessionEvent::Buffering { id: session_id, percent: 0 }`)
+- **Description:** When transitioning to `Buffering` via `try_transition`, the event is hardcoded to `percent: 0`. The actual buffering percentage comes later from the playback engine's bus watch (in `lib.rs` of the playback crate), which calls `broadcast_event(SessionEvent::Buffering { percent, ... })` directly. This is correct but means the initial `Buffering` event from `try_transition` is always 0%, then a subsequent event from the bus watch updates it.
+- **Impact:** Minor — clients see a 0% buffering event followed by the real percentage. Acceptable for v1.
+- **Recommendation:** Document that the initial `Buffering` event is always 0% and that subsequent events come from the playback engine. Or, don't broadcast a `Buffering` event from `try_transition` at all — let the playback engine be the sole source of buffering progress.
 
 ### Missing Tests
 
-#### TEST-001: No test for `ensure_running` with a real or mock Tor
+#### TEST-001: No test for the CDN 403 retry logic in `load()`
+- **Severity:** High
+- **Description:** The most complex code path in the file — the retry loop at lines 795–925 — has no test coverage. The loop handles `is_cdn_retryable_error`, `invalidate_cache`, `re_resolve`, and the `used_tor` flag flipping between attempts. None of this is tested.
+- **Impact:** A regression in the retry logic (e.g. wrong retry count, wrong isolation username after re-resolve, infinite loop on certain errors) would not be caught by CI. This is the file's highest-risk untested code.
+- **Recommendation:** Add a `MockPlayback` variant that fails the first N `play()` calls with a "CDN IP mismatch" error and succeeds on the Nth. Verify:
+  - `resolver.invalidate_cache()` is called between attempts.
+  - `re_resolve()` is called and the new URL is used on retry.
+  - The retry count matches `max_retries` (2).
+  - After exhaustion, the session transitions to `Error` and `active_session_id` is cleared.
+  - When `used_tor` flips to `false` after re-resolve, the retry uses empty `socks_addr` and `isolation_username`.
+
+#### TEST-002: No test for `is_cdn_retryable_error`
 - **Severity:** Medium
-- **Description:** `ensure_running()` is the critical startup path, but there's no test for it. The tests only cover `socks5_handshake` and `health_check` failing without Tor (which tests the error path, not the success path).
-- **Impact:** A regression in `ensure_running` (e.g., wrong Tor arguments, missing `IsolateSOCKSAuth`) would not be caught by tests.
-- **Recommendation:** Add integration tests in `src/tor/tests/integration_tor.rs` that spawn a real Tor instance (or a mock SOCKS5 server) and verify `ensure_running` succeeds and the SOCKS port becomes reachable.
+- **Description:** The helper function `is_cdn_retryable_error` (lines 60–65) matches on three string patterns: `"CDN IP mismatch"`, `"re-resolve needed"`, and `"Forbidden"`. It's not tested.
+- **Impact:** A change to the matching patterns (e.g. narrowing "Forbidden" to a more specific pattern) could silently break the retry logic.
+- **Recommendation:** Add a unit test:
+  ```rust
+  #[test]
+  fn test_is_cdn_retryable_error() {
+      assert!(is_cdn_retryable_error(&"CDN IP mismatch: 1.2.3.4 vs 5.6.7.8".into()));
+      assert!(is_cdn_retryable_error(&"re-resolve needed".into()));
+      assert!(is_cdn_retryable_error(&"HTTP 403 Forbidden".into()));
+      assert!(!is_cdn_retryable_error(&"network timeout".into()));
+      assert!(!is_cdn_retryable_error(&"pipeline error".into()));
+  }
+  ```
 
-#### TEST-002: No test for `new_circuit` (NEWNYM)
-- **Severity:** Low
-- **Description:** The control-port `NEWNYM` signaling is not tested.
-- **Impact:** A bug in the control-port protocol handling would not be caught.
-- **Recommendation:** Add a test with a mock control port (TCP server that speaks the Tor control protocol) and verify `new_circuit` sends the correct commands.
+#### TEST-003: No test for `set_audio_device` / `set_audio_sink` / `audio_device`
+- **Severity:** Medium
+- **Description:** The audio device/sink methods (lines 601, 613, 628) delegate to the playback subsystem but have no tests verifying that the delegation works or that errors are mapped correctly.
+- **Impact:** A regression in the delegation (e.g. wrong error mapping, missing `await`) wouldn't be caught.
+- **Recommendation:** Add tests that:
+  - `set_audio_device("plughw:1,0")` calls `MockPlayback::set_audio_device` with the same value.
+  - `set_audio_sink("pulsesink")` calls `MockPlayback::set_audio_sink` with the same value.
+  - `audio_device()` returns the value from `MockPlayback::audio_device`.
+  - When no playback subsystem is configured, all three return `SessionError::Subsystem`.
 
-#### TEST-003: No test for `query_circuit_health` parsing
+#### TEST-004: No test for `broadcast_event` (public method)
 - **Severity:** Low
-- **Description:** The circuit-status parser (lines 960–1020) is not tested. It parses multi-line Tor control-port output and counts circuits by state.
-- **Impact:** A parsing bug (e.g., miscounting `CLOSED` vs `FAILED`) would not be caught.
-- **Recommendation:** Add tests with sample circuit-status output and verify the counts. This can be done by extracting the parser into a pure function and testing it directly.
+- **Description:** The public `broadcast_event` method (line 664) allows external code (e.g. the playback event listener in `main.rs`) to broadcast events through the session's channel. It's not tested.
+- **Impact:** Low — the method is a one-liner wrapper around `event_tx.send()`. But a test would document the intended use.
+- **Recommendation:** Add a test that calls `mgr.broadcast_event(SessionEvent::AudioDeviceError { id, message: "test".into() })` and verifies a subscriber receives it.
 
-#### TEST-004: No test for `Drop` behavior
+#### TEST-005: No test for the `pause()` / `resume()` rollback path
 - **Severity:** Low
-- **Description:** The `Drop` implementation's orphan-prevention logic is not tested.
-- **Recommendation:** Add a test that spawns a Tor process, drops the `TorManager` without calling `shutdown()`, and verifies the process is killed.
+- **Description:** The inconsistency described in BUG-002 (subsystem paused but DB transition fails) is not tested. A test that forces `try_transition` to fail after `playback.pause()` succeeds would document the current (broken) behavior and catch a future fix.
+- **Impact:** Low — the behavior is a known bug (BUG-002). But a regression test would ensure the fix doesn't break.
+- **Recommendation:** Add a test after fixing BUG-002 that verifies the rollback path.
+
+#### TEST-006: No test for `load()` without a display subsystem
+- **Severity:** Low
+- **Description:** `load()` has a `if let Some(ref display) = self.display` guard around `display.acquire()`. The "no display" path (headless mode) is not tested.
+- **Impact:** A regression that requires a display (e.g. removing the `if let Some`) wouldn't be caught in headless CI.
+- **Recommendation:** Add a test that constructs a `SessionManager` with resolver + playback + tor but no display, and verifies `load()` succeeds.
 
 ## Positive Observations
 
-1. **Correct use of `socks5h://`** — the `h` suffix ensures DNS resolution happens through Tor, preventing DNS leaks. This is the most critical privacy property and it's correct.
-2. **SHA-256 hostname hashing** — `stream_isolation_id` correctly uses SHA-256 (first 16 hex chars) for deterministic, collision-resistant per-site usernames. Tests verify determinism and distinctness.
-3. **Cookie-based control-port auth** — uses `CookieAuthentication 1` rather than password auth, which is the recommended Tor security practice.
-4. **Graceful shutdown** — SIGTERM first, 5-second wait, then SIGKILL. The `Drop` impl also attempts cleanup as a safety net.
-5. **Auto-restart** — the monitor task detects crashes and restarts Tor automatically, which is important for an always-on appliance.
-6. **Comprehensive error types** — `TorError` has specific variants for each failure mode (BinaryNotFound, ProcessExited, SocksTimeout, etc.) with good error messages.
-7. **Timeout on all control-port operations** — `AUTHENTICATE`, `SIGNAL NEWNYM`, and `GETINFO` all have 5-second timeouts, preventing indefinite hangs.
-8. **`SafeLogging` not needed in code** — the cookie is read but never logged; the `tracing::debug!` calls log the isolation username (which is a hash, not sensitive) but never the cookie itself.
-9. **Builder pattern** — `with_control_port`, `with_cookie_path`, `with_auto_restart` make configuration clean and testable.
-10. **29 unit tests** — good coverage of the pure functions (isolation ID, URL parsing, address parsing, builder methods, error variants).
+1. **State machine is rigorously defined** — the `can_transition_to` table is exhaustive, the `transition()` method returns a typed `InvalidTransition` error, and 30+ tests cover every valid and invalid transition. This is exemplary for a Rust state machine.
+
+2. **Dual-channel event distribution** — using `broadcast` for streaming (WebSocket) and `watch` for polling (HTTP `/api/status`) is the right design. Each channel type matches its consumer's access pattern, and the watch channel's "latest value only" semantics avoid unbounded buffering for pollers.
+
+3. **Crash recovery on startup** — `recover_crashed_sessions` correctly resets non-idle sessions to Idle, recognizing that the playback pipeline is gone after a process restart. The test using a file-based DB (`test_crash_recovery_recover_crashed_sessions`) verifies this end-to-end across manager instances.
+
+4. **CDN 403 retry logic** — the inline retry loop in `load()` handles a subtle case correctly: after re-resolve, the URL is bound to the resolver's exit IP, so playback must use the *same* base isolation circuit (not a retry-specific circuit). The code comment explains this clearly. The logic is correct, even though it lacks tests (TEST-001).
+
+5. **Subsystem trait abstraction** — `ResolverTrait`, `PlaybackTrait`, `DisplayTrait`, `TorTrait` cleanly invert dependencies. The session layer has no compile-time dependency on GStreamer, DRM, or Tor concrete types. This makes the session layer testable in isolation (as the comprehensive mock-based test suite demonstrates).
+
+6. **Parameterized SQL everywhere** — no string concatenation in any query. SQL injection surface is zero.
+
+7. **WAL journal mode** — explicitly enabled for better concurrent read performance, with a test (`test_wal_mode_enabled`) verifying the PRAGMA succeeds.
+
+8. **`active_session_id` reservation pattern** — the check-and-set is atomic within a single Mutex guard, preventing the race where two concurrent `load()` calls both pass the "no active session" check.
+
+9. **Comprehensive lifecycle tests** — the test suite covers load → pause → resume → seek → set_volume → stop, plus error paths (resolution failure, already-active rejection, no-active-session errors). The `test_full_lifecycle_load_pause_resume_stop` test is a good integration-style test.
+
+10. **`refresh_playback_position` after every state change** — ensures the DB stays roughly in sync with the actual playback position, even though the background position-update task is the primary source of position updates.
 
 ## Recommendations Summary
 
 | Priority | Finding | Effort |
 |----------|---------|--------|
-| Medium | SEC-001: Standardize SOCKS5 URL password format | S (30 min) |
-| Medium | SEC-003: Don't use check.tor-project.org for health checks | M (2–3 h) |
-| Medium | BUG-003: Fix Drop orphan risk with std::sync::Mutex or PID tracking | M (2–4 h) |
-| Medium | DESIGN-001: Deprecate NEWNYM in favor of per-site circuit rotation | M (3–4 h) |
-| Medium | TEST-001: Add integration tests for ensure_running | L (4–8 h) |
-| Low | SEC-002: Try multiple cookie paths | S (1 h) |
-| Low | SEC-004: Capture Tor stderr for debugging | S (1 h) |
-| Low | SEC-005: Prefer /usr/bin/tor over PATH | S (30 min) |
-| Low | BUG-001: Handle IPv6 addresses in parse_addr | S (1 h) |
-| Low | BUG-002: Remove redundant TCP connect in health_check | S (15 min) |
-| Low | BUG-004: Don't count CLOSED circuits as failed | S (30 min) |
-| Low | BUG-005: Unify is_healthy criteria | S (1 h) |
-| Low | DESIGN-002: Return JoinHandle from start_monitor | S (30 min) |
-| Low | DESIGN-003: Use No Auth for health check SOCKS5 | S (1 h) |
-| Low | DESIGN-004: Remove duplicate legacy tests | S (30 min) |
-| Low | TEST-002: Add NEWNYM test with mock control port | M (2–3 h) |
-| Low | TEST-003: Add circuit-status parser tests | S (1–2 h) |
-| Low | TEST-004: Add Drop behavior test | S (1 h) |
+| High | TEST-001: Add CDN 403 retry logic tests | M (3–4 h) |
+| Medium | BUG-001: Fix volume clamping range (255 → 100) | S (15 min) |
+| Medium | BUG-002: Roll back subsystem call if DB transition fails | M (2–3 h) |
+| Medium | BUG-003: Log `playback.stop()` errors during `stop()` | S (15 min) |
+| Medium | TEST-002: Add `is_cdn_retryable_error` unit test | S (15 min) |
+| Medium | TEST-003: Add audio device/sink delegation tests | S (1 h) |
+| Low | BUG-004: Add `Seeking → Paused` transition (eliminate spurious events) | S (30 min) |
+| Low | BUG-005: Make the 300ms display-acquire sleep conditional | S (1 h) |
+| Low | BUG-006: Document `active_session_id` in-memory invariant | S (5 min) |
+| Low | BUG-007: Drop DB guard before broadcasting in `try_transition` | S (15 min) |
+| Low | CONC-001: Document the brief reservation window in `load()` | S (5 min) |
+| Low | CONC-002: Cache latest session in `ArcSwap` for reads (v2) | M (2–3 h) |
+| Low | CONC-003: Remove redundant `Arc` on `active_session_id` | S (5 min) |
+| Low | SEC-001: Add URL length validation in `load()` | S (15 min) |
+| Low | DESIGN-001: Broadcast `Seeking` from `try_transition` | S (30 min) |
+| Low | DESIGN-002: Document startup-only constraint on `recover_crashed_sessions` | S (5 min) |
+| Low | DESIGN-003: Persist last-used volume across sessions (v2) | M (2 h) |
+| Low | DESIGN-004: Use millisecond precision in `cleanup_stale_sessions` | S (15 min) |
+| Low | DESIGN-005: Add indexes on `updated_at` and `state` | S (15 min) |
+| Low | DESIGN-006: Add `list_sessions()` for admin UI (v2) | S (1 h) |
+| Low | DESIGN-007: Document initial `Buffering` event is always 0% | S (5 min) |
+| Low | TEST-004: Add `broadcast_event` test | S (15 min) |
+| Low | TEST-005: Add rollback path test (after BUG-002 fix) | S (30 min) |
+| Low | TEST-006: Add `load()` without display subsystem test | S (30 min) |
