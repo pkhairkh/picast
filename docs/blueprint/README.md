@@ -32,7 +32,8 @@ documentation quality.
 | 18 | src/resolver/src/resolver_socks.rs | [review-18](review-18.md) |
 | 19 | src/resolver/src/cache.rs | [review-19](review-19.md) |
 | 20 | src/resolver/src/provider.rs | [review-20](review-20.md) |
-| 21 | src/v3d/src/lib.rs | [review-21](review-21.md) |
+| 21 | src/resolver/src/deobfuscation.rs | [review-21](review-21.md) |
+| 22 | src/v3d/src/lib.rs | [review-22](review-22.md) |
 
 ## Severity Legend
 
@@ -51,4 +52,4 @@ These reviews cover all 8 workspace crates:
 - bogdan-display (review-06)
 - bogdan-resolver (review-07, 08, 17, 18, 19, 20)
 - bogdan-server (review-10, 12)
-- bogdan-v3d (review-21)
+- bogdan-v3d (review-22)
