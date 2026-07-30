@@ -84,7 +84,7 @@ The protocols crate root. Re-exports `HttpApiServer`, `WebSocketServer`, `DlnaRe
 
 #### DESIGN-002: `run_dlna_sync` exported but not documented
 - **Severity:** Low
-- **Location:** Line 17 (`pub use dlna::{run_dlna_sync, DlnaRenderer}`)
+- **Location:** Line 16 (`pub use dlna::{run_dlna_sync, DlnaRenderer}`)
 - **Description:** `run_dlna_sync` is exported at the crate level but its purpose isn't documented in the crate root. It's the session-event sync function for DLNA.
 - **Impact:** Users of the crate don't know what `run_dlna_sync` does without reading the dlna module.
 - **Recommendation:** Add a brief doc comment in the crate root: `/// `run_dlna_sync` synchronizes DLNA state with the session manager.`
