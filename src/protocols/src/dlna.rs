@@ -51,6 +51,8 @@ pub struct DlnaRenderer {
     child: Arc<Mutex<Option<Child>>>,
     /// Whether auto-restart on crash is enabled.
     auto_restart: bool,
+    /// Port for gmediarender to listen on (default: 49152).
+    dlna_port: u16,
     /// Number of restart attempts since last successful start.
     restart_count: Arc<Mutex<u32>>,
 }
@@ -64,6 +66,7 @@ impl DlnaRenderer {
             socks_addr: socks_addr.to_owned(),
             child: Arc::new(Mutex::new(None)),
             auto_restart: true,
+            dlna_port: 49152,
             restart_count: Arc::new(Mutex::new(0)),
         }
     }
@@ -156,7 +159,7 @@ impl DlnaRenderer {
             .arg("--friendly-name")
             .arg(&self.friendly_name)
             .arg("--port")
-            .arg("49152")
+            .arg(self.dlna_port.to_string())
             .stdout(std::process::Stdio::null())
             .stderr(std::process::Stdio::piped())
             .spawn()
