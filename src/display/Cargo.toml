@@ -9,7 +9,7 @@ default = []
 hw = ["drm", "gbm"]
 
 [dependencies]
-drm = { version = "0.12", optional = true }
+drm = { version = "0.15", optional = true }
 gbm = { version = "0.18", default-features = false, features = ["drm-support"], optional = true }
 thiserror = { workspace = true }
 tracing = { workspace = true }
