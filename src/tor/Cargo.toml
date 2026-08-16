@@ -8,7 +8,7 @@ description = "Tor daemon lifecycle management and SOCKS5 proxy layer for boGDan
 tokio = { workspace = true, features = ["process", "net", "time", "rt", "macros", "io-util"] }
 thiserror = { workspace = true }
 tracing = { workspace = true }
-reqwest = { version = "0.12", features = ["socks", "rustls-tls"], default-features = false }
+reqwest = { version = "0.13", features = ["socks", "rustls-tls"], default-features = false }
 sha2 = { workspace = true }
 hex = { workspace = true }
 url = { workspace = true }
